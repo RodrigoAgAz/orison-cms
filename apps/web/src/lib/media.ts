@@ -16,6 +16,8 @@ type MediaMetadata = {
   durationMs?: number | null;
   width?: number | null;
   height?: number | null;
+  videoCodec?: string | null;
+  audioCodec?: string | null;
 };
 
 export async function commandExists(command: string) {
@@ -41,6 +43,7 @@ async function ffprobe(filePath: string) {
   return JSON.parse(stdout) as {
     streams?: Array<{
       codec_type?: string;
+      codec_name?: string;
       width?: number;
       height?: number;
     }>;
@@ -59,6 +62,7 @@ export async function extractMetadata(
 
   const result = await ffprobe(filePath);
   const videoStream = result.streams?.find((stream) => stream.codec_type === "video");
+  const audioStream = result.streams?.find((stream) => stream.codec_type === "audio");
 
   return {
     durationMs: result.format?.duration
@@ -66,6 +70,8 @@ export async function extractMetadata(
       : undefined,
     width: videoStream?.width,
     height: videoStream?.height,
+    videoCodec: videoStream?.codec_name,
+    audioCodec: audioStream?.codec_name,
   };
 }
 
@@ -206,4 +212,3 @@ export async function processAssetUpload(assetId: string, tempFilePath: string) 
     await rm(tempFilePath, { force: true });
   }
 }
-

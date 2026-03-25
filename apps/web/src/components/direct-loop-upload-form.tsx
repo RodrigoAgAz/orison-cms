@@ -110,13 +110,34 @@ export function DirectLoopUploadForm() {
       progress: 6,
     });
 
-    const result = await new Promise<{ ok: boolean; body: { error?: string; loopId?: string } }>(
+    const result = await new Promise<{
+      ok: boolean;
+      body: { error?: string; loopId?: string };
+    }>(
       (resolve) => {
         const request = new XMLHttpRequest();
         const params = new URLSearchParams({
           name: name.trim(),
           filename: selectedFile.name,
         });
+
+        const parseResponseBody = () => {
+          if (!request.responseText) {
+            return {};
+          }
+
+          try {
+            return JSON.parse(request.responseText) as { error?: string; loopId?: string };
+          } catch {
+            const responseText = request.responseText.trim();
+            return {
+              error:
+                request.status >= 500
+                  ? `The server returned an invalid ${request.status} response while processing the loop. Check Railway logs for the upstream error.`
+                  : responseText || `Upload failed with HTTP ${request.status}.`,
+            };
+          }
+        };
 
         request.open("POST", `/api/loops/direct-upload?${params.toString()}`);
         request.setRequestHeader("Content-Type", selectedFile.type || "video/mp4");
@@ -147,11 +168,19 @@ export function DirectLoopUploadForm() {
           });
         };
 
+        request.onabort = () => {
+          stopProgressTimer();
+          resolve({
+            ok: false,
+            body: {
+              error: "Upload canceled before the loop finished publishing.",
+            },
+          });
+        };
+
         request.onload = () => {
           stopProgressTimer();
-          const body = request.responseText
-            ? (JSON.parse(request.responseText) as { error?: string; loopId?: string })
-            : {};
+          const body = parseResponseBody();
 
           resolve({
             ok: request.status >= 200 && request.status < 300,
@@ -257,7 +286,7 @@ export function DirectLoopUploadForm() {
           <span className="muted">
             {uploadState.phase === "uploading"
               ? "The MP4 is being streamed to the CMS."
-              : "The uploaded file is being normalized, stored, and published to devices."}
+              : "The uploaded file is being checked, normalized if needed, stored, and published to devices."}
           </span>
         </div>
       ) : null}

@@ -10,11 +10,11 @@ import { prisma, type Asset, type Loop, type Slot, type SlotContent } from "@ori
 import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
+  checksumJson,
   loopDurationMs,
   slotDurationMs,
   type SlotContentInput,
 } from "@orison/shared";
-import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
 import { commandExists, extractMetadata } from "./media";
@@ -354,7 +354,7 @@ async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string)
     "-c:v",
     "libx264",
     "-preset",
-    "medium",
+    "veryfast",
     "-crf",
     "23",
     "-profile:v",
@@ -371,6 +371,27 @@ async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string)
     "+faststart",
     outputPath,
   ]);
+}
+
+async function remuxCompiledLoopVideo(inputPath: string, outputPath: string) {
+  await runFfmpeg([
+    "-i",
+    inputPath,
+    "-c",
+    "copy",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ]);
+}
+
+function isDirectLoopAlreadyStandard(metadata: Awaited<ReturnType<typeof extractMetadata>>) {
+  return (
+    metadata.width === 1280 &&
+    metadata.height === 800 &&
+    metadata.videoCodec === "h264" &&
+    metadata.audioCodec === "aac"
+  );
 }
 
 async function compileSingleFileLoop(loop: LoopWithContents) {
@@ -548,14 +569,19 @@ export async function publishDirectLoopUpload({
 
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
   const outputPath = path.join(tempDir, "loop.mp4");
+  let compiledSourcePath = outputPath;
   let loop: Loop | null = null;
   let manifestKey: string | null = null;
   let compiledVideoKey: string | null = null;
 
   try {
-    await transcodeCompiledLoopVideo(tempFilePath, outputPath);
+    if (isDirectLoopAlreadyStandard(sourceMetadata)) {
+      await remuxCompiledLoopVideo(tempFilePath, outputPath);
+    } else {
+      await transcodeCompiledLoopVideo(tempFilePath, outputPath);
+    }
 
-    const outputMetadata = await extractMetadata(outputPath);
+    const outputMetadata = await extractMetadata(compiledSourcePath);
     const durationMs = outputMetadata.durationMs ?? sourceMetadata.durationMs;
     if (!durationMs) {
       throw new Error("Unable to determine transcoded loop duration");
@@ -565,7 +591,7 @@ export async function publishDirectLoopUpload({
       throw new Error("Direct loop uploads must be 10 minutes or shorter");
     }
 
-    const outputStats = await stat(outputPath);
+    const outputStats = await stat(compiledSourcePath);
     const publishedAt = new Date();
 
     loop = await prisma.loop.create({
@@ -579,7 +605,7 @@ export async function publishDirectLoopUpload({
     compiledVideoKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}.mp4`;
 
     const compiledVideoUrl = getPublicUrl(compiledVideoKey);
-    const compiledVideoChecksum = await checksumFilePath(outputPath);
+    const compiledVideoChecksum = await checksumFilePath(compiledSourcePath);
     const manifest = {
       version: "1.0",
       loopId: loop.id,
@@ -604,7 +630,7 @@ export async function publishDirectLoopUpload({
     });
     await putObjectFromFile({
       key: compiledVideoKey,
-      filePath: outputPath,
+      filePath: compiledSourcePath,
       contentType: "video/mp4",
     });
 
