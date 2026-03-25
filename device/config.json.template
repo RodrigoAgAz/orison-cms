@@ -1,0 +1,25 @@
+{
+  "device": {
+    "serialNumber": "ORISON-P1-001",
+    "apiBaseUrl": "https://cms.orisonscreens.com/api",
+    "apiToken": "replace-with-real-token",
+    "cdnBaseUrl": "https://cdn.orisonscreens.com"
+  },
+  "sync": {
+    "checkIntervalSeconds": 1800,
+    "maxDownloadRetries": 3,
+    "downloadTimeoutSeconds": 300,
+    "maxBandwidthBytesPerSec": 2000000
+  },
+  "playback": {
+    "loopContinuously": true,
+    "screenResolution": "1280x800",
+    "fallbackContentPath": "/opt/orison/content/fallback/orison_fallback.mp4"
+  },
+  "health": {
+    "heartbeatIntervalSeconds": 300,
+    "logUploadIntervalSeconds": 3600,
+    "maxLogRetentionDays": 30
+  }
+}
+

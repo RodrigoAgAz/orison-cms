@@ -1,0 +1,16 @@
+[Unit]
+Description=Orison Screens Content Sync Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orison
+WorkingDirectory=/opt/orison
+ExecStart=/usr/bin/python3 /opt/orison/sync_agent.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+

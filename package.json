@@ -1,0 +1,21 @@
+{
+  "name": "orison-cms",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "npm@10.9.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @orison/web --",
+    "dev:web": "npm run dev --workspace @orison/web --",
+    "dev:worker": "npm run dev --workspace @orison/worker --",
+    "build": "npm run build --workspace @orison/web && npm run build --workspace @orison/worker",
+    "lint": "npm run lint --workspace @orison/web && npm run lint --workspace @orison/worker",
+    "typecheck": "npm run typecheck --workspace @orison/shared && npm run typecheck --workspace @orison/db && npm run typecheck --workspace @orison/web && npm run typecheck --workspace @orison/worker",
+    "db:generate": "npm run prisma:generate --workspace @orison/db",
+    "db:push": "npm run prisma:push --workspace @orison/db",
+    "db:seed": "npm run prisma:seed --workspace @orison/db"
+  }
+}

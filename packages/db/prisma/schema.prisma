@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(EDITOR)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+enum Role {
+  ADMIN
+  EDITOR
+}
+
+model Asset {
+  id             String           @id @default(cuid())
+  filename       String
+  s3Key          String           @unique
+  mimeType       String
+  durationMs     Int?
+  width          Int?
+  height         Int?
+  fileSize       Int
+  checksum       String?
+  thumbnailKey   String?
+  category       AssetCategory
+  status         AssetStatus      @default(PROCESSING)
+  metadata       Json?
+  errorMessage   String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  slotPlacements SlotContent[]
+}
+
+enum AssetCategory {
+  ADVERTISEMENT
+  FILLER_WEATHER
+  FILLER_NEWS
+  FILLER_BRANDED
+  FILLER_OTHER
+}
+
+enum AssetStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+model Loop {
+  id               String      @id @default(cuid())
+  name             String
+  status           LoopStatus  @default(DRAFT)
+  version          Int         @default(1)
+  checksum         String?
+  slots            Slot[]
+  publishedAt      DateTime?
+  publishedBy      String?
+  manifestUrl      String?
+  manifestKey      String?
+  compiledVideoUrl String?
+  compiledVideoKey String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+}
+
+enum LoopStatus {
+  DRAFT
+  REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+model Slot {
+  id        String        @id @default(cuid())
+  loopId    String
+  loop      Loop          @relation(fields: [loopId], references: [id], onDelete: Cascade)
+  position  Int
+  contents  SlotContent[]
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([loopId, position])
+}
+
+model SlotContent {
+  id          String          @id @default(cuid())
+  slotId       String
+  slot         Slot            @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  assetId      String
+  asset        Asset           @relation(fields: [assetId], references: [id])
+  orderInSlot  Int
+  startTimeMs  Int
+  durationMs   Int
+  contentType  SlotContentType
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@unique([slotId, orderInSlot])
+}
+
+enum SlotContentType {
+  ADVERTISEMENT
+  FILLER
+}
+
+model Device {
+  id               String            @id @default(cuid())
+  serialNumber     String            @unique
+  cabLicenseNumber String?
+  driverName       String?
+  hpTaxiCabId      String?
+  isActive         Boolean           @default(true)
+  currentLoopId    String?
+  lastSyncAt       DateTime?
+  lastHeartbeatAt  DateTime?
+  ipAddress        String?
+  firmwareVersion  String?
+  storageFreeMb    Int?
+  notes            String?
+  apiTokenHash     String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  playbackLogs     PlaybackLog[]
+  heartbeats       DeviceHeartbeat[]
+}
+
+model DeviceHeartbeat {
+  id                String    @id @default(cuid())
+  deviceId          String
+  device            Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  ipAddress         String?
+  firmwareVersion   String?
+  storageFreeMb     Int?
+  currentLoopId     String?
+  cpuTemp           Float?
+  uptimeSeconds     Int?
+  memoryUsedPercent Float?
+  playerStatus      String?
+  networkType       String?
+  signalStrength    Int?
+  receivedAt        DateTime  @default(now())
+
+  @@index([deviceId, receivedAt])
+}
+
+model PlaybackLog {
+  id            String          @id @default(cuid())
+  deviceId       String
+  device         Device          @relation(fields: [deviceId], references: [id])
+  loopId         String
+  slotPosition   Int
+  contentType    SlotContentType
+  assetId        String?
+  playedAt       DateTime
+  completedFull  Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+
+  @@index([deviceId, playedAt])
+  @@index([loopId, playedAt])
+}
+
+model ActivityEvent {
+  id        String            @id @default(cuid())
+  type      ActivityEventType
+  message   String
+  metadata  Json?
+  createdAt DateTime          @default(now())
+
+  @@index([createdAt])
+}
+
+enum ActivityEventType {
+  LOOP_CREATED
+  LOOP_PUBLISHED
+  ASSET_UPLOADED
+  ASSET_READY
+  DEVICE_REGISTERED
+  DEVICE_SYNCED
+  DEVICE_OFFLINE
+  SYNC_FAILED
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+

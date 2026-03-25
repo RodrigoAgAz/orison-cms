@@ -1,0 +1,70 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://orison:${DB_PASSWORD:-password}@db:5432/orison_cms
+      REDIS_URL: redis://redis:6379
+      S3_BUCKET: ${S3_BUCKET:-orison-content}
+      S3_REGION: ${S3_REGION:-eu-west-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      CDN_BASE_URL: ${CDN_BASE_URL:-http://localhost:3000/api/storage}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-development-session-secret}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      APP_SESSION_COOKIE: ${APP_SESSION_COOKIE:-orison_session}
+      DEVICE_SHARED_TOKEN: ${DEVICE_SHARED_TOKEN:-replace-with-device-shared-secret}
+      INLINE_MEDIA_JOBS: ${INLINE_MEDIA_JOBS:-true}
+    depends_on:
+      - db
+      - redis
+    restart: always
+    volumes:
+      - app_tmp:/app/tmp
+
+  worker:
+    build: .
+    command: ["npm", "run", "dev:worker"]
+    environment:
+      DATABASE_URL: postgresql://orison:${DB_PASSWORD:-password}@db:5432/orison_cms
+      REDIS_URL: redis://redis:6379
+      S3_BUCKET: ${S3_BUCKET:-orison-content}
+      S3_REGION: ${S3_REGION:-eu-west-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      CDN_BASE_URL: ${CDN_BASE_URL:-http://localhost:3000/api/storage}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-development-session-secret}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      DEVICE_SHARED_TOKEN: ${DEVICE_SHARED_TOKEN:-replace-with-device-shared-secret}
+      INLINE_MEDIA_JOBS: ${INLINE_MEDIA_JOBS:-false}
+    depends_on:
+      - db
+      - redis
+    restart: always
+    volumes:
+      - app_tmp:/app/tmp
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orison_cms
+      POSTGRES_USER: orison
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+    ports:
+      - "5432:5432"
+    restart: always
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: always
+
+volumes:
+  app_tmp:
+  pgdata:

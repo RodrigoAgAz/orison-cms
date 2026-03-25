@@ -1,0 +1,36 @@
+{
+  "name": "@orison/web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node --env-file=../../.env ../../node_modules/next/dist/bin/next dev --",
+    "build": "node --env-file=../../.env ../../node_modules/next/dist/bin/next build",
+    "start": "node --env-file=../../.env ../../node_modules/next/dist/bin/next start --",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.654.0",
+    "@aws-sdk/lib-storage": "^3.654.0",
+    "@aws-sdk/s3-request-presigner": "^3.654.0",
+    "@orison/db": "1.0.0",
+    "@orison/shared": "1.0.0",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.16.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "ioredis": "^5.4.1",
+    "jose": "^5.9.3",
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "recharts": "^3.8.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.6.2"
+  }
+}
