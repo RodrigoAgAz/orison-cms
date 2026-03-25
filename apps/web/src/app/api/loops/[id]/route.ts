@@ -66,8 +66,8 @@ export async function DELETE(_: Request, { params }: Props) {
       throw new ApiError("Loop not found", 404);
     }
 
-    if (loop.status !== "DRAFT") {
-      throw new ApiError("Only draft loops can be deleted", 409);
+    if (loop.status === "PUBLISHED") {
+      throw new ApiError("Pause this loop before deleting it", 409);
     }
 
     await prisma.loop.delete({

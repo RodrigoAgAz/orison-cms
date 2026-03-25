@@ -182,6 +182,7 @@ export function LoopBuilder({
   const [previewScope, setPreviewScope] = useState<"slot" | "loop">("slot");
   const [previewIndex, setPreviewIndex] = useState(0);
   const [deleting, setDeleting] = useState(false);
+  const [archiving, setArchiving] = useState(false);
 
   const selectedSlot =
     slots.find((slot) => slot.position === selectedPosition) ??
@@ -476,7 +477,7 @@ export function LoopBuilder({
   }
 
   async function deleteLoop() {
-    const confirmed = window.confirm(`Delete draft loop "${name}"?`);
+    const confirmed = window.confirm(`Delete loop "${name}"?`);
     if (!confirmed) {
       return;
     }
@@ -512,6 +513,50 @@ export function LoopBuilder({
       });
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function archiveLoop() {
+    const confirmed = window.confirm(`Pause published loop "${name}"?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setArchiving(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/loops/${loop.id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status: "ARCHIVED" }),
+      });
+
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? "Unable to pause loop");
+      }
+
+      setStatus("ARCHIVED");
+      toast({
+        title: "Loop paused",
+        message: `${name} was archived and is no longer active.`,
+        tone: "success",
+      });
+      router.refresh();
+    } catch (archiveError) {
+      const message =
+        archiveError instanceof Error ? archiveError.message : "Unable to pause loop";
+      setError(message);
+      toast({
+        title: "Pause failed",
+        message,
+        tone: "error",
+      });
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -562,19 +607,29 @@ export function LoopBuilder({
             </div>
           </div>
           <div className="button-row">
-            {status === "DRAFT" ? (
+            {status === "PUBLISHED" ? (
+              <button
+                className="button button-secondary"
+                disabled={saving || publishing || deleting || archiving}
+                onClick={() => void archiveLoop()}
+                type="button"
+              >
+                {archiving ? "Pausing..." : "Pause"}
+              </button>
+            ) : null}
+            {status !== "PUBLISHED" ? (
               <button
                 className="button button-danger"
-                disabled={saving || publishing || deleting}
+                disabled={saving || publishing || deleting || archiving}
                 onClick={() => void deleteLoop()}
                 type="button"
               >
-                {deleting ? "Deleting..." : "Delete Draft"}
+                {deleting ? "Deleting..." : "Delete"}
               </button>
             ) : null}
             <button
               className="button button-secondary"
-              disabled={saving || publishing || (!dirtyName && dirtySlots.length === 0)}
+              disabled={saving || publishing || archiving || (!dirtyName && dirtySlots.length === 0)}
               onClick={() => void persistChanges()}
               type="button"
             >
@@ -589,7 +644,7 @@ export function LoopBuilder({
             </button>
             <button
               className="button button-primary"
-              disabled={saving || publishing}
+              disabled={saving || publishing || archiving}
               onClick={() => void publishLoop()}
               type="button"
             >
