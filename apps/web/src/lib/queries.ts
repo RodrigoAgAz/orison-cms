@@ -87,6 +87,26 @@ export async function getDashboardData() {
   }
 }
 
+export async function getCurrentPublishedLoop() {
+  try {
+    return await prisma.loop.findFirst({
+      where: { status: "PUBLISHED" },
+      orderBy: { publishedAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        compiledVideoUrl: true,
+        publishedAt: true,
+        checksum: true,
+        updatedAt: true,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
 export async function getLoopListData() {
   try {
     return await prisma.loop.findMany({

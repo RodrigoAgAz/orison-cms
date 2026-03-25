@@ -3,6 +3,7 @@ import { jwtVerify } from "jose";
 
 const publicPrefixes = [
   "/login",
+  "/device-preview",
   "/api/auth/login",
   "/api/devices/heartbeat",
   "/api/devices/manifest",
@@ -58,4 +59,3 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: ["/((?!.*\\..*).*)", "/api/:path*"],
 };
-
