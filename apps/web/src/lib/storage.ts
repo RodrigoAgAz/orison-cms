@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 
@@ -109,6 +109,7 @@ export async function putObjectFromFile(options: {
   contentType: string;
 }) {
   requireObjectStorage();
+  const fileStats = await stat(options.filePath);
 
   if (s3Client && env.s3Bucket) {
     await s3Client.send(
@@ -117,6 +118,7 @@ export async function putObjectFromFile(options: {
         Key: options.key,
         Body: createReadStream(options.filePath),
         ContentType: options.contentType,
+        ContentLength: fileStats.size,
       }),
     );
     return;
