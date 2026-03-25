@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 export const manifestContentSchema = z.object({
@@ -13,6 +15,9 @@ export const manifestContentSchema = z.object({
 
 export const manifestSlotSchema = z.object({
   position: z.number().int().min(0).max(9),
+  staticImageUrl: z.string().url().nullable().optional(),
+  staticImageChecksum: z.string().nullable().optional(),
+  advertisementVideoUrl: z.string().url().nullable().optional(),
   contents: z.array(manifestContentSchema),
 });
 
@@ -30,3 +35,8 @@ export const compiledLoopManifestSchema = z.object({
 });
 
 export type CompiledLoopManifest = z.infer<typeof compiledLoopManifestSchema>;
+
+export function checksumJson(payload: unknown) {
+  const body = JSON.stringify(payload);
+  return `sha256:${createHash("sha256").update(body).digest("hex")}`;
+}

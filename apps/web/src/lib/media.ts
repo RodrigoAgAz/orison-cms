@@ -107,6 +107,20 @@ async function transcodeVideo(inputPath: string, outputPath: string) {
   ]);
 }
 
+async function normalizeImage(inputPath: string, outputPath: string) {
+  await runFfmpeg([
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=1280:800:force_original_aspect_ratio=decrease,pad=1280:800:(ow-iw)/2:(oh-ih)/2:black",
+    "-q:v",
+    "2",
+    outputPath,
+  ]);
+}
+
 async function generateThumbnail(inputPath: string, outputPath: string) {
   await runFfmpeg([
     "-ss",
@@ -138,7 +152,7 @@ export async function processAssetUpload(assetId: string, tempFilePath: string) 
   const ffmpegAvailable = await commandExists("ffmpeg");
   const processedPath = path.join(
     tempDir,
-    asset.mimeType.startsWith("video/") ? "asset.mp4" : path.basename(asset.filename),
+    asset.mimeType.startsWith("video/") ? "asset.mp4" : "asset.jpg",
   );
   const thumbnailPath = path.join(tempDir, "thumbnail.jpg");
 
@@ -151,6 +165,10 @@ export async function processAssetUpload(assetId: string, tempFilePath: string) 
       await generateThumbnail(tempFilePath, thumbnailPath);
       outputPath = processedPath;
       outputMimeType = "video/mp4";
+    } else if (asset.mimeType.startsWith("image/") && ffmpegAvailable) {
+      await normalizeImage(tempFilePath, processedPath);
+      outputPath = processedPath;
+      outputMimeType = "image/jpeg";
     }
 
     const metadata = await extractMetadata(outputPath);

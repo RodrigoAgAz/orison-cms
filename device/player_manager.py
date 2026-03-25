@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import socket
 import subprocess
+import sys
+import termios
+import threading
 import time
+import tty
 from pathlib import Path
 from typing import Any
 
 from common import (
     CURRENT_DIR,
+    DEFAULT_STATIC_IMAGE_PATH,
     PLAYER_COMMAND_PATH,
     PLAYER_STATE_PATH,
     PLAYBACK_LOG_PATH,
@@ -24,12 +30,16 @@ from common import (
     load_config,
     read_json,
     setup_logger,
+    slot_static_path,
     utc_now_iso,
 )
 
 
 MPV_SOCKET_PATH = "/tmp/mpv-socket"
 LOAD_CONFIRMATION_TIMEOUT_SECONDS = 15
+BUTTON_PIN = 17
+VIDEO_MODE = "VIDEO_MODE"
+SILENT_MODE = "SILENT_MODE"
 
 
 class PlayerManager:
@@ -41,6 +51,10 @@ class PlayerManager:
         self.next_event_index = 0
         self.last_position_ms = 0.0
         self.consecutive_failures = 0
+        self.mode = VIDEO_MODE
+        self.loop_started_monotonic = time.monotonic()
+        self.last_silent_slot_index: int | None = None
+        self.gpio = None
 
     def run(self) -> None:
         ensure_directories()
@@ -49,6 +63,7 @@ class PlayerManager:
 
         self.reload_manifest_schedule()
         self.start_player(current_loop_file())
+        self.start_input_listeners()
 
         while True:
             try:
@@ -57,14 +72,68 @@ class PlayerManager:
                     self.consecutive_failures += 1
                     if self.consecutive_failures >= 10:
                         self.request_reboot()
-                    self.start_player(current_loop_file())
+                    self.restart_for_current_mode()
 
                 self.handle_commands()
                 self.poll_playback()
+                if self.mode == SILENT_MODE:
+                    self.sync_silent_mode_display()
                 time.sleep(1)
             except Exception as error:  # noqa: BLE001
                 self.logger.exception("player loop error: %s", error)
-                time.sleep(5)
+                time.sleep(2)
+
+    def start_input_listeners(self) -> None:
+        self.configure_gpio_button()
+        self.configure_keyboard_listener()
+
+    def configure_gpio_button(self) -> None:
+        try:
+            import RPi.GPIO as gpio  # type: ignore[import-not-found]
+        except Exception:
+            self.logger.info("RPi.GPIO unavailable, GPIO silent-mode button disabled")
+            return
+
+        self.gpio = gpio
+        try:
+            gpio.setmode(gpio.BCM)
+            gpio.setup(BUTTON_PIN, gpio.IN, pull_up_down=gpio.PUD_UP)
+            gpio.add_event_detect(BUTTON_PIN, gpio.FALLING, callback=self.on_button_press, bouncetime=350)
+            self.logger.info("configured GPIO silent-mode button on BCM %s", BUTTON_PIN)
+        except Exception as error:  # noqa: BLE001
+            self.logger.warning("failed to configure GPIO button: %s", error)
+
+    def configure_keyboard_listener(self) -> None:
+        if not sys.stdin.isatty():
+            self.logger.info("stdin is not interactive, keyboard silent-mode toggle disabled")
+            return
+
+        thread = threading.Thread(target=self.keyboard_loop, daemon=True, name="keyboard-toggle")
+        thread.start()
+        self.logger.info("configured keyboard fallback for silent mode (spacebar)")
+
+    def keyboard_loop(self) -> None:
+        fd = sys.stdin.fileno()
+        previous_settings = termios.tcgetattr(fd)
+
+        try:
+            tty.setcbreak(fd)
+            while True:
+                readable, _, _ = select.select([sys.stdin], [], [], 1.0)
+                if not readable:
+                    continue
+                key = sys.stdin.read(1)
+                if key == " ":
+                    self.on_button_press()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous_settings)
+
+    def on_button_press(self, _channel: Any = None) -> None:
+        if self.mode == VIDEO_MODE:
+            self.switch_to_silent_mode()
+            return
+
+        self.switch_to_video_mode()
 
     def start_player(self, media_path: Path) -> None:
         if self.process and self.process.poll() is None:
@@ -80,7 +149,8 @@ class PlayerManager:
         command = [
             "mpv",
             "--fullscreen",
-            "--loop-playlist=inf",
+            "--loop-file=inf",
+            "--image-display-duration=inf",
             "--no-terminal",
             "--no-input-default-bindings",
             "--hwdec=auto",
@@ -98,9 +168,17 @@ class PlayerManager:
 
         self.logger.info("starting mpv with %s", media_path)
         self.process = subprocess.Popen(command)
-        self.last_position_ms = 0
-        self.next_event_index = 0
         self.consecutive_failures = 0
+
+    def restart_for_current_mode(self) -> None:
+        if self.mode == SILENT_MODE:
+            slot_index = self.current_slot_index()
+            self.start_player(self.static_path_for_slot(slot_index))
+            self.last_silent_slot_index = slot_index
+            return
+
+        self.start_player(current_loop_file())
+        self.seek_video_to_elapsed(self.elapsed_seconds())
 
     def handle_commands(self) -> None:
         command = read_json(PLAYER_COMMAND_PATH)
@@ -112,13 +190,16 @@ class PlayerManager:
             command_id = str(command.get("commandId") or command.get("ts") or utc_now_iso())
             loop_id = command.get("loopId")
             self.reload_manifest_schedule()
+            self.loop_started_monotonic = time.monotonic()
+            self.mode = VIDEO_MODE
+            self.last_silent_slot_index = None
             switched = self.load_file(current_loop_file())
-            self.last_position_ms = 0
-            self.next_event_index = 0
+            self.reset_schedule_cursor(0.0)
             self.write_state(
                 "playing" if switched else "error",
                 0.0,
                 loop_id,
+                mode=self.mode,
                 activeMediaPath=self.get_mpv_property("path"),
                 lastHandledAction=action,
                 lastHandledAt=utc_now_iso(),
@@ -186,11 +267,115 @@ class PlayerManager:
         self.logger.error("mpv did not confirm load for %s within %ss", media_path, LOAD_CONFIRMATION_TIMEOUT_SECONDS)
         return False
 
+    def current_loop_duration_seconds(self) -> float:
+        manifest = read_json(current_manifest_path(), {})
+        duration_ms = manifest.get("totalDurationMs")
+        try:
+            duration_seconds = float(duration_ms) / 1000.0
+            if duration_seconds > 0:
+                return duration_seconds
+        except (TypeError, ValueError):
+            pass
+        return 600.0
+
+    def elapsed_seconds(self) -> float:
+        duration_seconds = self.current_loop_duration_seconds()
+        return (time.monotonic() - self.loop_started_monotonic) % duration_seconds
+
+    def current_slot_index(self) -> int:
+        return int(self.elapsed_seconds() // 60) % 10
+
+    def static_path_for_slot(self, slot_index: int) -> Path:
+        path = slot_static_path(slot_index)
+        if path.exists():
+            return path
+        return DEFAULT_STATIC_IMAGE_PATH
+
+    def switch_to_silent_mode(self) -> None:
+        slot_index = self.current_slot_index()
+        static_path = self.static_path_for_slot(slot_index)
+        switched = self.load_file(static_path)
+        if not switched:
+            self.logger.error("failed to switch to silent mode for slot %s", slot_index)
+            return
+
+        self.mode = SILENT_MODE
+        self.last_silent_slot_index = slot_index
+        self.write_state(
+            "silent",
+            self.elapsed_seconds(),
+            read_json(current_manifest_path(), {}).get("loopId"),
+            mode=self.mode,
+            silentSlotIndex=slot_index,
+            activeMediaPath=str(static_path),
+        )
+
+    def switch_to_video_mode(self) -> None:
+        elapsed = self.elapsed_seconds()
+        switched = self.load_file(current_loop_file())
+        if not switched:
+            self.logger.error("failed to switch back to video mode")
+            return
+
+        self.seek_video_to_elapsed(elapsed)
+        self.mode = VIDEO_MODE
+        self.last_silent_slot_index = None
+        self.reset_schedule_cursor(elapsed * 1000)
+        self.write_state(
+            "playing",
+            elapsed,
+            read_json(current_manifest_path(), {}).get("loopId"),
+            mode=self.mode,
+            activeMediaPath=str(current_loop_file()),
+        )
+
+    def seek_video_to_elapsed(self, elapsed_seconds: float) -> None:
+        self.send_mpv_command({"command": ["seek", max(elapsed_seconds, 0.0), "absolute", "exact"]})
+        self.last_position_ms = elapsed_seconds * 1000
+
+    def sync_silent_mode_display(self) -> None:
+        slot_index = self.current_slot_index()
+        if slot_index == self.last_silent_slot_index:
+            self.write_state(
+                "silent",
+                self.elapsed_seconds(),
+                read_json(current_manifest_path(), {}).get("loopId"),
+                mode=self.mode,
+                silentSlotIndex=slot_index,
+                activeMediaPath=str(self.static_path_for_slot(slot_index)),
+            )
+            return
+
+        static_path = self.static_path_for_slot(slot_index)
+        if self.load_file(static_path):
+            self.last_silent_slot_index = slot_index
+            self.write_state(
+                "silent",
+                self.elapsed_seconds(),
+                read_json(current_manifest_path(), {}).get("loopId"),
+                mode=self.mode,
+                silentSlotIndex=slot_index,
+                activeMediaPath=str(static_path),
+            )
+
     def poll_playback(self) -> None:
+        manifest = read_json(current_manifest_path(), {})
+
+        if self.mode == SILENT_MODE:
+            self.write_state(
+                "silent",
+                self.elapsed_seconds(),
+                manifest.get("loopId"),
+                mode=self.mode,
+                silentSlotIndex=self.current_slot_index(),
+                activeMediaPath=str(self.static_path_for_slot(self.current_slot_index())),
+            )
+            return
+
         time_pos_seconds = self.get_time_pos_seconds()
         active_media_path = self.get_mpv_property("path")
         if time_pos_seconds is None:
-            self.write_state("error", 0.0, activeMediaPath=active_media_path)
+            self.write_state("error", 0.0, manifest.get("loopId"), mode=self.mode, activeMediaPath=active_media_path)
             return
 
         time_pos_ms = time_pos_seconds * 1000
@@ -205,13 +390,21 @@ class PlayerManager:
             self.log_event(event)
             self.next_event_index += 1
 
-        manifest = read_json(current_manifest_path(), {})
         self.write_state(
             "playing",
             time_pos_seconds,
             manifest.get("loopId"),
+            mode=self.mode,
             activeMediaPath=active_media_path,
         )
+
+    def reset_schedule_cursor(self, time_pos_ms: float) -> None:
+        self.last_position_ms = time_pos_ms
+        self.next_event_index = 0
+        while self.next_event_index < len(self.schedule):
+            if self.schedule[self.next_event_index]["absoluteStartMs"] > time_pos_ms:
+                break
+            self.next_event_index += 1
 
     def log_event(self, event: dict[str, Any]) -> None:
         payload = {
@@ -242,6 +435,7 @@ class PlayerManager:
                 )
 
         self.schedule = schedule
+        self.reset_schedule_cursor(0.0)
 
     def write_state(
         self,

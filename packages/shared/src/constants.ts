@@ -1,5 +1,6 @@
 export const assetCategories = [
   "ADVERTISEMENT",
+  "STATIC_CREATIVE",
   "FILLER_WEATHER",
   "FILLER_NEWS",
   "FILLER_BRANDED",

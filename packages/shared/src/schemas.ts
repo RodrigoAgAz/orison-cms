@@ -31,6 +31,7 @@ export const slotContentInputSchema = z.object({
 
 export const updateSlotSchema = z.object({
   contents: z.array(slotContentInputSchema).min(1),
+  staticCreativeId: z.string().min(1).nullable().optional(),
 });
 
 export const createLoopSchema = z.object({
@@ -146,4 +147,3 @@ export type SettingsInput = z.infer<typeof settingsSchema>;
 export type AssetProcessingJob = z.infer<typeof assetProcessingJobSchema>;
 export type PublishLoopJob = z.infer<typeof publishLoopJobSchema>;
 export type DeviceManifestResponse = z.infer<typeof deviceManifestResponseSchema>;
-

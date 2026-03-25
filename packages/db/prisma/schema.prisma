@@ -40,10 +40,12 @@ model Asset {
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
   slotPlacements SlotContent[]
+  staticSlots    Slot[]           @relation("SlotStaticCreative")
 }
 
 enum AssetCategory {
   ADVERTISEMENT
+  STATIC_CREATIVE
   FILLER_WEATHER
   FILLER_NEWS
   FILLER_BRANDED
@@ -81,13 +83,15 @@ enum LoopStatus {
 }
 
 model Slot {
-  id        String        @id @default(cuid())
-  loopId    String
-  loop      Loop          @relation(fields: [loopId], references: [id], onDelete: Cascade)
-  position  Int
-  contents  SlotContent[]
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id               String   @id @default(cuid())
+  loopId           String
+  loop             Loop     @relation(fields: [loopId], references: [id], onDelete: Cascade)
+  position         Int
+  contents         SlotContent[]
+  staticCreativeId String?
+  staticCreative   Asset?   @relation("SlotStaticCreative", fields: [staticCreativeId], references: [id])
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@unique([loopId, position])
 }
@@ -195,4 +199,3 @@ model SystemSetting {
   value     Json
   updatedAt DateTime @updatedAt
 }
-

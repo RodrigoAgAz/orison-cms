@@ -41,6 +41,8 @@ type SlotContentItem = {
 type SlotItem = {
   id: string;
   position: number;
+  staticCreativeId?: string | null;
+  staticCreative?: AssetOption | null;
   contents: SlotContentItem[];
 };
 
@@ -62,6 +64,7 @@ type Props = {
     slots: SlotItem[];
   };
   advertisementAssets: AssetOption[];
+  staticCreativeAssets: AssetOption[];
   fillerAssets: AssetOption[];
   fillerTemplate: Array<{
     category: AssetCategory;
@@ -150,6 +153,7 @@ function buildPreviewItems(slots: SlotItem[], scope: "slot" | "loop", selectedPo
 export function LoopBuilder({
   loop,
   advertisementAssets,
+  staticCreativeAssets,
   fillerAssets,
   fillerTemplate,
 }: Props) {
@@ -178,6 +182,7 @@ export function LoopBuilder({
   const [dirtySlots, setDirtySlots] = useState<number[]>([]);
   const [dirtyName, setDirtyName] = useState(false);
   const [adPickerOpen, setAdPickerOpen] = useState(false);
+  const [staticPickerOpen, setStaticPickerOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewScope, setPreviewScope] = useState<"slot" | "loop">("slot");
   const [previewIndex, setPreviewIndex] = useState(0);
@@ -188,6 +193,7 @@ export function LoopBuilder({
     slots.find((slot) => slot.position === selectedPosition) ??
     slots.slice().sort((a, b) => a.position - b.position)[0];
   const selectedAd = selectedSlot?.contents.find((item) => item.contentType === "ADVERTISEMENT");
+  const selectedStaticCreative = selectedSlot?.staticCreative ?? null;
   const selectedFillers = selectedSlot?.contents.filter((item) => item.contentType === "FILLER") ?? [];
   const previewItems = useMemo(
     () => buildPreviewItems(slots, previewScope, selectedPosition),
@@ -250,6 +256,27 @@ export function LoopBuilder({
       ...fillers,
     ]);
     setAdPickerOpen(false);
+    setError(null);
+  }
+
+  function chooseStaticCreative(asset: AssetOption | null) {
+    if (!selectedSlot) {
+      return;
+    }
+
+    setSlots((current) =>
+      current.map((slot) =>
+        slot.position === selectedPosition
+          ? {
+              ...slot,
+              staticCreativeId: asset?.id ?? null,
+              staticCreative: asset,
+            }
+          : slot,
+      ),
+    );
+    markSlotDirty(selectedPosition);
+    setStaticPickerOpen(false);
     setError(null);
   }
 
@@ -368,6 +395,7 @@ export function LoopBuilder({
             durationMs: content.durationMs,
             contentType: content.contentType,
           })),
+          staticCreativeId: slot.staticCreativeId ?? null,
         }),
       });
 
@@ -817,6 +845,50 @@ export function LoopBuilder({
           <div className="segment-panel">
             <div className="segment-panel-header">
               <div>
+                <span className="eyebrow">Static Creative</span>
+                <strong>{selectedStaticCreative?.filename ?? "No static creative selected"}</strong>
+              </div>
+              <div className="segment-panel-meta">Silent mode image</div>
+            </div>
+
+            <div className="segment-panel-body">
+              <MediaPoster
+                alt={selectedStaticCreative?.filename ?? "Static creative slot"}
+                className="segment-poster"
+                label="Choose a static creative"
+                src={selectedStaticCreative?.thumbnailUrl ?? selectedStaticCreative?.previewUrl ?? null}
+              />
+              <div className="segment-panel-copy">
+                <strong>{assetMetaSummary(selectedStaticCreative ?? undefined)}</strong>
+                <p className="muted">
+                  This image is shown during silent mode for the current minute slot.
+                </p>
+                <div className="button-row">
+                  <button
+                    className="button button-secondary"
+                    disabled={staticCreativeAssets.length === 0}
+                    onClick={() => setStaticPickerOpen(true)}
+                    type="button"
+                  >
+                    Choose Static Creative
+                  </button>
+                  {selectedStaticCreative ? (
+                    <button
+                      className="button button-secondary"
+                      onClick={() => chooseStaticCreative(null)}
+                      type="button"
+                    >
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="segment-panel">
+            <div className="segment-panel-header">
+              <div>
                 <span className="eyebrow">Filler Segments</span>
                 <strong>{selectedFillers.length} configured</strong>
               </div>
@@ -918,6 +990,45 @@ export function LoopBuilder({
                     className="asset-choice-poster"
                     label="Ad creative"
                     src={asset.thumbnailUrl}
+                  />
+                  <div className="stack-sm">
+                    <strong>{asset.filename}</strong>
+                    <span className="muted">{assetMetaSummary(asset)}</span>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </Modal>
+      ) : null}
+
+      {staticPickerOpen ? (
+        <Modal
+          eyebrow="Static Creatives"
+          onClose={() => setStaticPickerOpen(false)}
+          title={`Choose static creative for slot ${selectedPosition + 1}`}
+        >
+          <div className="asset-picker-grid">
+            {staticCreativeAssets.length === 0 ? (
+              <div className="empty-state compact">
+                <strong>No static creative assets ready</strong>
+                <p>Upload branded JPG or PNG static creatives in the asset library first.</p>
+              </div>
+            ) : (
+              staticCreativeAssets.map((asset) => (
+                <button
+                  className={`asset-choice ${
+                    selectedStaticCreative?.id === asset.id ? "is-selected" : ""
+                  }`}
+                  key={asset.id}
+                  onClick={() => chooseStaticCreative(asset)}
+                  type="button"
+                >
+                  <MediaPoster
+                    alt={asset.filename}
+                    className="asset-choice-poster"
+                    label="Static creative"
+                    src={asset.thumbnailUrl ?? asset.previewUrl}
                   />
                   <div className="stack-sm">
                     <strong>{asset.filename}</strong>

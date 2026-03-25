@@ -21,11 +21,13 @@ CURRENT_DIR = CONTENT_DIR / "current"
 PREVIOUS_DIR = CONTENT_DIR / "previous"
 STAGING_DIR = CONTENT_DIR / "staging"
 FALLBACK_DIR = CONTENT_DIR / "fallback"
+STATICS_DIRNAME = "statics"
 LOG_DIR = BASE_DIR / "logs"
 RUNTIME_DIR = BASE_DIR / "runtime"
 PLAYBACK_LOG_PATH = LOG_DIR / "playback.jsonl"
 PLAYER_COMMAND_PATH = RUNTIME_DIR / "player_command.json"
 PLAYER_STATE_PATH = RUNTIME_DIR / "player_state.json"
+DEFAULT_STATIC_IMAGE_PATH = Path(__file__).resolve().with_name("orison_static_fallback.jpg")
 
 
 @dataclass
@@ -123,6 +125,14 @@ def current_manifest_path() -> Path:
 
 def current_loop_file() -> Path:
     return CURRENT_DIR / "loop.mp4"
+
+
+def statics_dir(base_dir: Path | None = None) -> Path:
+    return (base_dir or CURRENT_DIR) / STATICS_DIRNAME
+
+
+def slot_static_path(slot_index: int, base_dir: Path | None = None) -> Path:
+    return statics_dir(base_dir) / f"slot_{slot_index:02d}.jpg"
 
 
 def fallback_loop_file(config: DeviceConfig) -> Path:

@@ -14,7 +14,7 @@ function assetKeys(assetId: string, filename: string) {
   const extension = filename.split(".").pop()?.toLowerCase();
   const isVideo = ["mp4", "mov", "webm"].includes(extension ?? "");
   return {
-    s3Key: isVideo ? `assets/${assetId}/content.mp4` : `assets/${assetId}/original.${extension ?? "bin"}`,
+    s3Key: isVideo ? `assets/${assetId}/content.mp4` : `assets/${assetId}/content.jpg`,
     thumbnailKey: isVideo ? `assets/${assetId}/thumbnail.jpg` : null,
   };
 }
@@ -77,4 +77,3 @@ export async function POST(request: Request) {
     return apiError(error);
   }
 }
-

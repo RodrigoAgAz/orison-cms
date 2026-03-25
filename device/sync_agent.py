@@ -11,6 +11,7 @@ import requests
 
 from common import (
     CURRENT_DIR,
+    DEFAULT_STATIC_IMAGE_PATH,
     PLAYER_STATE_PATH,
     PREVIOUS_DIR,
     STAGING_DIR,
@@ -22,6 +23,8 @@ from common import (
     read_json,
     setup_logger,
     sha256_file,
+    slot_static_path,
+    statics_dir,
     utc_now_iso,
     write_player_command,
 )
@@ -107,10 +110,12 @@ class SyncAgent:
 
         manifest_path = staging_dir / "manifest.json"
         video_path = staging_dir / "loop.mp4"
+        staging_statics_dir = statics_dir(staging_dir)
         download_limit = int(self.config.raw["sync"]["maxBandwidthBytesPerSec"])
         timeout = int(self.config.raw["sync"]["downloadTimeoutSeconds"])
 
         try:
+            staging_statics_dir.mkdir(parents=True, exist_ok=True)
             self.download_file(manifest_info["manifestUrl"], manifest_path, timeout, download_limit)
 
             with manifest_path.open("r", encoding="utf-8") as handle:
@@ -130,6 +135,22 @@ class SyncAgent:
             if expected_checksum and sha256_file(video_path) != expected_checksum:
                 raise RuntimeError("compiled loop checksum mismatch")
 
+            manifest_slots = {
+                int(slot.get("position", 0)): slot for slot in manifest.get("slots", [])
+            }
+            for slot_index in range(10):
+                slot_data = manifest_slots.get(slot_index, {})
+                static_target = slot_static_path(slot_index, staging_dir)
+                static_url = slot_data.get("staticImageUrl")
+                static_checksum = slot_data.get("staticImageChecksum")
+
+                if static_url:
+                    self.download_file(str(static_url), static_target, timeout, download_limit)
+                    if static_checksum and sha256_file(static_target) != static_checksum:
+                        raise RuntimeError(f"static image checksum mismatch for slot {slot_index}")
+                else:
+                    self.copy_default_static(static_target)
+
             if not self.is_valid_loop_directory(staging_dir):
                 raise RuntimeError("staging directory is incomplete after download")
 
@@ -137,6 +158,13 @@ class SyncAgent:
         except Exception:  # noqa: BLE001
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
+
+    def copy_default_static(self, target_path: Path) -> None:
+        if not DEFAULT_STATIC_IMAGE_PATH.exists():
+            raise RuntimeError(f"default static fallback image is missing: {DEFAULT_STATIC_IMAGE_PATH}")
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(DEFAULT_STATIC_IMAGE_PATH, target_path)
 
     def download_file(
         self,

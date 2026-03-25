@@ -23,6 +23,11 @@ export async function GET(_: Request, { params }: Props) {
             },
           },
         },
+        staticSlots: {
+          include: {
+            loop: true,
+          },
+        },
       },
     });
 
@@ -50,6 +55,11 @@ export async function DELETE(_: Request, { params }: Props) {
             },
           },
         },
+        staticSlots: {
+          include: {
+            loop: true,
+          },
+        },
       },
     });
 
@@ -57,9 +67,9 @@ export async function DELETE(_: Request, { params }: Props) {
       throw new ApiError("Asset not found", 404);
     }
 
-    const usedInPublishedLoop = asset.slotPlacements.some(
-      (placement) => placement.slot.loop.status === "PUBLISHED",
-    );
+    const usedInPublishedLoop =
+      asset.slotPlacements.some((placement) => placement.slot.loop.status === "PUBLISHED") ||
+      asset.staticSlots.some((slot) => slot.loop.status === "PUBLISHED");
 
     if (usedInPublishedLoop) {
       throw new ApiError("Cannot delete an asset used by a published loop", 409);
@@ -79,4 +89,3 @@ export async function DELETE(_: Request, { params }: Props) {
     return apiError(error);
   }
 }
-

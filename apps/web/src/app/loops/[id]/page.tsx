@@ -98,12 +98,15 @@ export default async function LoopBuilderPage({ params }: Props) {
     <div className="page">
       <LoopBuilder
         advertisementAssets={data.advertisementAssets.map(mapAsset)}
+        staticCreativeAssets={data.staticCreativeAssets.map(mapAsset)}
         fillerAssets={data.fillerAssets.map(mapAsset)}
         fillerTemplate={data.settings.defaultFillerTemplate}
         loop={{
           ...data.loop,
           slots: data.loop.slots.map((slot) => ({
             ...slot,
+            staticCreativeId: slot.staticCreativeId,
+            staticCreative: slot.staticCreative ? mapAsset(slot.staticCreative) : null,
             contents: slot.contents.map((content) => ({
               ...content,
               asset: mapAsset(content.asset),

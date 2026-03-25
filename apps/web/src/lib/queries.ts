@@ -142,13 +142,14 @@ export async function getLoopListData() {
 
 export async function getLoopBuilderData(loopId: string) {
   try {
-    const [loop, advertisementAssets, fillerAssets, settings] = await Promise.all([
+    const [loop, advertisementAssets, staticCreativeAssets, fillerAssets, settings] = await Promise.all([
       prisma.loop.findUnique({
         where: { id: loopId },
         include: {
           slots: {
             orderBy: { position: "asc" },
             include: {
+              staticCreative: true,
               contents: {
                 orderBy: { orderInSlot: "asc" },
                 include: {
@@ -168,6 +169,13 @@ export async function getLoopBuilderData(loopId: string) {
       }),
       prisma.asset.findMany({
         where: {
+          category: "STATIC_CREATIVE",
+          status: "READY",
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.asset.findMany({
+        where: {
           category: {
             in: ["FILLER_WEATHER", "FILLER_NEWS", "FILLER_BRANDED", "FILLER_OTHER"],
           },
@@ -181,6 +189,7 @@ export async function getLoopBuilderData(loopId: string) {
     return {
       loop,
       advertisementAssets,
+      staticCreativeAssets,
       fillerAssets,
       settings,
     };
@@ -189,6 +198,7 @@ export async function getLoopBuilderData(loopId: string) {
     return {
       loop: null,
       advertisementAssets: [],
+      staticCreativeAssets: [],
       fillerAssets: [],
       settings: {
         defaultFillerTemplate: [],
@@ -212,6 +222,11 @@ export async function getAssetLibraryData() {
                 loop: true,
               },
             },
+          },
+        },
+        staticSlots: {
+          include: {
+            loop: true,
           },
         },
       },

@@ -49,16 +49,30 @@ export default async function AssetsPage() {
           previewUrl: `/api/assets/${asset.id}/preview`,
           metadata: normaliseMetadata(asset.metadata),
           createdAt: asset.createdAt.toISOString(),
-          slotPlacements: asset.slotPlacements.map((placement) => ({
-            slot: {
-              position: placement.slot.position,
-              loop: {
-                id: placement.slot.loop.id,
-                name: placement.slot.loop.name,
-                status: placement.slot.loop.status,
+          slotUsages: [
+            ...asset.slotPlacements.map((placement) => ({
+              usageType: "VIDEO" as const,
+              slot: {
+                position: placement.slot.position,
+                loop: {
+                  id: placement.slot.loop.id,
+                  name: placement.slot.loop.name,
+                  status: placement.slot.loop.status,
+                },
               },
-            },
-          })),
+            })),
+            ...asset.staticSlots.map((slot) => ({
+              usageType: "STATIC" as const,
+              slot: {
+                position: slot.position,
+                loop: {
+                  id: slot.loop.id,
+                  name: slot.loop.name,
+                  status: slot.loop.status,
+                },
+              },
+            })),
+          ],
         }))}
       />
     </div>

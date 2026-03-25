@@ -11,11 +11,11 @@ import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
   directLoopUploadMaxDurationMs,
+  checksumJson,
   loopDurationMs,
   slotDurationMs,
   type SlotContentInput,
 } from "@orison/shared";
-import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
 import { commandExists, extractMetadata } from "./media";
@@ -32,6 +32,7 @@ const execFileAsync = promisify(execFile);
 type LoopWithContents = Loop & {
   slots: Array<
     Slot & {
+      staticCreative?: Asset | null;
       contents: Array<SlotContent & { asset: Asset }>;
     }
   >;
@@ -147,6 +148,7 @@ export async function duplicateLoop(loopId: string) {
         data: {
           loopId: duplicated.id,
           position: slot.position,
+          staticCreativeId: slot.staticCreativeId,
         },
       });
 
@@ -175,6 +177,7 @@ export async function loadLoop(loopId: string) {
       slots: {
         orderBy: { position: "asc" },
         include: {
+          staticCreative: true,
           contents: {
             orderBy: { orderInSlot: "asc" },
             include: {
@@ -187,7 +190,12 @@ export async function loadLoop(loopId: string) {
   });
 }
 
-export async function updateSlotContents(loopId: string, position: number, contents: SlotContentInput[]) {
+export async function updateSlotContents(
+  loopId: string,
+  position: number,
+  contents: SlotContentInput[],
+  staticCreativeId?: string | null,
+) {
   validateSlotContents(contents);
 
   const slot = await prisma.slot.findUnique({
@@ -215,7 +223,24 @@ export async function updateSlotContents(loopId: string, position: number, conte
     throw new Error("All slot assets must exist and be in READY state");
   }
 
+  if (staticCreativeId) {
+    const staticCreative = await prisma.asset.findUnique({
+      where: { id: staticCreativeId },
+    });
+
+    if (!staticCreative || staticCreative.status !== "READY" || staticCreative.category !== "STATIC_CREATIVE") {
+      throw new Error("Static creative must exist, be ready, and use the STATIC_CREATIVE category");
+    }
+  }
+
   await prisma.$transaction(async (tx) => {
+    await tx.slot.update({
+      where: { id: slot.id },
+      data: {
+        staticCreativeId: staticCreativeId ?? null,
+      },
+    });
+
     await tx.slotContent.deleteMany({
       where: { slotId: slot.id },
     });
@@ -242,19 +267,26 @@ export async function buildPreviewManifest(loopId: string) {
   }
 
   const sortedSlots = sortLoopContents(loop);
-  const slots = sortedSlots.map((slot) => ({
-    position: slot.position,
-    contents: slot.contents.map((content) => ({
-      type: content.contentType,
-      assetId: content.assetId,
-      filename: content.asset.filename,
-      url: getPublicUrl(content.asset.s3Key),
-      checksum: content.asset.checksum ?? "",
-      startTimeMs: content.startTimeMs,
-      durationMs: content.durationMs,
-      fileSizeBytes: content.asset.fileSize,
-    })),
-  }));
+  const slots = sortedSlots.map((slot) => {
+    const advertisement = slot.contents.find((content) => content.contentType === "ADVERTISEMENT");
+
+    return {
+      position: slot.position,
+      staticImageUrl: slot.staticCreative ? getPublicUrl(slot.staticCreative.s3Key) : null,
+      staticImageChecksum: slot.staticCreative?.checksum ?? null,
+      advertisementVideoUrl: advertisement ? getPublicUrl(advertisement.asset.s3Key) : null,
+      contents: slot.contents.map((content) => ({
+        type: content.contentType,
+        assetId: content.assetId,
+        filename: content.asset.filename,
+        url: getPublicUrl(content.asset.s3Key),
+        checksum: content.asset.checksum ?? "",
+        startTimeMs: content.startTimeMs,
+        durationMs: content.durationMs,
+        fileSizeBytes: content.asset.fileSize,
+      })),
+    };
+  });
 
   const manifest = {
     version: "1.0",
@@ -263,9 +295,11 @@ export async function buildPreviewManifest(loopId: string) {
     publishedAt: new Date().toISOString(),
     totalDurationMs: loopDurationMs,
     slots,
-    totalDownloadSizeBytes: slots.reduce(
+    totalDownloadSizeBytes: sortedSlots.reduce(
       (total, slot) =>
-        total + slot.contents.reduce((slotSum, content) => slotSum + content.fileSizeBytes, 0),
+        total +
+        slot.contents.reduce((slotSum, content) => slotSum + content.asset.fileSize, 0) +
+        (slot.staticCreative?.fileSize ?? 0),
       0,
     ),
     compiledVideoUrl: loop.compiledVideoUrl,
@@ -370,6 +404,20 @@ async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string)
     "44100",
     "-movflags",
     "+faststart",
+    outputPath,
+  ]);
+}
+
+async function generateFallbackStaticImage(outputPath: string) {
+  await runFfmpeg([
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x0a1628:s=1280x800",
+    "-frames:v",
+    "1",
+    "-vf",
+    "drawbox=x=120:y=120:w=1040:h=560:color=0xc9a84c:t=12",
     outputPath,
   ]);
 }
@@ -479,13 +527,23 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
   const manifestKey = `manifests/${loop.id}/${Date.now()}-${randomUUID()}.json`;
   const compiledVideoKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}.mp4`;
   const compileResult = await compileSingleFileLoop(loop);
+  const fallbackStaticPath = path.join(compileResult.tempDir, "fallback-static.jpg");
+  const fallbackStaticKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}-static-fallback.jpg`;
 
   try {
     const compiledStats = await stat(compileResult.outputPath);
     const compiledVideoUrl = getPublicUrl(compiledVideoKey);
     const compiledVideoChecksum = await checksumFilePath(compileResult.outputPath);
+    await generateFallbackStaticImage(fallbackStaticPath);
+    const fallbackStaticUrl = getPublicUrl(fallbackStaticKey);
+    const fallbackStaticChecksum = await checksumFilePath(fallbackStaticPath);
     const manifest = {
       ...manifestDraft,
+      slots: manifestDraft.slots.map((slot) => ({
+        ...slot,
+        staticImageUrl: slot.staticImageUrl ?? fallbackStaticUrl,
+        staticImageChecksum: slot.staticImageChecksum ?? fallbackStaticChecksum,
+      })),
       compiledVideoUrl,
       compiledVideoChecksum,
     };
@@ -504,6 +562,11 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
       key: compiledVideoKey,
       filePath: compileResult.outputPath,
       contentType: "video/mp4",
+    });
+    await putObjectFromFile({
+      key: fallbackStaticKey,
+      filePath: fallbackStaticPath,
+      contentType: "image/jpeg",
     });
 
     await prisma.loop.update({
@@ -538,6 +601,7 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
   } catch (error) {
     await deleteObject(manifestKey).catch(() => undefined);
     await deleteObject(compiledVideoKey).catch(() => undefined);
+    await deleteObject(fallbackStaticKey).catch(() => undefined);
     throw error;
   } finally {
     await rm(compileResult.tempDir, { recursive: true, force: true });

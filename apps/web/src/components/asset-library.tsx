@@ -22,7 +22,8 @@ type AssetItem = {
   previewUrl: string;
   metadata: Record<string, string>;
   createdAt: string;
-  slotPlacements: Array<{
+  slotUsages: Array<{
+    usageType: "VIDEO" | "STATIC";
     slot: {
       position: number;
       loop: {
@@ -41,6 +42,7 @@ type Props = {
 const categories = [
   "ALL",
   "ADVERTISEMENT",
+  "STATIC_CREATIVE",
   "FILLER_WEATHER",
   "FILLER_NEWS",
   "FILLER_BRANDED",
@@ -504,18 +506,19 @@ export function AssetLibrary({ assets }: Props) {
               <div className="card stack-sm asset-modal-card">
                 <span className="eyebrow">Usage</span>
                 <strong>Loops and slots using this asset</strong>
-                {selectedAsset.slotPlacements.length === 0 ? (
+                {selectedAsset.slotUsages.length === 0 ? (
                   <div className="empty-state compact">
                     <strong>Not used in a loop yet</strong>
                     <p>This asset is available to assign from the loop builder.</p>
                   </div>
                 ) : (
                   <div className="usage-list">
-                    {selectedAsset.slotPlacements.map((placement) => (
+                    {selectedAsset.slotUsages.map((placement) => (
                       <span
-                        key={`${placement.slot.loop.id}-${placement.slot.position}-${selectedAsset.id}`}
+                        key={`${placement.usageType}-${placement.slot.loop.id}-${placement.slot.position}-${selectedAsset.id}`}
                       >
                         {placement.slot.loop.name} / Slot {placement.slot.position + 1} /{" "}
+                        {placement.usageType === "STATIC" ? "Static creative" : "Video segment"} /{" "}
                         {placement.slot.loop.status}
                       </span>
                     ))}

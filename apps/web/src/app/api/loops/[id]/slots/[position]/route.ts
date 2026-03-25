@@ -17,6 +17,7 @@ export async function PUT(request: Request, { params }: Props) {
       params.id,
       Number.parseInt(params.position, 10),
       body.contents,
+      body.staticCreativeId,
     );
     return apiResponse({ loop });
   } catch (error) {
