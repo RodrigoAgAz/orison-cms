@@ -83,6 +83,23 @@ video {
   background: #000;
 }
 
+.device-preview-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.88);
+  background: #000;
+}
+
+.device-preview-overlay span {
+  color: rgba(255, 255, 255, 0.68);
+}
+
 .device-preview-empty {
   display: grid;
   place-items: center;

@@ -3,6 +3,7 @@ import { eachDayOfInterval, format, subDays } from "date-fns";
 import { prisma } from "@orison/db";
 
 import { getCmsSettings } from "./cms-settings";
+import { getPublicUrl } from "./storage";
 
 export function resolveDeviceStatus(device: {
   isActive: boolean;
@@ -89,18 +90,32 @@ export async function getDashboardData() {
 
 export async function getCurrentPublishedLoop() {
   try {
-    return await prisma.loop.findFirst({
-      where: { status: "PUBLISHED" },
+    const loop = await prisma.loop.findFirst({
+      where: {
+        status: "PUBLISHED",
+        OR: [{ compiledVideoUrl: { not: null } }, { compiledVideoKey: { not: null } }],
+      },
       orderBy: { publishedAt: "desc" },
       select: {
         id: true,
         name: true,
         compiledVideoUrl: true,
+        compiledVideoKey: true,
         publishedAt: true,
         checksum: true,
         updatedAt: true,
       },
     });
+
+    if (!loop) {
+      return null;
+    }
+
+    return {
+      ...loop,
+      compiledVideoUrl:
+        loop.compiledVideoUrl ?? (loop.compiledVideoKey ? getPublicUrl(loop.compiledVideoKey) : null),
+    };
   } catch (error) {
     console.error(error);
     return null;
