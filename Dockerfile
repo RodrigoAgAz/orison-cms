@@ -13,10 +13,8 @@ COPY apps ./apps
 COPY packages ./packages
 
 RUN npm install
-RUN npm run db:generate
 RUN npm run build
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start", "--workspace", "@orison/web"]
-
+CMD ["sh", "-c", "npm run db:generate && npm run start --workspace @orison/web"]
