@@ -30,6 +30,17 @@ async function hasValidSession(request: NextRequest) {
   }
 }
 
+function continueWithPathname(request: NextRequest) {
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-orison-pathname", request.nextUrl.pathname);
+
+  return NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -38,12 +49,12 @@ export async function middleware(request: NextRequest) {
   }
 
   if (publicPrefixes.some((prefix) => pathname.startsWith(prefix))) {
-    return NextResponse.next();
+    return continueWithPathname(request);
   }
 
   const authenticated = await hasValidSession(request);
   if (authenticated) {
-    return NextResponse.next();
+    return continueWithPathname(request);
   }
 
   if (pathname.startsWith("/api/")) {

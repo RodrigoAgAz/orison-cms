@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 
 import { AppShell } from "@/components/app-shell";
 import { ToastProvider } from "@/components/toast-provider";
@@ -16,20 +17,26 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const pathname = headers().get("x-orison-pathname") ?? "";
+  const isDevicePreview = pathname.startsWith("/device-preview");
   const user = await getSessionUser();
 
   return (
     <html lang="en">
-      <body>
-        <ToastProvider>
-          {user ? (
-            <AppShell user={{ name: user.name, role: user.role }}>
-              {children}
-            </AppShell>
-          ) : (
-            children
-          )}
-        </ToastProvider>
+      <body className={isDevicePreview ? "device-preview-body" : undefined}>
+        {isDevicePreview ? (
+          children
+        ) : (
+          <ToastProvider>
+            {user ? (
+              <AppShell user={{ name: user.name, role: user.role }}>
+                {children}
+              </AppShell>
+            ) : (
+              children
+            )}
+          </ToastProvider>
+        )}
       </body>
     </html>
   );

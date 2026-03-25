@@ -45,6 +45,11 @@ body {
   overflow-x: hidden;
 }
 
+body.device-preview-body {
+  background: #000;
+  overflow: hidden;
+}
+
 a {
   color: inherit;
   text-decoration: none;
