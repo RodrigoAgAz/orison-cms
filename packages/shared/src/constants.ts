@@ -51,6 +51,7 @@ export const slotDurationMs = 60_000;
 export const loopDurationMs = 600_000;
 export const advertisementDurationMs = 12_000;
 export const directLoopUploadMaxBytes = 500 * 1024 * 1024;
+export const directLoopUploadMaxDurationMs = 14 * 60 * 1000;
 export const defaultSyncIntervalSeconds = 1800;
 export const defaultHeartbeatIntervalSeconds = 300;
 export const playbackLogFlushThreshold = 500;

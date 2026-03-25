@@ -10,11 +10,12 @@ import { prisma, type Asset, type Loop, type Slot, type SlotContent } from "@ori
 import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
+  directLoopUploadMaxDurationMs,
+  checksumJson,
   loopDurationMs,
   slotDurationMs,
   type SlotContentInput,
 } from "@orison/shared";
-import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
 import { commandExists, extractMetadata } from "./media";
@@ -563,8 +564,8 @@ export async function publishDirectLoopUpload({
     throw new Error("Unable to determine uploaded loop duration");
   }
 
-  if (sourceMetadata.durationMs > loopDurationMs) {
-    throw new Error("Direct loop uploads must be 10 minutes or shorter");
+  if (sourceMetadata.durationMs > directLoopUploadMaxDurationMs) {
+    throw new Error("Direct loop uploads must be 14 minutes or shorter");
   }
 
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
@@ -587,8 +588,8 @@ export async function publishDirectLoopUpload({
       throw new Error("Unable to determine transcoded loop duration");
     }
 
-    if (durationMs > loopDurationMs) {
-      throw new Error("Direct loop uploads must be 10 minutes or shorter");
+    if (durationMs > directLoopUploadMaxDurationMs) {
+      throw new Error("Direct loop uploads must be 14 minutes or shorter");
     }
 
     const outputStats = await stat(compiledSourcePath);

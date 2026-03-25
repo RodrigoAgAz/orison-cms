@@ -7,7 +7,11 @@ import { pipeline } from "node:stream/promises";
 
 import { revalidatePath } from "next/cache";
 
-import { createLoopSchema, directLoopUploadMaxBytes, loopDurationMs } from "@orison/shared";
+import {
+  createLoopSchema,
+  directLoopUploadMaxBytes,
+  directLoopUploadMaxDurationMs,
+} from "@orison/shared";
 
 import { getSessionUser } from "@/lib/auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
@@ -23,7 +27,7 @@ function sanitizeFilename(filename: string) {
 function directUploadErrorMessage() {
   return `Direct loop uploads must be an MP4 up to ${Math.round(
     directLoopUploadMaxBytes / (1024 * 1024),
-  )}MB and ${Math.round(loopDurationMs / 60000)} minutes long.`;
+  )}MB and ${Math.round(directLoopUploadMaxDurationMs / 60000)} minutes long.`;
 }
 
 async function streamRequestBodyToTempFile(request: Request, filename: string) {

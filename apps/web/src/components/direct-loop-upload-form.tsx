@@ -3,7 +3,10 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { directLoopUploadMaxBytes, loopDurationMs } from "@orison/shared";
+import {
+  directLoopUploadMaxBytes,
+  directLoopUploadMaxDurationMs,
+} from "@orison/shared";
 
 import { useToast } from "@/components/toast-provider";
 
@@ -262,12 +265,12 @@ export function DirectLoopUploadForm() {
           type="file"
         />
         <span className="drop-zone-kicker">Upload Pre-built Loop</span>
-        <strong>Drop a finished ten-minute MP4 here or click to browse</strong>
+        <strong>Drop a finished pre-built loop MP4 here or click to browse</strong>
         <span className="muted">
           {selectedFile
             ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}`
             : `Maximum ${Math.round(directLoopUploadMaxBytes / (1024 * 1024))}MB · up to ${
-                loopDurationMs / 60000
+                directLoopUploadMaxDurationMs / 60000
               } minutes`}
         </span>
       </label>
