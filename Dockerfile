@@ -14,6 +14,10 @@ COPY packages ./packages
 
 RUN npm install
 
+RUN npm run db:generate
+
+RUN npm run build
+
 EXPOSE 3000
 
-CMD ["sh", "-c", "npm run db:generate && npm run build && npm run start --workspace @orison/web"]
+CMD ["sh", "-c", "npx prisma db push --schema packages/db/prisma/schema.prisma && npm run start --workspace @orison/web"]
