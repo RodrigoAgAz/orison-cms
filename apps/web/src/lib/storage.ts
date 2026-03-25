@@ -53,8 +53,6 @@ function requireObjectStorage() {
   }
 }
 
-requireObjectStorage();
-
 const s3Client =
   hasS3Config && env.s3Bucket
     ? new S3Client({
