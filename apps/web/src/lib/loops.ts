@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +9,7 @@ import { execFile } from "node:child_process";
 import { prisma, type Asset, type Loop, type Slot, type SlotContent } from "@orison/db";
 import {
   advertisementDurationMs,
+  directLoopUploadMaxBytes,
   checksumJson,
   loopDurationMs,
   slotDurationMs,
@@ -15,8 +17,14 @@ import {
 } from "@orison/shared";
 
 import { logActivity } from "./activity";
-import { commandExists } from "./media";
-import { deleteObject, downloadObjectToFile, getPublicUrl, putObject } from "./storage";
+import { commandExists, extractMetadata } from "./media";
+import {
+  deleteObject,
+  downloadObjectToFile,
+  getPublicUrl,
+  putObject,
+  putObjectFromFile,
+} from "./storage";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +34,13 @@ type LoopWithContents = Loop & {
       contents: Array<SlotContent & { asset: Asset }>;
     }
   >;
+};
+
+type DirectLoopUploadOptions = {
+  name: string;
+  originalFilename: string;
+  tempFilePath: string;
+  publishedByUserId: string;
 };
 
 function sortLoopContents(loop: LoopWithContents) {
@@ -330,6 +345,34 @@ async function normalizeImageToClip(
   ]);
 }
 
+async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string) {
+  await runFfmpeg([
+    "-i",
+    inputPath,
+    "-vf",
+    "scale=1280:800:force_original_aspect_ratio=decrease,pad=1280:800:(ow-iw)/2:(oh-ih)/2:black,fps=30",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "medium",
+    "-crf",
+    "23",
+    "-profile:v",
+    "high",
+    "-level",
+    "4.1",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    "-ar",
+    "44100",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ]);
+}
+
 async function compileSingleFileLoop(loop: LoopWithContents) {
   if (!(await commandExists("ffmpeg"))) {
     throw new Error("ffmpeg is required to publish compiled loops");
@@ -393,8 +436,14 @@ async function compileSingleFileLoop(loop: LoopWithContents) {
   }
 }
 
-function checksumBuffer(buffer: Buffer) {
-  return `sha256:${createHash("sha256").update(buffer).digest("hex")}`;
+async function checksumFilePath(filePath: string) {
+  const digest = createHash("sha256");
+
+  for await (const chunk of createReadStream(filePath)) {
+    digest.update(chunk);
+  }
+
+  return `sha256:${digest.digest("hex")}`;
 }
 
 export async function publishLoop(loopId: string, publishedByUserId: string) {
@@ -410,9 +459,9 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
   const compileResult = await compileSingleFileLoop(loop);
 
   try {
-    const compiledBuffer = await readFile(compileResult.outputPath);
+    const compiledStats = await stat(compileResult.outputPath);
     const compiledVideoUrl = getPublicUrl(compiledVideoKey);
-    const compiledVideoChecksum = checksumBuffer(compiledBuffer);
+    const compiledVideoChecksum = await checksumFilePath(compileResult.outputPath);
     const manifest = {
       ...manifestDraft,
       compiledVideoUrl,
@@ -429,9 +478,9 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
       body: Buffer.from(JSON.stringify(manifestWithChecksum, null, 2)),
       contentType: "application/json",
     });
-    await putObject({
+    await putObjectFromFile({
       key: compiledVideoKey,
-      body: compiledBuffer,
+      filePath: compileResult.outputPath,
       contentType: "video/mp4",
     });
 
@@ -462,6 +511,7 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
       compiledVideoUrl,
       checksum,
       compiledVideoChecksum,
+      fileSizeBytes: compiledStats.size,
     };
   } catch (error) {
     await deleteObject(manifestKey).catch(() => undefined);
@@ -469,5 +519,140 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
     throw error;
   } finally {
     await rm(compileResult.tempDir, { recursive: true, force: true });
+  }
+}
+
+export async function publishDirectLoopUpload({
+  name,
+  originalFilename,
+  tempFilePath,
+  publishedByUserId,
+}: DirectLoopUploadOptions) {
+  if (!(await commandExists("ffmpeg")) || !(await commandExists("ffprobe"))) {
+    throw new Error("ffmpeg and ffprobe are required to publish direct loop uploads");
+  }
+
+  const uploadedFileStats = await stat(tempFilePath);
+  if (uploadedFileStats.size > directLoopUploadMaxBytes) {
+    throw new Error("Direct loop uploads are limited to 500MB");
+  }
+
+  const sourceMetadata = await extractMetadata(tempFilePath);
+  if (!sourceMetadata.durationMs) {
+    throw new Error("Unable to determine uploaded loop duration");
+  }
+
+  if (sourceMetadata.durationMs > loopDurationMs) {
+    throw new Error("Direct loop uploads must be 10 minutes or shorter");
+  }
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
+  const outputPath = path.join(tempDir, "loop.mp4");
+  let loop: Loop | null = null;
+  let manifestKey: string | null = null;
+  let compiledVideoKey: string | null = null;
+
+  try {
+    await transcodeCompiledLoopVideo(tempFilePath, outputPath);
+
+    const outputMetadata = await extractMetadata(outputPath);
+    const durationMs = outputMetadata.durationMs ?? sourceMetadata.durationMs;
+    if (!durationMs) {
+      throw new Error("Unable to determine transcoded loop duration");
+    }
+
+    if (durationMs > loopDurationMs) {
+      throw new Error("Direct loop uploads must be 10 minutes or shorter");
+    }
+
+    const outputStats = await stat(outputPath);
+    const publishedAt = new Date();
+
+    loop = await prisma.loop.create({
+      data: {
+        name,
+        status: "DRAFT",
+      },
+    });
+
+    manifestKey = `manifests/${loop.id}/${Date.now()}-${randomUUID()}.json`;
+    compiledVideoKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}.mp4`;
+
+    const compiledVideoUrl = getPublicUrl(compiledVideoKey);
+    const compiledVideoChecksum = await checksumFilePath(outputPath);
+    const manifest = {
+      version: "1.0",
+      loopId: loop.id,
+      loopName: loop.name,
+      publishedAt: publishedAt.toISOString(),
+      totalDurationMs: durationMs,
+      slots: [],
+      totalDownloadSizeBytes: outputStats.size,
+      compiledVideoUrl,
+      compiledVideoChecksum,
+    };
+    const checksum = checksumJson(manifest);
+    const manifestWithChecksum = {
+      ...manifest,
+      checksum,
+    };
+
+    await putObject({
+      key: manifestKey,
+      body: Buffer.from(JSON.stringify(manifestWithChecksum, null, 2)),
+      contentType: "application/json",
+    });
+    await putObjectFromFile({
+      key: compiledVideoKey,
+      filePath: outputPath,
+      contentType: "video/mp4",
+    });
+
+    await prisma.loop.update({
+      where: { id: loop.id },
+      data: {
+        status: "PUBLISHED",
+        publishedAt,
+        publishedBy: publishedByUserId,
+        manifestKey,
+        manifestUrl: getPublicUrl(manifestKey),
+        compiledVideoKey,
+        compiledVideoUrl,
+        checksum,
+      },
+    });
+
+    await logActivity("LOOP_PUBLISHED", `Loop ${loop.name} published from direct upload`, {
+      loopId: loop.id,
+      publishedByUserId,
+      checksum,
+      compiledVideoKey,
+      originalFilename,
+      mode: "DIRECT_UPLOAD",
+      fileSizeBytes: outputStats.size,
+      durationMs,
+    });
+
+    return {
+      loopId: loop.id,
+      manifest: manifestWithChecksum,
+      compiledVideoUrl,
+      checksum,
+      compiledVideoChecksum,
+      fileSizeBytes: outputStats.size,
+    };
+  } catch (error) {
+    if (manifestKey) {
+      await deleteObject(manifestKey).catch(() => undefined);
+    }
+    if (compiledVideoKey) {
+      await deleteObject(compiledVideoKey).catch(() => undefined);
+    }
+    if (loop) {
+      await prisma.loop.delete({ where: { id: loop.id } }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
   }
 }

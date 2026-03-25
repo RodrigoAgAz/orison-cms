@@ -1,8 +1,8 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { apiError, ApiError } from "@/lib/http";
+import { readObject } from "@/lib/storage";
 
 const contentTypes: Record<string, string> = {
   ".json": "application/json",
@@ -22,15 +22,13 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   try {
-    const storageRoot = path.join(process.cwd(), "tmp", "storage");
-    const targetPath = path.join(storageRoot, ...params.path);
-
-    if (!targetPath.startsWith(storageRoot)) {
+    if (params.path.length === 0 || params.path.some((segment) => segment === "..")) {
       throw new ApiError("Invalid path", 400);
     }
 
-    const buffer = await readFile(targetPath);
-    const extension = path.extname(targetPath).toLowerCase();
+    const key = params.path.join("/");
+    const buffer = await readObject(key);
+    const extension = path.extname(key).toLowerCase();
 
     return new NextResponse(buffer, {
       headers: {

@@ -29,6 +29,7 @@ from common import (
 
 
 MPV_SOCKET_PATH = "/tmp/mpv-socket"
+LOAD_CONFIRMATION_TIMEOUT_SECONDS = 15
 
 
 class PlayerManager:
@@ -108,17 +109,31 @@ class PlayerManager:
 
         action = command.get("action")
         if action == "reload":
+            command_id = str(command.get("commandId") or command.get("ts") or utc_now_iso())
+            loop_id = command.get("loopId")
             self.reload_manifest_schedule()
-            self.load_file(current_loop_file())
+            switched = self.load_file(current_loop_file())
             self.last_position_ms = 0
             self.next_event_index = 0
+            self.write_state(
+                "playing" if switched else "error",
+                0.0,
+                loop_id,
+                activeMediaPath=self.get_mpv_property("path"),
+                lastHandledAction=action,
+                lastHandledAt=utc_now_iso(),
+                lastHandledCommandId=command_id,
+                lastHandledLoopId=loop_id,
+                lastHandledOk=switched,
+            )
 
         PLAYER_COMMAND_PATH.unlink(missing_ok=True)
 
-    def load_file(self, media_path: Path) -> None:
+    def load_file(self, media_path: Path) -> bool:
         if not self.send_mpv_command({"command": ["loadfile", str(media_path), "replace"]}):
             self.logger.warning("mpv IPC unavailable, restarting process")
             self.start_player(media_path)
+        return self.wait_for_media_path(media_path)
 
     def send_mpv_command(self, payload: dict[str, Any]) -> bool:
         if not os.path.exists(MPV_SOCKET_PATH):
@@ -133,24 +148,49 @@ class PlayerManager:
         except OSError:
             return False
 
-    def get_time_pos_seconds(self) -> float | None:
+    def get_mpv_property(self, property_name: str) -> Any | None:
         if not os.path.exists(MPV_SOCKET_PATH):
             return None
 
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.connect(MPV_SOCKET_PATH)
-                client.sendall(b'{"command":["get_property","time-pos"]}\n')
+                client.sendall((json.dumps({"command": ["get_property", property_name]}) + "\n").encode("utf-8"))
                 response = client.recv(4096).decode("utf-8")
             payload = json.loads(response)
-            return float(payload.get("data") or 0.0)
-        except (OSError, ValueError, json.JSONDecodeError):
+            if payload.get("error") not in (None, "success"):
+                return None
+            return payload.get("data")
+        except (OSError, json.JSONDecodeError):
             return None
+
+    def get_time_pos_seconds(self) -> float | None:
+        value = self.get_mpv_property("time-pos")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def wait_for_media_path(self, media_path: Path) -> bool:
+        target_path = str(media_path)
+        deadline = time.monotonic() + LOAD_CONFIRMATION_TIMEOUT_SECONDS
+
+        while time.monotonic() < deadline:
+            active_path = self.get_mpv_property("path")
+            if active_path == target_path:
+                return True
+            time.sleep(0.5)
+
+        self.logger.error("mpv did not confirm load for %s within %ss", media_path, LOAD_CONFIRMATION_TIMEOUT_SECONDS)
+        return False
 
     def poll_playback(self) -> None:
         time_pos_seconds = self.get_time_pos_seconds()
+        active_media_path = self.get_mpv_property("path")
         if time_pos_seconds is None:
-            self.write_state("error", 0.0)
+            self.write_state("error", 0.0, activeMediaPath=active_media_path)
             return
 
         time_pos_ms = time_pos_seconds * 1000
@@ -166,7 +206,12 @@ class PlayerManager:
             self.next_event_index += 1
 
         manifest = read_json(current_manifest_path(), {})
-        self.write_state("playing", time_pos_seconds, manifest.get("loopId"))
+        self.write_state(
+            "playing",
+            time_pos_seconds,
+            manifest.get("loopId"),
+            activeMediaPath=active_media_path,
+        )
 
     def log_event(self, event: dict[str, Any]) -> None:
         payload = {
@@ -198,14 +243,23 @@ class PlayerManager:
 
         self.schedule = schedule
 
-    def write_state(self, status: str, time_pos_seconds: float, loop_id: str | None = None) -> None:
+    def write_state(
+        self,
+        status: str,
+        time_pos_seconds: float,
+        loop_id: str | None = None,
+        **extra: Any,
+    ) -> None:
+        current_state = read_json(PLAYER_STATE_PATH, {})
         atomic_write_json(
             PLAYER_STATE_PATH,
             {
+                **current_state,
                 "status": status,
                 "timePosSeconds": time_pos_seconds,
                 "loopId": loop_id,
                 "updatedAt": utc_now_iso(),
+                **extra,
             },
         )
 

@@ -11,6 +11,7 @@ import requests
 
 from common import (
     CURRENT_DIR,
+    PLAYER_STATE_PATH,
     PREVIOUS_DIR,
     STAGING_DIR,
     build_headers,
@@ -18,11 +19,15 @@ from common import (
     current_manifest_path,
     ensure_directories,
     load_config,
+    read_json,
     setup_logger,
     sha256_file,
     utc_now_iso,
     write_player_command,
 )
+
+
+PLAYER_CONFIRMATION_TIMEOUT_SECONDS = 30
 
 
 class SyncAgent:
@@ -46,12 +51,25 @@ class SyncAgent:
                 time.sleep(30)
 
     def ensure_boot_content(self) -> None:
+        self.cleanup_staging()
+
+        if not self.is_valid_loop_directory(CURRENT_DIR) and self.is_valid_loop_directory(PREVIOUS_DIR):
+            if CURRENT_DIR.exists():
+                shutil.rmtree(CURRENT_DIR, ignore_errors=True)
+            PREVIOUS_DIR.replace(CURRENT_DIR)
+            self.logger.warning("restored previous content as current during boot recovery")
+
         if current_manifest_path().exists() and (CURRENT_DIR / "loop.mp4").exists():
             return
+
+        if PREVIOUS_DIR.exists() and not self.is_valid_loop_directory(PREVIOUS_DIR):
+            shutil.rmtree(PREVIOUS_DIR, ignore_errors=True)
+
         copy_fallback_to_current(self.config)
         write_player_command("reload", loopId="fallback")
 
     def sync_once(self) -> None:
+        self.cleanup_staging()
         remote = self.fetch_manifest_info()
         local = self.load_local_manifest()
 
@@ -92,22 +110,33 @@ class SyncAgent:
         download_limit = int(self.config.raw["sync"]["maxBandwidthBytesPerSec"])
         timeout = int(self.config.raw["sync"]["downloadTimeoutSeconds"])
 
-        self.download_file(manifest_info["manifestUrl"], manifest_path, timeout, download_limit)
+        try:
+            self.download_file(manifest_info["manifestUrl"], manifest_path, timeout, download_limit)
 
-        with manifest_path.open("r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
 
-        compiled_video_url = manifest.get("compiledVideoUrl") or manifest_info.get("compiledVideoUrl")
-        if not compiled_video_url:
-            raise RuntimeError("manifest does not contain a compiledVideoUrl")
+            expected_manifest_checksum = manifest_info.get("checksum")
+            if expected_manifest_checksum and manifest.get("checksum") != expected_manifest_checksum:
+                raise RuntimeError("manifest checksum mismatch")
 
-        self.download_file(compiled_video_url, video_path, timeout, download_limit)
+            compiled_video_url = manifest.get("compiledVideoUrl") or manifest_info.get("compiledVideoUrl")
+            if not compiled_video_url:
+                raise RuntimeError("manifest does not contain a compiledVideoUrl")
 
-        expected_checksum = manifest.get("compiledVideoChecksum")
-        if expected_checksum and sha256_file(video_path) != expected_checksum:
-            raise RuntimeError("compiled loop checksum mismatch")
+            self.download_file(compiled_video_url, video_path, timeout, download_limit)
 
-        return staging_dir
+            expected_checksum = manifest.get("compiledVideoChecksum")
+            if expected_checksum and sha256_file(video_path) != expected_checksum:
+                raise RuntimeError("compiled loop checksum mismatch")
+
+            if not self.is_valid_loop_directory(staging_dir):
+                raise RuntimeError("staging directory is incomplete after download")
+
+            return staging_dir
+        except Exception:  # noqa: BLE001
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
     def download_file(
         self,
@@ -169,12 +198,101 @@ class SyncAgent:
             raise last_error
 
     def activate(self, staging_dir: Path, loop_id: str) -> None:
+        if not self.is_valid_loop_directory(staging_dir):
+            raise RuntimeError(f"staging directory is not ready for activation: {staging_dir}")
+
         if PREVIOUS_DIR.exists():
             shutil.rmtree(PREVIOUS_DIR, ignore_errors=True)
+        moved_current_to_previous = False
+
+        try:
+            if CURRENT_DIR.exists():
+                CURRENT_DIR.replace(PREVIOUS_DIR)
+                moved_current_to_previous = True
+            staging_dir.replace(CURRENT_DIR)
+        except Exception:  # noqa: BLE001
+            if not CURRENT_DIR.exists() and moved_current_to_previous and PREVIOUS_DIR.exists():
+                PREVIOUS_DIR.replace(CURRENT_DIR)
+            raise
+
+        command_id = f"reload-{loop_id}-{int(time.time() * 1000)}"
+        write_player_command("reload", loopId=loop_id, commandId=command_id, activatedAt=utc_now_iso())
+
+        if self.wait_for_player_confirmation(command_id, loop_id):
+            if PREVIOUS_DIR.exists():
+                shutil.rmtree(PREVIOUS_DIR, ignore_errors=True)
+            self.cleanup_staging()
+            return
+
+        self.logger.error("player did not confirm activation for %s, rolling back", loop_id)
+        self.rollback_activation(loop_id)
+        raise RuntimeError(f"player failed to confirm loop activation: {loop_id}")
+
+    def wait_for_player_confirmation(self, command_id: str, loop_id: str) -> bool:
+        deadline = time.monotonic() + PLAYER_CONFIRMATION_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            state = read_json(PLAYER_STATE_PATH, {})
+            if state.get("lastHandledCommandId") != command_id:
+                time.sleep(1)
+                continue
+
+            if state.get("lastHandledOk") and state.get("lastHandledLoopId") == loop_id:
+                return True
+
+            self.logger.error("player rejected reload for %s: %s", loop_id, state)
+            return False
+
+        return False
+
+    def rollback_activation(self, failed_loop_id: str) -> None:
+        failed_current_dir = None
         if CURRENT_DIR.exists():
-            CURRENT_DIR.replace(PREVIOUS_DIR)
-        staging_dir.replace(CURRENT_DIR)
-        write_player_command("reload", loopId=loop_id, activatedAt=utc_now_iso())
+            failed_current_dir = STAGING_DIR / f"failed-{failed_loop_id}-{int(time.time() * 1000)}"
+            if failed_current_dir.exists():
+                shutil.rmtree(failed_current_dir, ignore_errors=True)
+            CURRENT_DIR.replace(failed_current_dir)
+
+        restored_loop_id = "fallback"
+        if PREVIOUS_DIR.exists() and self.is_valid_loop_directory(PREVIOUS_DIR):
+            PREVIOUS_DIR.replace(CURRENT_DIR)
+            manifest = self.load_local_manifest() or {}
+            restored_loop_id = str(manifest.get("loopId") or "fallback")
+        else:
+            if CURRENT_DIR.exists():
+                shutil.rmtree(CURRENT_DIR, ignore_errors=True)
+            copy_fallback_to_current(self.config)
+
+        rollback_command_id = f"rollback-{restored_loop_id}-{int(time.time() * 1000)}"
+        write_player_command(
+            "reload",
+            loopId=restored_loop_id,
+            commandId=rollback_command_id,
+            activatedAt=utc_now_iso(),
+            rollbackFrom=failed_loop_id,
+        )
+        self.wait_for_player_confirmation(rollback_command_id, restored_loop_id)
+
+        if failed_current_dir and failed_current_dir.exists():
+            shutil.rmtree(failed_current_dir, ignore_errors=True)
+        if PREVIOUS_DIR.exists():
+            shutil.rmtree(PREVIOUS_DIR, ignore_errors=True)
+        self.cleanup_staging()
+
+    def cleanup_staging(self) -> None:
+        if not STAGING_DIR.exists():
+            return
+
+        for path in STAGING_DIR.iterdir():
+            self.remove_path(path)
+
+    def remove_path(self, path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+            return
+        path.unlink(missing_ok=True)
+
+    def is_valid_loop_directory(self, directory: Path) -> bool:
+        return directory.exists() and (directory / "manifest.json").exists() and (directory / "loop.mp4").exists()
 
     def send_sync_heartbeat(self, loop_id: str) -> None:
         payload = {

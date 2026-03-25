@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 
@@ -13,6 +14,46 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env, hasS3Config } from "./env";
 
 const localStorageRoot = path.join(process.cwd(), "tmp", "storage");
+const isProduction = process.env.NODE_ENV === "production";
+const requiredProductionStorageEnvNames = [
+  "S3_BUCKET",
+  "S3_REGION",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+];
+
+function productionStorageConfigError() {
+  if (!isProduction) {
+    return null;
+  }
+
+  const missing = requiredProductionStorageEnvNames.filter((name) => {
+    const value = process.env[name];
+    return !value || value.length === 0;
+  });
+
+  if (missing.length === 0 && hasS3Config && env.s3Bucket) {
+    return null;
+  }
+
+  const details =
+    missing.length > 0
+      ? ` Missing: ${missing.join(", ")}.`
+      : "";
+
+  return new Error(
+    `Object storage is required in production. Configure S3 via Railway variables before starting the app.${details}`,
+  );
+}
+
+function requireObjectStorage() {
+  const error = productionStorageConfigError();
+  if (error) {
+    throw error;
+  }
+}
+
+requireObjectStorage();
 
 const s3Client =
   hasS3Config && env.s3Bucket
@@ -36,6 +77,7 @@ function localPathForKey(key: string) {
 }
 
 export async function ensureStorageRoot() {
+  requireObjectStorage();
   await mkdir(localStorageRoot, { recursive: true });
 }
 
@@ -44,6 +86,8 @@ export async function putObject(options: {
   body: Buffer;
   contentType: string;
 }) {
+  requireObjectStorage();
+
   if (s3Client && env.s3Bucket) {
     await s3Client.send(
       new PutObjectCommand({
@@ -61,7 +105,33 @@ export async function putObject(options: {
   await writeFile(targetPath, options.body);
 }
 
+export async function putObjectFromFile(options: {
+  key: string;
+  filePath: string;
+  contentType: string;
+}) {
+  requireObjectStorage();
+
+  if (s3Client && env.s3Bucket) {
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: env.s3Bucket,
+        Key: options.key,
+        Body: createReadStream(options.filePath),
+        ContentType: options.contentType,
+      }),
+    );
+    return;
+  }
+
+  const targetPath = localPathForKey(options.key);
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  await copyFile(options.filePath, targetPath);
+}
+
 export async function deleteObject(key: string) {
+  requireObjectStorage();
+
   if (s3Client && env.s3Bucket) {
     await s3Client.send(
       new DeleteObjectCommand({
@@ -76,6 +146,8 @@ export async function deleteObject(key: string) {
 }
 
 export function getPublicUrl(key: string) {
+  requireObjectStorage();
+
   // Only emit CDN URLs when the app is actually backed by object storage.
   // In local development we persist to disk under tmp/storage, so assets must
   // be served back through the app itself.
@@ -87,6 +159,8 @@ export function getPublicUrl(key: string) {
 }
 
 export async function getSignedAssetUrl(key: string, expiresIn = 60 * 60) {
+  requireObjectStorage();
+
   if (s3Client && env.s3Bucket) {
     return getSignedUrl(
       s3Client,
@@ -101,11 +175,17 @@ export async function getSignedAssetUrl(key: string, expiresIn = 60 * 60) {
   return getPublicUrl(key);
 }
 
-export async function readLocalObject(key: string) {
-  return readFile(localPathForKey(key));
+async function responseBodyToBuffer(body: Readable) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of body) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
-export async function downloadObjectToFile(key: string, filePath: string) {
+export async function readObject(key: string) {
+  requireObjectStorage();
+
   if (s3Client && env.s3Bucket) {
     const response = await s3Client.send(
       new GetObjectCommand({
@@ -115,20 +195,18 @@ export async function downloadObjectToFile(key: string, filePath: string) {
     );
 
     if (!response.Body) {
-      throw new Error(`Missing body while downloading ${key}`);
+      throw new Error(`Missing body while reading ${key}`);
     }
 
-    const chunks: Buffer[] = [];
-    for await (const chunk of response.Body as Readable) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-
-    await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, Buffer.concat(chunks));
-    return filePath;
+    return responseBodyToBuffer(response.Body as Readable);
   }
 
-  const buffer = await readFile(localPathForKey(key));
+  return readFile(localPathForKey(key));
+}
+
+export async function downloadObjectToFile(key: string, filePath: string) {
+  requireObjectStorage();
+  const buffer = await readObject(key);
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, buffer);
   return filePath;

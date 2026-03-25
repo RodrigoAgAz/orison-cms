@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import type { AssetCategory } from "@orison/shared/src/constants";
 
+import { DirectLoopViewer } from "@/components/direct-loop-viewer";
 import { LoopBuilder } from "@/components/loop-builder";
 import { requireUser } from "@/lib/auth";
 import { getLoopBuilderData } from "@/lib/queries";
@@ -69,6 +70,26 @@ export default async function LoopBuilderPage({ params }: Props) {
             Back to loops
           </Link>
         </div>
+      </div>
+    );
+  }
+
+  const isDirectUploadLoop = data.loop.slots.length === 0 && Boolean(data.loop.compiledVideoUrl);
+
+  if (isDirectUploadLoop) {
+    return (
+      <div className="page">
+        <DirectLoopViewer
+          loop={{
+            id: data.loop.id,
+            name: data.loop.name,
+            status: data.loop.status,
+            compiledVideoUrl: data.loop.compiledVideoUrl,
+            manifestUrl: data.loop.manifestUrl,
+            publishedAt: data.loop.publishedAt?.toISOString() ?? null,
+            updatedAt: data.loop.updatedAt.toISOString(),
+          }}
+        />
       </div>
     );
   }

@@ -1,4 +1,5 @@
 import { CreateLoopForm } from "@/components/create-loop-form";
+import { DirectLoopUploadForm } from "@/components/direct-loop-upload-form";
 import { LoopsTable } from "@/components/loops-table";
 import { requireUser } from "@/lib/auth";
 import { getLoopListData } from "@/lib/queries";
@@ -17,14 +18,34 @@ export default async function LoopsPage() {
         </div>
       </div>
 
-      <div className="card stack">
-        <div className="card-header">
-          <div>
-            <span className="eyebrow">New Draft</span>
-            <h2>Create a Loop</h2>
+      <div className="grid-two loops-entry-grid">
+        <div className="card stack">
+          <div className="card-header">
+            <div>
+              <span className="eyebrow">Primary Workflow</span>
+              <h2>Create a Loop</h2>
+            </div>
           </div>
+          <p className="muted">
+            Start with the ten-slot builder when you need ad assignment, filler control, and per-slot
+            validation.
+          </p>
+          <CreateLoopForm />
         </div>
-        <CreateLoopForm />
+
+        <div className="card stack">
+          <div className="card-header">
+            <div>
+              <span className="eyebrow">Quick Publish</span>
+              <h2>Upload Pre-built Loop</h2>
+            </div>
+          </div>
+          <p className="muted">
+            Upload one finished MP4 master loop. The CMS will transcode, store, manifest, and publish it
+            directly without using the slot builder.
+          </p>
+          <DirectLoopUploadForm />
+        </div>
       </div>
 
       <div className="card stack">
@@ -42,6 +63,8 @@ export default async function LoopsPage() {
             status: loop.status,
             updatedAt: loop.updatedAt.toISOString(),
             completeSlots: loop.slots.filter((slot) => slot.contents.length > 0).length,
+            isDirectUpload:
+              loop.slots.length === 0 && Boolean(loop.compiledVideoUrl),
           }))}
         />
       </div>

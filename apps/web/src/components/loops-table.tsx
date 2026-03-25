@@ -12,6 +12,7 @@ type LoopRow = {
   status: string;
   updatedAt: string;
   completeSlots: number;
+  isDirectUpload: boolean;
 };
 
 type Props = {
@@ -70,11 +71,20 @@ export function LoopsTable({ loops }: Props) {
                 <StatusPill value={loop.status} />
               </td>
               <td>{new Date(loop.updatedAt).toLocaleString()}</td>
-              <td>{loop.completeSlots}/10 complete</td>
+              <td>
+                {loop.isDirectUpload ? (
+                  <div className="stack-sm">
+                    <strong>Direct upload</strong>
+                    <span className="muted loop-table-subtext">Published from one pre-built MP4</span>
+                  </div>
+                ) : (
+                  `${loop.completeSlots}/10 complete`
+                )}
+              </td>
               <td>
                 <div className="button-row table-actions">
                   <Link className="button button-secondary" href={`/loops/${loop.id}`}>
-                    Open
+                    {loop.isDirectUpload ? "View" : "Open"}
                   </Link>
                   {loop.status === "DRAFT" ? (
                     <button
