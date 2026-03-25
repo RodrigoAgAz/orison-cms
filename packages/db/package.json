@@ -6,8 +6,8 @@
   "types": "src/index.ts",
   "scripts": {
     "prisma:generate": "node ../../node_modules/prisma/build/index.js generate --schema prisma/schema.prisma",
-    "prisma:push": "node --env-file=../../.env ../../node_modules/prisma/build/index.js db push --schema prisma/schema.prisma",
-    "prisma:seed": "node --env-file=../../.env ../../node_modules/tsx/dist/cli.mjs prisma/seed.ts",
+    "prisma:push": "node ../../node_modules/prisma/build/index.js db push --schema prisma/schema.prisma",
+    "prisma:seed": "node ../../node_modules/tsx/dist/cli.mjs prisma/seed.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
@@ -20,6 +20,6 @@
     "typescript": "^5.6.2"
   },
   "prisma": {
-    "seed": "node --env-file=../../.env ../../node_modules/tsx/dist/cli.mjs prisma/seed.ts"
+    "seed": "node ../../node_modules/tsx/dist/cli.mjs prisma/seed.ts"
   }
 }
