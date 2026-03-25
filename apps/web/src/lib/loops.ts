@@ -10,11 +10,11 @@ import { prisma, type Asset, type Loop, type Slot, type SlotContent } from "@ori
 import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
-  checksumJson,
   loopDurationMs,
   slotDurationMs,
   type SlotContentInput,
 } from "@orison/shared";
+import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
 import { commandExists, extractMetadata } from "./media";
