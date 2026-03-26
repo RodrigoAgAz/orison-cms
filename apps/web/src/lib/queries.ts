@@ -222,7 +222,7 @@ export async function getDashboardData() {
     const statusCounts = devicesWithExpectations.reduce(
       (totals, device) => {
         totals.total += 1;
-        totals[device.status] += 1;
+        totals[device.status as "online" | "outdated" | "offline" | "inactive"] += 1;
 
         if (device.playerStatus === "journey") {
           totals.journey += 1;
