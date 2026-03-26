@@ -3,7 +3,7 @@ import { prisma } from "@orison/db";
 
 import { getSessionUser } from "@/lib/auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
-import { startLoopPublishProcess } from "@/lib/publish-loop-process";
+import { publishLoop } from "@/lib/loops";
 
 type Props = {
   params: {
@@ -47,9 +47,9 @@ export async function POST(_: Request, { params }: Props) {
     });
 
     try {
-      startLoopPublishProcess(loop.id, user.id);
+      await publishLoop(loop.id, user.id);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to start publish process";
+      const message = error instanceof Error ? error.message : "Loop publish failed unexpectedly";
       await prisma.loop.update({
         where: { id: loop.id },
         data: {
@@ -60,6 +60,13 @@ export async function POST(_: Request, { params }: Props) {
       throw new ApiError(message, 500);
     }
 
+    await prisma.loop.update({
+      where: { id: loop.id },
+      data: {
+        status: "PUBLISHED",
+      },
+    });
+
     revalidatePath("/");
     revalidatePath("/loops");
     revalidatePath(`/loops/${params.id}`);
@@ -67,7 +74,7 @@ export async function POST(_: Request, { params }: Props) {
 
     return apiResponse({
       ok: true,
-      status: "PUBLISHING",
+      status: "PUBLISHED",
       loopId: loop.id,
     });
   } catch (error) {
