@@ -117,7 +117,7 @@ export function SettingsForm({ settings, users }: Props) {
             These durations control how long each filler item stays on screen inside the minute slot.
             If a weather or news filler is a static JPG/PNG, it will remain visible for this full
             duration before the loop advances to the next filler item. Enter the duration in
-            milliseconds.
+            seconds.
           </p>
           {state.fillers.map((item, index) => (
             <div className="inline-form" key={`${item.category}-${index}`}>
@@ -144,8 +144,9 @@ export function SettingsForm({ settings, users }: Props) {
               </select>
               <input
                 type="number"
-                min={1000}
-                value={item.durationMs}
+                min={1}
+                step={1}
+                value={Math.round(item.durationMs / 1000)}
                 onChange={(event) =>
                   setState((current) => ({
                     ...current,
@@ -153,7 +154,7 @@ export function SettingsForm({ settings, users }: Props) {
                       fillerIndex === index
                         ? {
                             ...filler,
-                            durationMs: Math.max(Number(event.target.value) || 0, 1000),
+                            durationMs: Math.max(Number(event.target.value) || 0, 1) * 1000,
                           }
                         : filler,
                     ),

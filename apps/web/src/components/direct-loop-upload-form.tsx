@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   directLoopUploadMaxBytes,
   directLoopUploadMaxDurationMs,
-} from "@orison/shared";
+} from "@orison/shared/src/constants";
 
 import { useToast } from "@/components/toast-provider";
 

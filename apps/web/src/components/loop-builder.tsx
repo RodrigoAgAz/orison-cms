@@ -1007,13 +1007,15 @@ export function LoopBuilder({
                       ))}
                     </select>
                     <label className="field compact-field">
-                      <span>Duration (ms)</span>
+                      <span>Duration (seconds)</span>
                       <input
-                        min={1000}
-                        onChange={(event) => handleDurationChange(index, Number(event.target.value))}
-                        step={1000}
+                        min={1}
+                        onChange={(event) =>
+                          handleDurationChange(index, Number(event.target.value) * 1000)
+                        }
+                        step={1}
                         type="number"
-                        value={content.durationMs}
+                        value={Math.round(content.durationMs / 1000)}
                       />
                     </label>
                     <button
