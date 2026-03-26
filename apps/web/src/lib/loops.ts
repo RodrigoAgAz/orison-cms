@@ -11,11 +11,11 @@ import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
   directLoopUploadMaxDurationMs,
-  checksumJson,
   loopDurationMs,
   slotDurationMs,
   type SlotContentInput,
 } from "@orison/shared";
+import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
 import { commandExists, extractMetadata } from "./media";
