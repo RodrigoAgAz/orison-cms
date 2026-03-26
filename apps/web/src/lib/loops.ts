@@ -11,11 +11,11 @@ import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
   directLoopUploadMaxDurationMs,
+  checksumJson,
   loopDurationMs,
   slotDurationMs,
   type SlotContentInput,
 } from "@orison/shared";
-import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
 import { commandExists, extractMetadata } from "./media";
@@ -381,7 +381,7 @@ async function normalizeImageToClip(
     "-c:v",
     "libx264",
     "-preset",
-    "medium",
+    "ultrafast",
     "-crf",
     "23",
     "-pix_fmt",
@@ -405,7 +405,7 @@ async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string)
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    "ultrafast",
     "-crf",
     "23",
     "-profile:v",
@@ -500,7 +500,7 @@ async function compileSingleFileLoop(loop: LoopWithContents) {
       "-c:v",
       "libx264",
       "-preset",
-      "medium",
+      "ultrafast",
       "-crf",
       "23",
       "-c:a",
@@ -592,6 +592,7 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
         version: { increment: 1 },
         publishedAt: new Date(),
         publishedBy: publishedByUserId,
+        publishError: null,
         manifestKey,
         manifestUrl: getPublicUrl(manifestKey),
         compiledVideoKey,

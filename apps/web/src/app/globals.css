@@ -634,6 +634,11 @@ textarea {
   color: var(--red);
 }
 
+.alert-warning {
+  background: #fff4d6;
+  color: #7a5a00;
+}
+
 .error-text {
   color: var(--red);
 }

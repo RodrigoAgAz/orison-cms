@@ -70,6 +70,10 @@ export async function DELETE(_: Request, { params }: Props) {
       throw new ApiError("Pause this loop before deleting it", 409);
     }
 
+    if (loop.status === "PUBLISHING") {
+      throw new ApiError("This loop is currently publishing and cannot be deleted", 409);
+    }
+
     await prisma.loop.delete({
       where: { id: loop.id },
     });

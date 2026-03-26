@@ -1,10 +1,9 @@
 import { revalidatePath } from "next/cache";
+import { prisma } from "@orison/db";
 
 import { getSessionUser } from "@/lib/auth";
-import { env } from "@/lib/env";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
-import { publishLoop } from "@/lib/loops";
-import { enqueueLoopPublishJob } from "@/lib/queues";
+import { startLoopPublishProcess } from "@/lib/publish-loop-process";
 
 type Props = {
   params: {
@@ -19,21 +18,58 @@ export async function POST(_: Request, { params }: Props) {
       throw new ApiError("Unauthenticated", 401);
     }
 
-    if (env.inlineMediaJobs || !(await enqueueLoopPublishJob({ loopId: params.id, publishedByUserId: user.id }))) {
-      const result = await publishLoop(params.id, user.id);
-      revalidatePath("/");
-      revalidatePath("/loops");
-      revalidatePath(`/loops/${params.id}`);
-      revalidatePath("/devices");
-      return apiResponse(result);
+    const loop = await prisma.loop.findUnique({
+      where: { id: params.id },
+      select: {
+        id: true,
+        status: true,
+      },
+    });
+
+    if (!loop) {
+      throw new ApiError("Loop not found", 404);
     }
 
-    return apiResponse(
-      {
-        queued: true,
+    if (loop.status === "PUBLISHING") {
+      return apiResponse({
+        ok: true,
+        status: "PUBLISHING",
+        loopId: loop.id,
+      });
+    }
+
+    await prisma.loop.update({
+      where: { id: loop.id },
+      data: {
+        status: "PUBLISHING",
+        publishError: null,
       },
-      { status: 202 },
-    );
+    });
+
+    try {
+      startLoopPublishProcess(loop.id, user.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to start publish process";
+      await prisma.loop.update({
+        where: { id: loop.id },
+        data: {
+          status: "DRAFT",
+          publishError: message,
+        },
+      });
+      throw new ApiError(message, 500);
+    }
+
+    revalidatePath("/");
+    revalidatePath("/loops");
+    revalidatePath(`/loops/${params.id}`);
+    revalidatePath("/devices");
+
+    return apiResponse({
+      ok: true,
+      status: "PUBLISHING",
+      loopId: loop.id,
+    });
   } catch (error) {
     return apiError(error);
   }

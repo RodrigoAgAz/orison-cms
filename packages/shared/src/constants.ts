@@ -9,7 +9,7 @@ export const assetCategories = [
 
 export const assetStatuses = ["PROCESSING", "READY", "FAILED"] as const;
 
-export const loopStatuses = ["DRAFT", "REVIEW", "PUBLISHED", "ARCHIVED"] as const;
+export const loopStatuses = ["DRAFT", "REVIEW", "PUBLISHING", "PUBLISHED", "ARCHIVED"] as const;
 
 export const userRoles = ["ADMIN", "EDITOR"] as const;
 

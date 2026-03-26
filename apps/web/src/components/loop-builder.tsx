@@ -61,6 +61,7 @@ type Props = {
     id: string;
     name: string;
     status: string;
+    publishError?: string | null;
     slots: SlotItem[];
   };
   advertisementAssets: AssetOption[];
@@ -171,6 +172,7 @@ export function LoopBuilder({
   );
   const [name, setName] = useState(loop.name);
   const [status, setStatus] = useState(loop.status);
+  const [publishError, setPublishError] = useState(loop.publishError ?? null);
   const [slots, setSlots] = useState(() =>
     loop.slots.map((slot) => ({
       ...slot,
@@ -215,6 +217,70 @@ export function LoopBuilder({
 
     return () => window.clearTimeout(timer);
   }, [currentPreview, previewItems.length, previewOpen]);
+
+  useEffect(() => {
+    if (status !== "PUBLISHING") {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function pollLoopStatus() {
+      try {
+        const response = await fetch(`/api/loops/${loop.id}`, {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const latest = (await response.json()) as {
+          status?: string;
+          publishError?: string | null;
+        };
+
+        if (cancelled || !latest.status || latest.status === "PUBLISHING") {
+          return;
+        }
+
+        setStatus(latest.status);
+        setPublishError(latest.publishError ?? null);
+
+        if (latest.status === "PUBLISHED") {
+          setError(null);
+          toast({
+            title: "Loop published",
+            message: "The loop manifest and compiled MP4 were generated successfully.",
+            tone: "success",
+          });
+          router.refresh();
+          return;
+        }
+
+        const message = latest.publishError ?? "Loop publish failed.";
+        setError(message);
+        toast({
+          title: "Publish failed",
+          message,
+          tone: "error",
+        });
+        router.refresh();
+      } catch {
+        // Keep polling on transient failures.
+      }
+    }
+
+    void pollLoopStatus();
+    const intervalId = window.setInterval(() => {
+      void pollLoopStatus();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [loop.id, router, status, toast]);
 
   function markSlotDirty(position: number) {
     setDirtySlots((current) =>
@@ -486,6 +552,7 @@ export function LoopBuilder({
     try {
       await saveLoopName();
       await saveDirtySlots();
+      setPublishError(null);
 
       if (!options?.silent) {
         toast({
@@ -539,6 +606,7 @@ export function LoopBuilder({
 
     setPublishing(true);
     setError(null);
+    setPublishError(null);
 
     try {
       const response = await fetch(`/api/loops/${loop.id}/publish`, {
@@ -550,13 +618,12 @@ export function LoopBuilder({
         throw new Error(body?.error ?? "Unable to publish loop");
       }
 
-      setStatus("PUBLISHED");
+      setStatus("PUBLISHING");
       toast({
-        title: "Loop published",
-        message: "The loop manifest and compiled MP4 were generated successfully.",
-        tone: "success",
+        title: "Publishing started",
+        message: "The loop is compiling in the background. This page will refresh automatically.",
+        tone: "info",
       });
-      router.refresh();
     } catch (publishError) {
       const message =
         publishError instanceof Error ? publishError.message : "Unable to publish loop";
@@ -712,19 +779,25 @@ export function LoopBuilder({
                 {archiving ? "Pausing..." : "Pause"}
               </button>
             ) : null}
-            {status !== "PUBLISHED" ? (
-              <button
-                className="button button-danger"
-                disabled={saving || publishing || deleting || archiving}
-                onClick={() => void deleteLoop()}
-                type="button"
-              >
+            {status !== "PUBLISHED" && status !== "PUBLISHING" ? (
+                    <button
+                      className="button button-danger"
+                      disabled={saving || publishing || deleting || archiving}
+                      onClick={() => void deleteLoop()}
+                      type="button"
+                    >
                 {deleting ? "Deleting..." : "Delete"}
               </button>
             ) : null}
             <button
               className="button button-secondary"
-              disabled={saving || publishing || archiving || (!dirtyName && dirtySlots.length === 0)}
+              disabled={
+                saving ||
+                publishing ||
+                archiving ||
+                status === "PUBLISHING" ||
+                (!dirtyName && dirtySlots.length === 0)
+              }
               onClick={() => void persistChanges()}
               type="button"
             >
@@ -739,15 +812,20 @@ export function LoopBuilder({
             </button>
             <button
               className="button button-primary"
-              disabled={saving || publishing || archiving}
+              disabled={saving || publishing || archiving || status === "PUBLISHING"}
               onClick={() => void publishLoop()}
               type="button"
             >
-              {publishing ? "Publishing..." : "Publish"}
+              {publishing || status === "PUBLISHING" ? "Publishing..." : "Publish"}
             </button>
           </div>
         </div>
-        {error ? <div className="alert alert-danger">{error}</div> : null}
+        {status === "PUBLISHING" ? (
+          <div className="alert alert-warning">
+            Publishing in the background. This page checks for status updates every 5 seconds.
+          </div>
+        ) : null}
+        {error ?? publishError ? <div className="alert alert-danger">{error ?? publishError}</div> : null}
       </div>
 
       <section className="card stack">

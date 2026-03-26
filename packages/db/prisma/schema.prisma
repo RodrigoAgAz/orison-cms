@@ -62,6 +62,7 @@ model Loop {
   id               String      @id @default(cuid())
   name             String
   status           LoopStatus  @default(DRAFT)
+  publishError     String?
   version          Int         @default(1)
   checksum         String?
   slots            Slot[]
@@ -78,6 +79,7 @@ model Loop {
 enum LoopStatus {
   DRAFT
   REVIEW
+  PUBLISHING
   PUBLISHED
   ARCHIVED
 }

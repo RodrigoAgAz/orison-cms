@@ -8,6 +8,7 @@ const toneMap: Record<string, string> = {
   PUBLISHED: "pill pill-success",
   DRAFT: "pill pill-muted",
   REVIEW: "pill pill-warning",
+  PUBLISHING: "pill pill-warning",
   ARCHIVED: "pill pill-muted",
   READY: "pill pill-success",
   PROCESSING: "pill pill-warning",
@@ -21,4 +22,3 @@ const toneMap: Record<string, string> = {
 export function StatusPill({ value }: Props) {
   return <span className={clsx(toneMap[value] ?? "pill pill-muted")}>{value}</span>;
 }
-

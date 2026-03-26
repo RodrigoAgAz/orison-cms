@@ -144,7 +144,7 @@ export function LoopsTable({ loops }: Props) {
                       {processingLoopId === loop.id ? "Working..." : "Pause"}
                     </button>
                   ) : null}
-                  {loop.status !== "PUBLISHED" ? (
+                  {loop.status !== "PUBLISHED" && loop.status !== "PUBLISHING" ? (
                     <button
                       className="button button-danger"
                       disabled={processingLoopId === loop.id}

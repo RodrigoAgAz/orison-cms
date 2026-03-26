@@ -103,6 +103,7 @@ export default async function LoopBuilderPage({ params }: Props) {
         fillerTemplate={data.settings.defaultFillerTemplate}
         loop={{
           ...data.loop,
+          publishError: data.loop.publishError,
           slots: data.loop.slots.map((slot) => ({
             ...slot,
             staticCreativeId: slot.staticCreativeId,
