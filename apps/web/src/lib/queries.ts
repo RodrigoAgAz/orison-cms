@@ -92,62 +92,383 @@ export function resolveDeviceStatus(
   return "online";
 }
 
+function normalizePlayerStatus(status: string | null | undefined) {
+  switch (status) {
+    case "playing":
+      return "journey";
+    case "silent":
+      return "silent";
+    case "disabled":
+      return "disabled";
+    case "idle":
+      return "idle";
+    default:
+      return "unknown";
+  }
+}
+
 export async function getDashboardData() {
   try {
-    const since = subDays(new Date(), 1);
-    const [devices, routing, activity, impressionsToday] = await Promise.all([
-      prisma.device.findMany({
-        orderBy: { serialNumber: "asc" },
-        select: {
-          id: true,
-          serialNumber: true,
-          cabLicenseNumber: true,
-          isActive: true,
-          lastHeartbeatAt: true,
-          currentLoopId: true,
-          groupId: true,
-          isDisabled: true,
-        },
-      }),
-      getPublishedLoopRoutingSnapshot(),
-      prisma.activityEvent.findMany({
-        orderBy: { createdAt: "desc" },
-        take: 20,
-      }),
-      prisma.playbackLog.count({
-        where: {
-          playedAt: {
-            gte: since,
+    const now = new Date();
+    const dayStart = startOfDay(now);
+    const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+    const monthStart = startOfMonth(now);
+    const rollingStart = subDays(now, 29);
+    const [routing, fleetControl, settings, devices, groups, activity, publishingLoops, playbackLogs] =
+      await Promise.all([
+        getPublishedLoopRoutingSnapshot(),
+        getFleetControlState(),
+        getCmsSettings(),
+        prisma.device.findMany({
+          orderBy: { serialNumber: "asc" },
+          select: {
+            id: true,
+            serialNumber: true,
+            cabLicenseNumber: true,
+            isActive: true,
+            isDisabled: true,
+            disabledReason: true,
+            lastHeartbeatAt: true,
+            lastSyncAt: true,
+            currentLoopId: true,
+            storageFreeMb: true,
+            groupId: true,
+            group: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            heartbeats: {
+              orderBy: { receivedAt: "desc" },
+              take: 1,
+              select: {
+                receivedAt: true,
+                playerStatus: true,
+                signalStrength: true,
+              },
+            },
           },
-        },
-      }),
-    ]);
+        }),
+        prisma.deviceGroup.findMany({
+          orderBy: { name: "asc" },
+          select: {
+            id: true,
+            name: true,
+            description: true,
+          },
+        }),
+        prisma.activityEvent.findMany({
+          orderBy: { createdAt: "desc" },
+          take: 14,
+        }),
+        prisma.loop.findMany({
+          where: { status: "PUBLISHING" },
+          orderBy: { updatedAt: "desc" },
+          take: 4,
+          select: {
+            id: true,
+            name: true,
+            updatedAt: true,
+            targetGroup: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        }),
+        prisma.playbackLog.findMany({
+          where: {
+            playedAt: {
+              gte: rollingStart,
+            },
+          },
+          select: {
+            playedAt: true,
+            eventName: true,
+            contentType: true,
+            durationMs: true,
+          },
+        }),
+      ]);
 
-    const devicesWithExpectations = devices.map((device) => ({
-      ...device,
-      expectedLoopId: resolveExpectedLoopForGroup(device.groupId, routing)?.id ?? null,
-    }));
+    const safetyVideo = settings.safetyVideoAssetId
+      ? await prisma.asset.findUnique({
+          where: { id: settings.safetyVideoAssetId },
+          select: {
+            id: true,
+            filename: true,
+            durationMs: true,
+          },
+        })
+      : null;
 
-    const onlineCount = devicesWithExpectations.filter(
-      (device) =>
-        device.lastHeartbeatAt &&
-        device.lastHeartbeatAt > new Date(Date.now() - 60 * 60 * 1000) &&
-        device.isActive,
-    ).length;
+    const devicesWithExpectations = devices.map((device) => {
+      const expectedLoop = resolveExpectedLoopForGroup(device.groupId, routing);
+      const latestHeartbeat = device.heartbeats[0] ?? null;
+      const playerStatus = normalizePlayerStatus(latestHeartbeat?.playerStatus);
+
+      return {
+        ...device,
+        latestHeartbeat,
+        expectedLoopId: expectedLoop?.id ?? null,
+        expectedLoopName: expectedLoop?.name ?? null,
+        status: resolveDeviceStatus(device, expectedLoop?.id ?? null),
+        playerStatus,
+      };
+    });
+
+    const statusCounts = devicesWithExpectations.reduce(
+      (totals, device) => {
+        totals.total += 1;
+        totals[device.status] += 1;
+
+        if (device.playerStatus === "journey") {
+          totals.journey += 1;
+        } else if (device.playerStatus === "silent") {
+          totals.silent += 1;
+        } else if (device.playerStatus === "idle") {
+          totals.idle += 1;
+        } else if (device.playerStatus === "disabled") {
+          totals.disabledPlayer += 1;
+        }
+
+        return totals;
+      },
+      {
+        total: 0,
+        online: 0,
+        outdated: 0,
+        offline: 0,
+        inactive: 0,
+        journey: 0,
+        silent: 0,
+        idle: 0,
+        disabledPlayer: 0,
+      },
+    );
+
+    const advertisementLogs = playbackLogs.filter(
+      (entry) => entry.contentType === "ADVERTISEMENT" && !entry.eventName,
+    );
+    const journeyStartLogs = playbackLogs.filter((entry) => entry.eventName === "JOURNEY_START");
+    const journeyEndLogs = playbackLogs.filter((entry) => entry.eventName === "JOURNEY_END");
+    const averageJourneyDurationMs =
+      journeyEndLogs.length === 0
+        ? 0
+        : Math.round(
+            journeyEndLogs.reduce((sum, entry) => sum + (entry.durationMs ?? 0), 0) / journeyEndLogs.length,
+          );
+    const adPlaysPerJourney =
+      journeyStartLogs.length === 0
+        ? 0
+        : Number((advertisementLogs.length / journeyStartLogs.length).toFixed(1));
 
     const uptimePercent =
-      devicesWithExpectations.length === 0 ? 0 : Math.round((onlineCount / devicesWithExpectations.length) * 100);
+      devicesWithExpectations.length === 0
+        ? 0
+        : Math.round(((statusCounts.online + statusCounts.outdated) / devicesWithExpectations.length) * 100);
+
+    const allFleetSummary = {
+      id: "fleet-all",
+      name: "All Fleet",
+      description: "Full pilot fleet overview",
+      deviceCount: devicesWithExpectations.length,
+      onlineCount: statusCounts.online,
+      outdatedCount: statusCounts.outdated,
+      offlineCount: statusCounts.offline,
+      disabledCount: devicesWithExpectations.filter((device) => device.isDisabled).length,
+      journeyCount: statusCounts.journey,
+      silentCount: statusCounts.silent,
+      targetLoop: routing.fleetWideLoop,
+      href: "/devices",
+    };
+
+    const groupSummaries = groups.map((group) => {
+      const members = devicesWithExpectations.filter((device) => device.groupId === group.id);
+      return {
+        id: group.id,
+        name: group.name,
+        description: group.description,
+        deviceCount: members.length,
+        onlineCount: members.filter((device) => device.status === "online").length,
+        outdatedCount: members.filter((device) => device.status === "outdated").length,
+        offlineCount: members.filter((device) => device.status === "offline").length,
+        disabledCount: members.filter((device) => device.isDisabled).length,
+        journeyCount: members.filter((device) => device.playerStatus === "journey").length,
+        silentCount: members.filter((device) => device.playerStatus === "silent").length,
+        targetLoop: routing.groupLoops.get(group.id) ?? routing.fleetWideLoop,
+        href: `/devices?group=${group.id}`,
+      };
+    });
+
+    const activeProgrammes = [
+      ...(routing.fleetWideLoop
+        ? [
+            {
+              id: routing.fleetWideLoop.id,
+              name: routing.fleetWideLoop.name,
+              audience: "All devices",
+              href: `/loops/${routing.fleetWideLoop.id}`,
+              publishedAt: routing.fleetWideLoop.publishedAt,
+            },
+          ]
+        : []),
+      ...groups.flatMap((group) => {
+        const groupLoop = routing.groupLoops.get(group.id);
+        if (!groupLoop) {
+          return [];
+        }
+
+        return [
+          {
+            id: groupLoop.id,
+            name: groupLoop.name,
+            audience: group.name,
+            href: `/loops/${groupLoop.id}`,
+            publishedAt: groupLoop.publishedAt,
+          },
+        ];
+      }),
+    ].sort((left, right) => {
+      const leftTime = left.publishedAt ? left.publishedAt.getTime() : 0;
+      const rightTime = right.publishedAt ? right.publishedAt.getTime() : 0;
+      return rightTime - leftTime;
+    });
+
+    const attentionItems: Array<{
+      id: string;
+      severity: "critical" | "warning" | "info";
+      title: string;
+      detail: string;
+      href: string;
+      actionLabel: string;
+    }> = [];
+
+    if (fleetControl.disabled) {
+      attentionItems.push({
+        id: "fleet-disabled",
+        severity: "critical",
+        title: "Fleet kill-switch is active",
+        detail: fleetControl.reason ?? "All devices are remotely disabled.",
+        href: "/devices",
+        actionLabel: "Review fleet controls",
+      });
+    }
+
+    if (!safetyVideo) {
+      attentionItems.push({
+        id: "missing-safety",
+        severity: "warning",
+        title: "Safety video is not configured",
+        detail: "Journeys can start without a mandatory safety message until one is selected in Settings.",
+        href: "/settings",
+        actionLabel: "Configure safety video",
+      });
+    }
+
+    if (activeProgrammes.length === 0) {
+      attentionItems.push({
+        id: "no-live-programmes",
+        severity: "warning",
+        title: "No published programmes are live",
+        detail: "Publish a fleet-wide loop or a group-targeted loop to resume playback.",
+        href: "/loops",
+        actionLabel: "Open loops",
+      });
+    }
+
+    for (const loop of publishingLoops) {
+      attentionItems.push({
+        id: `publishing-${loop.id}`,
+        severity: "info",
+        title: `${loop.name} is publishing`,
+        detail: `Currently compiling for ${loop.targetGroup?.name ?? "all devices"}.`,
+        href: `/loops/${loop.id}`,
+        actionLabel: "Open loop",
+      });
+    }
+
+    for (const device of devicesWithExpectations.filter((item) => item.status === "offline").slice(0, 3)) {
+      attentionItems.push({
+        id: `offline-${device.id}`,
+        severity: "critical",
+        title: `${device.serialNumber} is offline`,
+        detail: `Last heartbeat ${device.lastHeartbeatAt ? device.lastHeartbeatAt.toISOString() : "never received"}.`,
+        href: "/devices",
+        actionLabel: "Inspect device",
+      });
+    }
+
+    for (const device of devicesWithExpectations.filter((item) => item.status === "outdated").slice(0, 3)) {
+      attentionItems.push({
+        id: `outdated-${device.id}`,
+        severity: "warning",
+        title: `${device.serialNumber} is on old content`,
+        detail: `Expected ${device.expectedLoopName ?? "a published loop"} but device reports ${device.currentLoopId ?? "no loop"}.`,
+        href: "/devices",
+        actionLabel: "Check sync status",
+      });
+    }
+
+    const lowStorageDevice = devicesWithExpectations.find(
+      (device) => typeof device.storageFreeMb === "number" && device.storageFreeMb < 1024,
+    );
+    if (lowStorageDevice) {
+      attentionItems.push({
+        id: `storage-${lowStorageDevice.id}`,
+        severity: "warning",
+        title: `${lowStorageDevice.serialNumber} is low on storage`,
+        detail: `${lowStorageDevice.storageFreeMb} MB remaining on device storage.`,
+        href: "/devices",
+        actionLabel: "Review device",
+      });
+    }
+
+    const unassignedDevices = devicesWithExpectations.filter((device) => !device.groupId && device.isActive).length;
+    if (groups.length > 0 && unassignedDevices > 0) {
+      attentionItems.push({
+        id: "unassigned-group-devices",
+        severity: "info",
+        title: `${unassignedDevices} devices are not assigned to a group`,
+        detail: "They will receive the fleet-wide fallback loop until grouped.",
+        href: "/devices",
+        actionLabel: "Assign groups",
+      });
+    }
 
     return {
       devices: devicesWithExpectations,
       publishedLoop: routing.latestPublishedLoop,
+      fleetWideLoop: routing.fleetWideLoop,
+      safetyVideo,
+      fleetControl,
       activity,
+      activeProgrammes,
+      publishingLoops,
+      attentionItems: attentionItems.slice(0, 8),
+      groupSummaries: [allFleetSummary, ...groupSummaries],
       stats: {
-        totalDevices: devicesWithExpectations.length,
-        onlineCount,
-        offlineCount: devicesWithExpectations.length - onlineCount,
-        impressionsToday,
+        totalDevices: statusCounts.total,
+        onlineCount: statusCounts.online,
+        outdatedCount: statusCounts.outdated,
+        offlineCount: statusCounts.offline,
+        disabledCount: devicesWithExpectations.filter((device) => device.isDisabled).length,
+        activeJourneys: statusCounts.journey + statusCounts.silent,
+        silentScreens: statusCounts.silent,
+        idleScreens: statusCounts.idle,
+        liveProgrammes: activeProgrammes.length,
+        journeysToday: journeyStartLogs.filter((entry) => entry.playedAt >= dayStart).length,
+        adPlaysToday: advertisementLogs.filter((entry) => entry.playedAt >= dayStart).length,
         uptimePercent,
+      },
+      journeyMetrics: {
+        todayCount: journeyStartLogs.filter((entry) => entry.playedAt >= dayStart).length,
+        weekCount: journeyStartLogs.filter((entry) => entry.playedAt >= weekStart).length,
+        monthCount: journeyStartLogs.filter((entry) => entry.playedAt >= monthStart).length,
+        averageDurationMs: averageJourneyDurationMs,
+        adPlaysPerJourney,
       },
       error: null,
     };
@@ -155,13 +476,37 @@ export async function getDashboardData() {
     return {
       devices: [],
       publishedLoop: null,
+      fleetWideLoop: null,
+      safetyVideo: null,
+      fleetControl: {
+        disabled: false,
+        reason: null,
+      },
       activity: [],
+      activeProgrammes: [],
+      publishingLoops: [],
+      attentionItems: [],
+      groupSummaries: [],
       stats: {
         totalDevices: 0,
         onlineCount: 0,
+        outdatedCount: 0,
         offlineCount: 0,
-        impressionsToday: 0,
+        disabledCount: 0,
+        activeJourneys: 0,
+        silentScreens: 0,
+        idleScreens: 0,
+        liveProgrammes: 0,
+        journeysToday: 0,
+        adPlaysToday: 0,
         uptimePercent: 0,
+      },
+      journeyMetrics: {
+        todayCount: 0,
+        weekCount: 0,
+        monthCount: 0,
+        averageDurationMs: 0,
+        adPlaysPerJourney: 0,
       },
       error: formatQueryFailure("Dashboard data", error),
     };
