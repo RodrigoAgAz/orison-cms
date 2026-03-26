@@ -19,6 +19,7 @@ from common import (
     copy_fallback_to_current,
     current_manifest_path,
     current_safety_file,
+    current_safety_image_file,
     ensure_directories,
     load_config,
     read_json,
@@ -139,14 +140,24 @@ class SyncAgent:
 
             safety_payload = manifest.get("safetyVideo") or {}
             safety_url = safety_payload.get("url")
-            safety_target = current_safety_file(staging_dir)
+            safety_mime_type = str(safety_payload.get("mimeType") or "video/mp4")
+            safety_video_target = current_safety_file(staging_dir)
+            safety_image_target = current_safety_image_file(staging_dir)
             if safety_url:
+                safety_target = (
+                    safety_image_target if safety_mime_type.startswith("image/") else safety_video_target
+                )
                 self.download_file(str(safety_url), safety_target, timeout, download_limit)
                 safety_checksum = safety_payload.get("checksum")
                 if safety_checksum and sha256_file(safety_target) != safety_checksum:
-                    raise RuntimeError("safety video checksum mismatch")
+                    raise RuntimeError("safety message checksum mismatch")
+                if safety_target != safety_video_target:
+                    safety_video_target.unlink(missing_ok=True)
+                if safety_target != safety_image_target:
+                    safety_image_target.unlink(missing_ok=True)
             else:
-                safety_target.unlink(missing_ok=True)
+                safety_video_target.unlink(missing_ok=True)
+                safety_image_target.unlink(missing_ok=True)
 
             manifest_slots = {
                 int(slot.get("position", 0)): slot for slot in manifest.get("slots", [])

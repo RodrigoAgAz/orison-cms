@@ -44,6 +44,7 @@ type SafetyVideoManifestData = {
   checksum: string;
   durationMs: number;
   fileSizeBytes: number;
+  mimeType: string;
 };
 
 type DirectLoopUploadOptions = {
@@ -329,6 +330,7 @@ export async function buildPreviewManifest(loopId: string) {
             url: safetyVideo.url,
             checksum: safetyVideo.checksum,
             durationMs: safetyVideo.durationMs,
+            mimeType: safetyVideo.mimeType,
           }
         : undefined,
     slots,
@@ -390,17 +392,25 @@ async function loadSafetyVideoManifestData(): Promise<SafetyVideoManifestData | 
     !asset ||
     asset.status !== "READY" ||
     asset.category !== "SAFETY_MESSAGE" ||
-    !asset.durationMs ||
-    asset.durationMs <= 0
+    !asset.mimeType
   ) {
+    return null;
+  }
+
+  const durationMs = asset.mimeType.startsWith("image/")
+    ? settings.safetyMessageDurationSeconds * 1000
+    : asset.durationMs ?? 0;
+
+  if (durationMs <= 0) {
     return null;
   }
 
   return {
     url: getPublicUrl(asset.s3Key),
     checksum: asset.checksum ?? "",
-    durationMs: asset.durationMs,
+    durationMs,
     fileSizeBytes: asset.fileSize,
+    mimeType: asset.mimeType,
   };
 }
 
@@ -751,6 +761,7 @@ export async function publishDirectLoopUpload({
               url: safetyVideo.url,
               checksum: safetyVideo.checksum,
               durationMs: safetyVideo.durationMs,
+              mimeType: safetyVideo.mimeType,
             }
           : undefined,
       slots: [],

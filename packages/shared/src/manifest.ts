@@ -24,6 +24,7 @@ export const safetyVideoManifestSchema = z.object({
   url: z.string().url(),
   checksum: z.string(),
   durationMs: z.number().int().positive(),
+  mimeType: z.string().min(1).optional(),
 });
 
 export const compiledLoopManifestSchema = z.object({

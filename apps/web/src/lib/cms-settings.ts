@@ -13,6 +13,7 @@ export async function getCmsSettings(): Promise<SettingsInput> {
       heartbeatIntervalSeconds: 300,
       notificationEmails: [],
       safetyVideoAssetId: null,
+      safetyMessageDurationSeconds: 8,
     };
   }
 
@@ -26,6 +27,7 @@ export async function getCmsSettings(): Promise<SettingsInput> {
     heartbeatIntervalSeconds: value.heartbeatIntervalSeconds ?? 300,
     notificationEmails: value.notificationEmails ?? [],
     safetyVideoAssetId: value.safetyVideoAssetId ?? null,
+    safetyMessageDurationSeconds: value.safetyMessageDurationSeconds ?? 8,
   };
 }
 

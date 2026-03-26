@@ -9,11 +9,13 @@ type Props = {
     heartbeatIntervalSeconds: number;
     notificationEmails: string[];
     safetyVideoAssetId: string | null;
+    safetyMessageDurationSeconds: number;
   };
   safetyAssets: Array<{
     id: string;
     filename: string;
     durationMs: number | null;
+    mimeType: string;
   }>;
   users: Array<{
     id: string;
@@ -31,6 +33,7 @@ export function SettingsForm({ settings, safetyAssets, users }: Props) {
     heartbeatIntervalSeconds: String(settings.heartbeatIntervalSeconds),
     notificationEmails: settings.notificationEmails.join(", "),
     safetyVideoAssetId: settings.safetyVideoAssetId ?? "",
+    safetyMessageDurationSeconds: String(settings.safetyMessageDurationSeconds),
     fillers: settings.defaultFillerTemplate,
   });
 
@@ -52,6 +55,7 @@ export function SettingsForm({ settings, safetyAssets, users }: Props) {
           .map((value) => value.trim())
           .filter(Boolean),
         safetyVideoAssetId: state.safetyVideoAssetId || null,
+        safetyMessageDurationSeconds: Number(state.safetyMessageDurationSeconds),
         defaultFillerTemplate: state.fillers,
       }),
     });
@@ -122,11 +126,12 @@ export function SettingsForm({ settings, safetyAssets, users }: Props) {
         <div className="stack">
           <strong>Safety video</strong>
           <p className="muted">
-            This non-skippable clip plays once at journey start before ad playback begins. Upload safety
-            message assets in the library using the SAFETY_MESSAGE category.
+            This non-skippable message plays once at journey start before ad playback begins. Upload either
+            a safety video or a static image in the library using the SAFETY_MESSAGE category. If you use
+            a static image, the duration below controls how long it stays on screen.
           </p>
           <label className="field">
-            <span>Active safety video</span>
+            <span>Active safety asset</span>
             <select
               value={state.safetyVideoAssetId}
               onChange={(event) =>
@@ -140,10 +145,30 @@ export function SettingsForm({ settings, safetyAssets, users }: Props) {
               {safetyAssets.map((asset) => (
                 <option key={asset.id} value={asset.id}>
                   {asset.filename}
-                  {asset.durationMs ? ` (${Math.round(asset.durationMs / 1000)}s)` : ""}
+                  {asset.mimeType.startsWith("video/")
+                    ? asset.durationMs
+                      ? ` (video · ${Math.round(asset.durationMs / 1000)}s)`
+                      : " (video)"
+                    : " (image)"}
                 </option>
               ))}
             </select>
+          </label>
+          <label className="field">
+            <span>Static safety image duration (seconds)</span>
+            <input
+              type="number"
+              min={1}
+              max={300}
+              step={1}
+              value={state.safetyMessageDurationSeconds}
+              onChange={(event) =>
+                setState((current) => ({
+                  ...current,
+                  safetyMessageDurationSeconds: event.target.value,
+                }))
+              }
+            />
           </label>
         </div>
 

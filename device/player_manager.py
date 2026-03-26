@@ -29,6 +29,7 @@ from common import (
     current_loop_file,
     current_manifest_path,
     current_safety_file,
+    current_safety_image_file,
     ensure_directories,
     load_config,
     read_json,
@@ -67,6 +68,7 @@ class PlayerManager:
         self.loop_started_monotonic: float | None = None
         self.idle_started_monotonic = time.monotonic()
         self.wind_down_started_monotonic: float | None = None
+        self.safety_started_monotonic: float | None = None
         self.journey_id: str | None = None
         self.journey_started_at_iso: str | None = None
         self.last_silent_slot_index: int | None = None
@@ -240,6 +242,8 @@ class PlayerManager:
         old_state = self.state
         self.state = new_state
         self.logger.info("state transition %s -> %s", old_state.value, new_state.value)
+        if new_state != PlayerState.SAFETY:
+            self.safety_started_monotonic = None
 
         if new_state == PlayerState.IDLE:
             self.reset_journey_clock()
@@ -251,12 +255,13 @@ class PlayerManager:
             return
 
         if new_state == PlayerState.SAFETY:
-            safety_path = current_safety_file()
+            safety_path = self.current_safety_path()
             if not safety_path.exists():
                 self.loop_started_monotonic = time.monotonic()
                 self.transition(PlayerState.JOURNEY)
                 return
 
+            self.safety_started_monotonic = time.monotonic()
             self.load_file(safety_path, loop_forever=False)
             self.log_event(
                 event=None,
@@ -381,7 +386,7 @@ class PlayerManager:
             return
 
         if self.state == PlayerState.SAFETY:
-            safety_path = current_safety_file()
+            safety_path = self.current_safety_path()
             if safety_path.exists():
                 self.load_file(safety_path, loop_forever=False)
             else:
@@ -492,6 +497,11 @@ class PlayerManager:
             return None
 
     def safety_finished(self) -> bool:
+        if self.safety_is_image():
+            if self.safety_started_monotonic is None:
+                return False
+            return time.monotonic() - self.safety_started_monotonic >= self.safety_duration_ms() / 1000.0
+
         eof_reached = self.get_mpv_property("eof-reached")
         if eof_reached is True:
             return True
@@ -501,6 +511,21 @@ class PlayerManager:
             return False
 
         return time_pos * 1000 >= max(self.safety_duration_ms() - 250, 0)
+
+    def current_safety_path(self) -> Path:
+        if self.safety_is_image():
+            image_path = current_safety_image_file()
+            if image_path.exists():
+                return image_path
+        video_path = current_safety_file()
+        if video_path.exists():
+            return video_path
+        return current_safety_image_file()
+
+    def safety_is_image(self) -> bool:
+        manifest = read_json(current_manifest_path(), {})
+        safety_video = manifest.get("safetyVideo") or {}
+        return str(safety_video.get("mimeType") or "").startswith("image/")
 
     def wait_for_media_path(self, media_path: Path) -> bool:
         target_path = str(media_path)

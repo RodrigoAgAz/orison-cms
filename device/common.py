@@ -132,6 +132,10 @@ def current_safety_file(base_dir: Path | None = None) -> Path:
     return (base_dir or CURRENT_DIR) / "safety.mp4"
 
 
+def current_safety_image_file(base_dir: Path | None = None) -> Path:
+    return (base_dir or CURRENT_DIR) / "safety.jpg"
+
+
 def statics_dir(base_dir: Path | None = None) -> Path:
     return (base_dir or CURRENT_DIR) / STATICS_DIRNAME
 

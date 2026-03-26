@@ -20,6 +20,7 @@ function buildDefaultSettings() {
     heartbeatIntervalSeconds: 300,
     notificationEmails: [],
     safetyVideoAssetId: null,
+    safetyMessageDurationSeconds: 8,
   };
 }
 
@@ -193,15 +194,24 @@ export async function getDashboardData() {
         }),
       ]);
 
-    const safetyVideo = settings.safetyVideoAssetId
+    const safetyVideoAsset = settings.safetyVideoAssetId
       ? await prisma.asset.findUnique({
           where: { id: settings.safetyVideoAssetId },
           select: {
             id: true,
             filename: true,
             durationMs: true,
+            mimeType: true,
           },
         })
+      : null;
+    const safetyVideo = safetyVideoAsset
+      ? {
+          ...safetyVideoAsset,
+          durationMs: safetyVideoAsset.mimeType.startsWith("image/")
+            ? settings.safetyMessageDurationSeconds * 1000
+            : safetyVideoAsset.durationMs,
+        }
       : null;
 
     const devicesWithExpectations = devices.map((device) => {
@@ -1059,6 +1069,7 @@ export async function getSettingsData() {
           id: true,
           filename: true,
           durationMs: true,
+          mimeType: true,
         },
       }),
     ]);

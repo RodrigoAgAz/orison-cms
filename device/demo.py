@@ -27,7 +27,8 @@ CONTENT_DIR = SCRIPT_DIR / "demo_content"
 STATICS_DIR = CONTENT_DIR / "statics"
 MANIFEST_PATH = CONTENT_DIR / "manifest.json"
 LOOP_PATH = CONTENT_DIR / "loop.mp4"
-SAFETY_PATH = CONTENT_DIR / "safety.mp4"
+SAFETY_VIDEO_PATH = CONTENT_DIR / "safety.mp4"
+SAFETY_IMAGE_PATH = CONTENT_DIR / "safety.jpg"
 DEFAULT_STATIC_IMAGE_PATH = SCRIPT_DIR / "orison_static_fallback.jpg"
 MPV_SOCKET_PATH = "/tmp/orison-demo-mpv.sock"
 CHUNK_SIZE = 1024 * 1024
@@ -202,11 +203,23 @@ def ensure_slot_static(slot_index: int, slot_payload: dict[str, Any] | None) -> 
 def ensure_safety_video(manifest: dict[str, Any]) -> None:
     safety_payload = manifest.get("safetyVideo") or {}
     safety_url = safety_payload.get("url")
+    safety_mime_type = str(safety_payload.get("mimeType") or "video/mp4")
     if safety_url:
-        download_file(str(safety_url), SAFETY_PATH, safety_payload.get("checksum"), "Downloading safety.mp4")
+        safety_path = SAFETY_IMAGE_PATH if safety_mime_type.startswith("image/") else SAFETY_VIDEO_PATH
+        download_file(
+            str(safety_url),
+            safety_path,
+            safety_payload.get("checksum"),
+            f"Downloading {safety_path.name}",
+        )
+        if safety_path != SAFETY_VIDEO_PATH:
+            SAFETY_VIDEO_PATH.unlink(missing_ok=True)
+        if safety_path != SAFETY_IMAGE_PATH:
+            SAFETY_IMAGE_PATH.unlink(missing_ok=True)
         return
 
-    SAFETY_PATH.unlink(missing_ok=True)
+    SAFETY_VIDEO_PATH.unlink(missing_ok=True)
+    SAFETY_IMAGE_PATH.unlink(missing_ok=True)
 
 
 def ensure_latest_loop(config: dict[str, Any]) -> dict[str, Any]:
@@ -253,6 +266,7 @@ class DemoPlayer:
         self.loop_started_monotonic: float | None = None
         self.idle_started_monotonic = time.monotonic()
         self.wind_down_started_monotonic: float | None = None
+        self.safety_started_monotonic: float | None = None
         self.last_silent_slot_index: int | None = None
         self.last_idle_slot_index: int | None = None
 
@@ -350,6 +364,12 @@ class DemoPlayer:
         return DEFAULT_STATIC_IMAGE_PATH
 
     def safety_finished(self) -> bool:
+        if self.safety_is_image():
+            if self.safety_started_monotonic is None:
+                return False
+            duration_ms = int((self.manifest.get("safetyVideo") or {}).get("durationMs") or 0)
+            return time.monotonic() - self.safety_started_monotonic >= max(duration_ms, 0) / 1000.0
+
         eof_reached = self.get_mpv_property("eof-reached")
         if eof_reached is True:
             return True
@@ -360,8 +380,20 @@ class DemoPlayer:
             return False
         return float(time_pos) * 1000 >= max(duration_ms - 250, 0)
 
+    def current_safety_path(self) -> Path:
+        if self.safety_is_image() and SAFETY_IMAGE_PATH.exists():
+            return SAFETY_IMAGE_PATH
+        if SAFETY_VIDEO_PATH.exists():
+            return SAFETY_VIDEO_PATH
+        return SAFETY_IMAGE_PATH
+
+    def safety_is_image(self) -> bool:
+        return str((self.manifest.get("safetyVideo") or {}).get("mimeType") or "").startswith("image/")
+
     def transition(self, new_state: DemoState, *, reset_idle_clock: bool = False) -> None:
         self.state = new_state
+        if new_state != DemoState.SAFETY:
+            self.safety_started_monotonic = None
 
         if new_state == DemoState.DISABLED:
             self.load_file(DEFAULT_STATIC_IMAGE_PATH, loop_forever=False)
@@ -377,12 +409,14 @@ class DemoPlayer:
             return
 
         if new_state == DemoState.SAFETY:
-            if not SAFETY_PATH.exists():
+            safety_path = self.current_safety_path()
+            if not safety_path.exists():
                 self.loop_started_monotonic = time.monotonic()
                 self.transition(DemoState.JOURNEY)
                 return
 
-            self.load_file(SAFETY_PATH, loop_forever=False)
+            self.safety_started_monotonic = time.monotonic()
+            self.load_file(safety_path, loop_forever=False)
             return
 
         if new_state == DemoState.JOURNEY:
