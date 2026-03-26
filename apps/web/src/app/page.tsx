@@ -1,4 +1,5 @@
 import { formatDistanceToNowStrict } from "date-fns";
+import type { Route } from "next";
 import Link from "next/link";
 
 import { PageErrorNotice } from "@/components/page-error-notice";
@@ -173,7 +174,7 @@ export default async function DashboardPage() {
                 Device Preview
               </Link>
               {publishedLoop ? (
-                <Link className="button button-secondary" href={`/loops/${publishedLoop.id}`}>
+                <Link className="button button-secondary" href={`/loops/${publishedLoop.id}` as Route}>
                   View Latest Loop
                 </Link>
               ) : null}
@@ -182,7 +183,7 @@ export default async function DashboardPage() {
 
           <div className="ops-group-strip">
             {groupSummaries.map((group) => (
-              <Link className="ops-group-card" href={group.href} key={group.id}>
+              <Link className="ops-group-card" href={group.href as Route} key={group.id}>
                 <div className="ops-group-top">
                   <div>
                     <strong>{group.name}</strong>
@@ -291,7 +292,7 @@ export default async function DashboardPage() {
                       <strong>{item.title}</strong>
                       <p>{item.detail}</p>
                     </div>
-                    <Link className="button button-secondary" href={item.href}>
+                    <Link className="button button-secondary" href={item.href as Route}>
                       {item.actionLabel}
                     </Link>
                   </div>
@@ -318,7 +319,7 @@ export default async function DashboardPage() {
                 <>
                   <strong>{fleetWideLoop.name}</strong>
                   <p>Published {fleetWideLoop.publishedAt ? formatRelativeTime(fleetWideLoop.publishedAt) : "recently"}</p>
-                  <Link className="button button-secondary" href={`/loops/${fleetWideLoop.id}`}>
+                  <Link className="button button-secondary" href={`/loops/${fleetWideLoop.id}` as Route}>
                     Open loop
                   </Link>
                 </>
@@ -340,7 +341,7 @@ export default async function DashboardPage() {
               ) : (
                 <div className="ops-programme-list">
                   {groupProgrammes.map((programme) => (
-                    <Link className="ops-programme-row" href={programme.href} key={`${programme.id}-${programme.audience}`}>
+                    <Link className="ops-programme-row" href={programme.href as Route} key={`${programme.id}-${programme.audience}`}>
                       <div>
                         <strong>{programme.name}</strong>
                         <p>{programme.audience}</p>
@@ -362,7 +363,7 @@ export default async function DashboardPage() {
               ) : (
                 <div className="ops-programme-list">
                   {publishingLoops.map((loop) => (
-                    <Link className="ops-programme-row" href={`/loops/${loop.id}`} key={loop.id}>
+                    <Link className="ops-programme-row" href={`/loops/${loop.id}` as Route} key={loop.id}>
                       <div>
                         <strong>{loop.name}</strong>
                         <p>{loop.targetGroup?.name ?? "All devices"}</p>
