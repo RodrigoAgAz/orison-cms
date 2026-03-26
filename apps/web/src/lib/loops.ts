@@ -55,20 +55,21 @@ function sortLoopContents(loop: LoopWithContents) {
     }));
 }
 
-export function validateSlotContents(contents: SlotContentInput[]) {
+function validateDraftSlotContents(contents: SlotContentInput[]) {
   const sorted = contents.slice().sort((a, b) => a.startTimeMs - b.startTimeMs);
   const totalDuration = contents.reduce((sum, content) => sum + content.durationMs, 0);
-  if (totalDuration !== slotDurationMs) {
-    throw new Error(`Slot must total exactly ${slotDurationMs}ms`);
-  }
-
   const advertisements = contents.filter((content) => content.contentType === "ADVERTISEMENT");
-  if (advertisements.length !== 1) {
-    throw new Error("Each slot must contain exactly one advertisement");
+
+  if (advertisements.length > 1) {
+    throw new Error("A slot can only contain one advertisement");
   }
 
-  if (advertisements[0]?.durationMs !== advertisementDurationMs) {
+  if (advertisements.some((content) => content.durationMs !== advertisementDurationMs)) {
     throw new Error(`Advertisement duration must be ${advertisementDurationMs}ms`);
+  }
+
+  if (totalDuration > slotDurationMs) {
+    throw new Error(`Slot content cannot exceed ${slotDurationMs}ms`);
   }
 
   for (let index = 0; index < sorted.length; index += 1) {
@@ -82,6 +83,21 @@ export function validateSlotContents(contents: SlotContentInput[]) {
     if (next && current.startTimeMs + current.durationMs > next.startTimeMs) {
       throw new Error("Slot contents overlap");
     }
+  }
+
+  return sorted;
+}
+
+export function validateSlotContents(contents: SlotContentInput[]) {
+  const sorted = validateDraftSlotContents(contents);
+  const totalDuration = contents.reduce((sum, content) => sum + content.durationMs, 0);
+  const advertisements = contents.filter((content) => content.contentType === "ADVERTISEMENT");
+  if (totalDuration !== slotDurationMs) {
+    throw new Error(`Slot must total exactly ${slotDurationMs}ms`);
+  }
+
+  if (advertisements.length !== 1) {
+    throw new Error("Each slot must contain exactly one advertisement");
   }
 
   return sorted;
@@ -196,7 +212,7 @@ export async function updateSlotContents(
   contents: SlotContentInput[],
   staticCreativeId?: string | null,
 ) {
-  validateSlotContents(contents);
+  validateDraftSlotContents(contents);
 
   const slot = await prisma.slot.findUnique({
     where: {
@@ -211,7 +227,7 @@ export async function updateSlotContents(
     throw new Error("Slot not found");
   }
 
-  const assetIds = contents.map((content) => content.assetId);
+  const assetIds = [...new Set(contents.map((content) => content.assetId))];
   const assets = await prisma.asset.findMany({
     where: {
       id: { in: assetIds },

@@ -111,10 +111,12 @@ function withStartTimes(contents: SlotContentItem[], assetMap: Map<string, Asset
 function getSlotSummary(slot: SlotItem) {
   const totalDuration = slot.contents.reduce((sum, item) => sum + item.durationMs, 0);
   const adCount = slot.contents.filter((item) => item.contentType === "ADVERTISEMENT").length;
+  const remainingDuration = Math.max(slotDurationMs - totalDuration, 0);
   const isValid = totalDuration === slotDurationMs && adCount === 1;
 
   return {
     totalDuration,
+    remainingDuration,
     adCount,
     isValid,
   };
@@ -325,6 +327,66 @@ export function LoopBuilder({
     });
   }
 
+  function handleAddFiller() {
+    if (!selectedAd) {
+      setError("Choose an advertisement before adding filler segments.");
+      toast({
+        title: "Advertisement required",
+        message: "Assign the 12 second ad first, then add filler around it.",
+        tone: "error",
+      });
+      return;
+    }
+
+    if (fillerAssets.length === 0) {
+      setError("Upload at least one weather, news, branded, or other filler asset first.");
+      toast({
+        title: "No filler assets ready",
+        message: "Upload a filler asset in the asset library before adding filler segments.",
+        tone: "error",
+      });
+      return;
+    }
+
+    const slotSummary = getSlotSummary(selectedSlot);
+    if (slotSummary.remainingDuration <= 0) {
+      setError("This slot already totals 60 seconds. Remove or shorten a filler segment first.");
+      toast({
+        title: "Slot already full",
+        message: "Remove or shorten an existing filler segment before adding another one.",
+        tone: "error",
+      });
+      return;
+    }
+
+    const nextTemplateItem = fillerTemplate[selectedFillers.length];
+    const defaultAsset =
+      (nextTemplateItem
+        ? fillerAssets.find((asset) => asset.category === nextTemplateItem.category)
+        : null) ?? fillerAssets[0];
+    const requestedDuration = nextTemplateItem?.durationMs ?? 15_000;
+    const durationMs = Math.min(requestedDuration, slotSummary.remainingDuration);
+
+    replaceSelectedSlot([
+      { ...selectedAd, asset: selectedAd.asset },
+      ...selectedFillers,
+      {
+        assetId: defaultAsset.id,
+        orderInSlot: selectedFillers.length + 1,
+        startTimeMs: 0,
+        durationMs,
+        contentType: "FILLER",
+        asset: defaultAsset,
+      },
+    ]);
+
+    toast({
+      title: "Filler segment added",
+      message: `${defaultAsset.filename} was added to slot ${selectedPosition + 1}.`,
+      tone: "success",
+    });
+  }
+
   function handleFillerChange(index: number, assetId: string) {
     const nextFillers = selectedFillers.map((content, fillerIndex) =>
       fillerIndex === index
@@ -349,6 +411,11 @@ export function LoopBuilder({
         : content,
     );
 
+    replaceSelectedSlot([...(selectedAd ? [{ ...selectedAd, asset: selectedAd.asset }] : []), ...nextFillers]);
+  }
+
+  function handleRemoveFiller(index: number) {
+    const nextFillers = selectedFillers.filter((_, fillerIndex) => fillerIndex !== index);
     replaceSelectedSlot([...(selectedAd ? [{ ...selectedAd, asset: selectedAd.asset }] : []), ...nextFillers]);
   }
 
@@ -772,6 +839,14 @@ export function LoopBuilder({
             <h2>Slot {selectedPosition + 1} detail</h2>
           </div>
           <div className="button-row">
+            <button
+              className="button button-secondary"
+              disabled={!selectedAd || fillerAssets.length === 0}
+              onClick={handleAddFiller}
+              type="button"
+            >
+              Add filler segment
+            </button>
             <button className="button button-secondary" onClick={handleAutofill} type="button">
               Auto-fill filler
             </button>
@@ -818,7 +893,7 @@ export function LoopBuilder({
               <div className="segment-panel-meta">12 seconds</div>
             </div>
 
-            <div className="segment-panel-body">
+              <div className="segment-panel-body">
               <MediaPoster
                 alt={selectedAd?.asset?.filename ?? "Advertisement slot"}
                 className="segment-poster"
@@ -895,11 +970,16 @@ export function LoopBuilder({
               <div className="segment-panel-meta">Target 48 seconds</div>
             </div>
 
+            <p className="muted">
+              Add weather, news, branded, or other filler segments manually. Static JPG/PNG filler
+              assets stay on screen for the duration you set here.
+            </p>
+
             <div className="segment-list">
               {selectedFillers.length === 0 ? (
                 <div className="empty-state compact">
                   <strong>No filler segments yet</strong>
-                  <p>Use the default weather, news, and branded template to complete this slot.</p>
+                  <p>Use Auto-fill or Add filler segment to build this minute out around the ad.</p>
                 </div>
               ) : (
                 selectedFillers.map((content, index) => (
@@ -927,7 +1007,7 @@ export function LoopBuilder({
                       ))}
                     </select>
                     <label className="field compact-field">
-                      <span>Duration</span>
+                      <span>Duration (ms)</span>
                       <input
                         min={1000}
                         onChange={(event) => handleDurationChange(index, Number(event.target.value))}
@@ -936,6 +1016,13 @@ export function LoopBuilder({
                         value={content.durationMs}
                       />
                     </label>
+                    <button
+                      className="button button-secondary"
+                      onClick={() => handleRemoveFiller(index)}
+                      type="button"
+                    >
+                      Remove
+                    </button>
                   </div>
                 ))
               )}
@@ -946,12 +1033,14 @@ export function LoopBuilder({
         <div className="validation-banner">
           <div className={`validation-state ${getSlotSummary(selectedSlot).isValid ? "is-valid" : "is-invalid"}`}>
             <strong>
-              {getSlotSummary(selectedSlot).isValid ? "Slot ready" : "Slot incomplete"}
+              {getSlotSummary(selectedSlot).isValid ? "Slot ready" : "Slot still in progress"}
             </strong>
             <span>
               {getSlotSummary(selectedSlot).isValid
                 ? "This slot totals 60 seconds and contains one advertisement."
-                : "The slot must total exactly 60 seconds with one 12 second advertisement."}
+                : `${formatTime(getSlotSummary(selectedSlot).totalDuration)} programmed, ${formatTime(
+                    getSlotSummary(selectedSlot).remainingDuration,
+                  )} remaining. You can still save this draft slot.`}
             </span>
           </div>
           <button

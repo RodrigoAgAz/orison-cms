@@ -113,6 +113,12 @@ export function SettingsForm({ settings, users }: Props) {
 
         <div className="stack">
           <strong>Default filler template</strong>
+          <p className="muted">
+            These durations control how long each filler item stays on screen inside the minute slot.
+            If a weather or news filler is a static JPG/PNG, it will remain visible for this full
+            duration before the loop advances to the next filler item. Enter the duration in
+            milliseconds.
+          </p>
           {state.fillers.map((item, index) => (
             <div className="inline-form" key={`${item.category}-${index}`}>
               <select
@@ -138,6 +144,7 @@ export function SettingsForm({ settings, users }: Props) {
               </select>
               <input
                 type="number"
+                min={1000}
                 value={item.durationMs}
                 onChange={(event) =>
                   setState((current) => ({
@@ -146,15 +153,45 @@ export function SettingsForm({ settings, users }: Props) {
                       fillerIndex === index
                         ? {
                             ...filler,
-                            durationMs: Number(event.target.value),
+                            durationMs: Math.max(Number(event.target.value) || 0, 1000),
                           }
                         : filler,
                     ),
                   }))
                 }
               />
+              <button
+                className="button button-secondary"
+                onClick={() =>
+                  setState((current) => ({
+                    ...current,
+                    fillers: current.fillers.filter((_, fillerIndex) => fillerIndex !== index),
+                  }))
+                }
+                type="button"
+              >
+                Remove
+              </button>
             </div>
           ))}
+          <button
+            className="button button-secondary"
+            onClick={() =>
+              setState((current) => ({
+                ...current,
+                fillers: [
+                  ...current.fillers,
+                  {
+                    category: "FILLER_OTHER",
+                    durationMs: 5000,
+                  },
+                ],
+              }))
+            }
+            type="button"
+          >
+            Add filler step
+          </button>
         </div>
 
         {error ? <div className="alert alert-danger">{error}</div> : null}
@@ -198,4 +235,3 @@ export function SettingsForm({ settings, users }: Props) {
     </div>
   );
 }
-
