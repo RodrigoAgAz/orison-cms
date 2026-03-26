@@ -1,5 +1,6 @@
 "use client";
 
+import type { Route } from "next";
 import Link from "next/link";
 
 type Props = {
@@ -32,7 +33,7 @@ function buildHref(
   }
 
   const search = params.toString();
-  return search ? `${pathname}?${search}` : pathname;
+  return (search ? `${pathname}?${search}` : pathname) as Route;
 }
 
 export function PaginationControls({ pathname, page, pageSize, total, query = {} }: Props) {
