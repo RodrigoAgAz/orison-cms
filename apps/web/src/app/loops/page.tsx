@@ -1,12 +1,27 @@
 import { CreateLoopForm } from "@/components/create-loop-form";
 import { DirectLoopUploadForm } from "@/components/direct-loop-upload-form";
 import { LoopsTable } from "@/components/loops-table";
+import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
 import { getLoopListData } from "@/lib/queries";
 
-export default async function LoopsPage() {
+type Props = {
+  searchParams?: {
+    page?: string;
+  };
+};
+
+function parsePage(value: string | undefined) {
+  const page = Number(value);
+  return Number.isInteger(page) && page > 0 ? page : 1;
+}
+
+export default async function LoopsPage({ searchParams }: Props) {
   await requireUser();
-  const loops = await getLoopListData();
+  const result = await getLoopListData({
+    page: parsePage(searchParams?.page),
+    pageSize: 12,
+  });
 
   return (
     <div className="page">
@@ -17,6 +32,8 @@ export default async function LoopsPage() {
           <p className="muted">Create, duplicate, inspect, and publish ten-minute playback loops.</p>
         </div>
       </div>
+
+      <PageErrorNotice message={result.error} title="Loop library unavailable" />
 
       <div className="grid-two loops-entry-grid">
         <div className="card stack">
@@ -57,15 +74,18 @@ export default async function LoopsPage() {
         </div>
 
         <LoopsTable
-          loops={loops.map((loop) => ({
+          loops={result.items.map((loop) => ({
             id: loop.id,
             name: loop.name,
             status: loop.status,
             updatedAt: loop.updatedAt.toISOString(),
             completeSlots: loop.slots.filter((slot) => slot.contents.length > 0).length,
             isDirectUpload:
-              loop.slots.length === 0 && Boolean(loop.compiledVideoUrl),
+              loop.slots.length === 0 && Boolean(loop.compiledVideoUrl || loop.compiledVideoKey),
           }))}
+          page={result.page}
+          pageSize={result.pageSize}
+          total={result.total}
         />
       </div>
     </div>

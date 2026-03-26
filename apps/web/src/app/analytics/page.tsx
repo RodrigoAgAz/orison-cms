@@ -1,4 +1,5 @@
 import { AnalyticsDashboard } from "@/components/analytics-dashboard";
+import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
 import { getAnalyticsData } from "@/lib/queries";
 
@@ -15,6 +16,8 @@ export default async function AnalyticsPage() {
           <p className="muted">High-level pilot metrics for impressions, ad plays, and uptime.</p>
         </div>
       </div>
+
+      <PageErrorNotice message={analytics.error} title="Analytics unavailable" />
 
       <AnalyticsDashboard analytics={analytics} />
     </div>

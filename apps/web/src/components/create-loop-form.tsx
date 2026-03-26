@@ -1,8 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+import { useToast } from "@/components/toast-provider";
 
 export function CreateLoopForm() {
+  const router = useRouter();
+  const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,23 +29,40 @@ export function CreateLoopForm() {
 
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      setError(body?.error ?? "Unable to create loop");
+      const message = body?.error ?? "Unable to create loop";
+      setError(message);
+      toast({
+        title: "Loop creation failed",
+        message,
+        tone: "error",
+      });
       setLoading(false);
       return;
     }
 
     const body = (await response.json()) as { id: string };
-    window.location.href = `/loops/${body.id}`;
+    toast({
+      title: "Loop created",
+      message: `${name} is ready in the builder.`,
+      tone: "success",
+    });
+    router.push(`/loops/${body.id}`);
   }
 
   return (
     <form className="inline-form" onSubmit={handleSubmit}>
       <input name="name" placeholder="Week 12 - 2026" required />
       <button className="button button-primary" disabled={loading} type="submit">
-        {loading ? "Creating..." : "Create Loop"}
+        {loading ? (
+          <span className="button-inline">
+            <span aria-hidden className="button-spinner" />
+            Creating loop
+          </span>
+        ) : (
+          "Create Loop"
+        )}
       </button>
       {error ? <span className="error-text">{error}</span> : null}
     </form>
   );
 }
-

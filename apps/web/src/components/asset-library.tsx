@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { MediaPoster } from "@/components/media-poster";
 import { Modal } from "@/components/modal";
+import { PaginationControls } from "@/components/pagination-controls";
 import { StatusPill } from "@/components/status-pill";
 import { useToast } from "@/components/toast-provider";
 
@@ -37,6 +38,11 @@ type AssetItem = {
 
 type Props = {
   assets: AssetItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  currentQuery: string;
+  currentCategory: string;
 };
 
 const categories = [
@@ -68,14 +74,20 @@ function assetSummary(asset: AssetItem) {
   return advertiser ?? campaign ?? "No campaign metadata";
 }
 
-export function AssetLibrary({ assets }: Props) {
+export function AssetLibrary({
+  assets,
+  page,
+  pageSize,
+  total,
+  currentQuery,
+  currentCategory,
+}: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const progressTimerRef = useRef<number | null>(null);
-  const [selectedCategory, setSelectedCategory] =
-    useState<(typeof categories)[number]>("ALL");
-  const [query, setQuery] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string>(currentCategory || "ALL");
+  const [query, setQuery] = useState(currentQuery);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [category, setCategory] = useState("ADVERTISEMENT");
   const [advertiserName, setAdvertiserName] = useState("");
@@ -90,25 +102,6 @@ export function AssetLibrary({ assets }: Props) {
     phase: "idle",
     progress: 0,
   });
-
-  const filtered = useMemo(() => {
-    return assets.filter((asset) => {
-      if (selectedCategory !== "ALL" && asset.category !== selectedCategory) {
-        return false;
-      }
-
-      if (!query.trim()) {
-        return true;
-      }
-
-      const search = query.toLowerCase();
-      return [
-        asset.filename,
-        asset.metadata.advertiserName ?? "",
-        asset.metadata.campaignName ?? "",
-      ].some((value) => value.toLowerCase().includes(search));
-    });
-  }, [assets, query, selectedCategory]);
 
   function stopProgressTimer() {
     if (progressTimerRef.current) {
@@ -151,6 +144,27 @@ export function AssetLibrary({ assets }: Props) {
     }
   }
 
+  function applyFilters(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const params = new URLSearchParams();
+
+    if (query.trim()) {
+      params.set("search", query.trim());
+    }
+
+    if (selectedCategory !== "ALL") {
+      params.set("category", selectedCategory);
+    }
+
+    router.push(params.toString() ? `/assets?${params.toString()}` : "/assets");
+  }
+
+  function clearFilters() {
+    setQuery("");
+    setSelectedCategory("ALL");
+    router.push("/assets");
+  }
+
   async function uploadFile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -176,7 +190,10 @@ export function AssetLibrary({ assets }: Props) {
       }),
     );
 
-    const result = await new Promise<{ ok: boolean; body: any }>((resolve) => {
+    const result = await new Promise<{
+      ok: boolean;
+      body: { error?: string; filename?: string };
+    }>((resolve) => {
       const request = new XMLHttpRequest();
       request.open("POST", "/api/assets/upload");
 
@@ -206,7 +223,21 @@ export function AssetLibrary({ assets }: Props) {
 
       request.onload = () => {
         stopProgressTimer();
-        const body = request.responseText ? JSON.parse(request.responseText) : {};
+        let body: { error?: string; filename?: string } = {};
+
+        if (request.responseText) {
+          try {
+            body = JSON.parse(request.responseText) as { error?: string; filename?: string };
+          } catch {
+            body = {
+              error:
+                request.status >= 500
+                  ? `The server returned an invalid ${request.status} response while processing the asset.`
+                  : `Upload failed with HTTP ${request.status}.`,
+            };
+          }
+        }
+
         resolve({
           ok: request.status >= 200 && request.status < 300,
           body,
@@ -217,14 +248,14 @@ export function AssetLibrary({ assets }: Props) {
     });
 
     if (!result.ok) {
-      setError(result.body?.error ?? "Upload failed");
+      setError(result.body.error ?? "Upload failed");
       setUploadState({
         phase: "idle",
         progress: 0,
       });
       toast({
         title: "Upload failed",
-        message: result.body?.error ?? "The asset could not be processed.",
+        message: result.body.error ?? "The asset could not be processed.",
         tone: "error",
       });
       return;
@@ -378,40 +409,75 @@ export function AssetLibrary({ assets }: Props) {
               disabled={!selectedFile || uploadState.phase !== "idle"}
               type="submit"
             >
-              {uploadState.phase === "idle" ? "Upload Asset" : "Processing..."}
+              {uploadState.phase === "idle" ? (
+                "Upload Asset"
+              ) : (
+                <span className="button-inline">
+                  <span aria-hidden className="button-spinner" />
+                  Processing asset
+                </span>
+              )}
             </button>
           </div>
         </form>
       </div>
 
-      <div className="toolbar">
+      <form className="toolbar" onSubmit={applyFilters}>
         <input
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search by filename, advertiser, or campaign"
           value={query}
         />
-        <select
-          onChange={(event) =>
-            setSelectedCategory(event.target.value as (typeof categories)[number])
-          }
-          value={selectedCategory}
-        >
+        <select onChange={(event) => setSelectedCategory(event.target.value)} value={selectedCategory}>
           {categories.map((item) => (
             <option key={item} value={item}>
               {item}
             </option>
           ))}
         </select>
-      </div>
+        <div className="button-row">
+          <button className="button button-secondary" type="submit">
+            Apply Filters
+          </button>
+          {(currentQuery || currentCategory !== "ALL") && (
+            <button className="button button-secondary" onClick={clearFilters} type="button">
+              Reset
+            </button>
+          )}
+        </div>
+      </form>
 
-      {filtered.length === 0 ? (
+      {assets.length === 0 ? (
         <div className="empty-state">
-          <strong>No assets match the current filters</strong>
-          <p>Upload an advertisement or filler file to start building the loop.</p>
+          <strong>
+            {currentQuery || currentCategory !== "ALL"
+              ? "No assets match the current filters"
+              : "No assets uploaded yet"}
+          </strong>
+          <p>
+            {currentQuery || currentCategory !== "ALL"
+              ? "Try broadening the search or resetting the category filter."
+              : "Upload your first advertisement, static creative, or filler file to start building loops."}
+          </p>
+          <div className="button-row">
+            {currentQuery || currentCategory !== "ALL" ? (
+              <button className="button button-secondary" onClick={clearFilters} type="button">
+                Clear Filters
+              </button>
+            ) : (
+              <button
+                className="button button-primary"
+                onClick={() => inputRef.current?.click()}
+                type="button"
+              >
+                Upload First Asset
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="asset-grid">
-          {filtered.map((asset) => (
+          {assets.map((asset) => (
             <button
               className="card asset-card asset-card-button"
               key={asset.id}
@@ -450,6 +516,17 @@ export function AssetLibrary({ assets }: Props) {
           ))}
         </div>
       )}
+
+      <PaginationControls
+        page={page}
+        pageSize={pageSize}
+        pathname="/assets"
+        query={{
+          search: currentQuery || undefined,
+          category: currentCategory !== "ALL" ? currentCategory : undefined,
+        }}
+        total={total}
+      />
 
       {selectedAsset ? (
         <Modal

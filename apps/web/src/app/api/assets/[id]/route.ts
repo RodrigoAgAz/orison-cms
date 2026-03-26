@@ -13,19 +13,30 @@ export async function GET(_: Request, { params }: Props) {
   try {
     const asset = await prisma.asset.findUnique({
       where: { id: params.id },
-      include: {
+      select: {
+        id: true,
+        s3Key: true,
+        thumbnailKey: true,
         slotPlacements: {
-          include: {
+          select: {
             slot: {
-              include: {
-                loop: true,
+              select: {
+                loop: {
+                  select: {
+                    status: true,
+                  },
+                },
               },
             },
           },
         },
         staticSlots: {
-          include: {
-            loop: true,
+          select: {
+            loop: {
+              select: {
+                status: true,
+              },
+            },
           },
         },
       },
@@ -68,11 +79,13 @@ export async function DELETE(_: Request, { params }: Props) {
     }
 
     const usedInPublishedLoop =
-      asset.slotPlacements.some((placement) => placement.slot.loop.status === "PUBLISHED") ||
-      asset.staticSlots.some((slot) => slot.loop.status === "PUBLISHED");
+      asset.slotPlacements.some((placement) =>
+        ["PUBLISHED", "PUBLISHING"].includes(placement.slot.loop.status),
+      ) ||
+      asset.staticSlots.some((slot) => ["PUBLISHED", "PUBLISHING"].includes(slot.loop.status));
 
     if (usedInPublishedLoop) {
-      throw new ApiError("Cannot delete an asset used by a published loop", 409);
+      throw new ApiError("Cannot delete an asset used by a published or publishing loop", 409);
     }
 
     await prisma.asset.delete({

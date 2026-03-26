@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
+import { PaginationControls } from "@/components/pagination-controls";
 import { StatusPill } from "@/components/status-pill";
 import { useToast } from "@/components/toast-provider";
 
@@ -18,9 +19,12 @@ type LoopRow = {
 
 type Props = {
   loops: LoopRow[];
+  page: number;
+  pageSize: number;
+  total: number;
 };
 
-export function LoopsTable({ loops }: Props) {
+export function LoopsTable({ loops, page, pageSize, total }: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const [processingLoopId, setProcessingLoopId] = useState<string | null>(null);
@@ -99,67 +103,94 @@ export function LoopsTable({ loops }: Props) {
     }
   }
 
+  if (loops.length === 0) {
+    return (
+      <div className="empty-state">
+        <strong>No loops created yet</strong>
+        <p>Create a new slot-based loop above, or use Upload Pre-built Loop for a quick publish.</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="table-wrap">
-      <table className="data-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Status</th>
-            <th>Updated</th>
-            <th>Slot Coverage</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {loops.map((loop) => (
-            <tr key={loop.id}>
-              <td>{loop.name}</td>
-              <td>
-                <StatusPill value={loop.status} />
-              </td>
-              <td>{new Date(loop.updatedAt).toLocaleString()}</td>
-              <td>
-                {loop.isDirectUpload ? (
-                  <div className="stack-sm">
-                    <strong>Direct upload</strong>
-                    <span className="muted loop-table-subtext">Published from one pre-built MP4</span>
-                  </div>
-                ) : (
-                  `${loop.completeSlots}/10 complete`
-                )}
-              </td>
-              <td>
-                <div className="button-row table-actions">
-                  <Link className="button button-secondary" href={`/loops/${loop.id}`}>
-                    {loop.isDirectUpload ? "View" : "Open"}
-                  </Link>
-                  {loop.status === "PUBLISHED" ? (
-                    <button
-                      className="button button-secondary"
-                      disabled={processingLoopId === loop.id}
-                      onClick={() => void handlePause(loop)}
-                      type="button"
-                    >
-                      {processingLoopId === loop.id ? "Working..." : "Pause"}
-                    </button>
-                  ) : null}
-                  {loop.status !== "PUBLISHED" && loop.status !== "PUBLISHING" ? (
-                    <button
-                      className="button button-danger"
-                      disabled={processingLoopId === loop.id}
-                      onClick={() => void handleDelete(loop)}
-                      type="button"
-                    >
-                      {processingLoopId === loop.id ? "Deleting..." : "Delete"}
-                    </button>
-                  ) : null}
-                </div>
-              </td>
+    <div className="stack">
+      <div className="table-wrap">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Updated</th>
+              <th>Slot Coverage</th>
+              <th />
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {loops.map((loop) => (
+              <tr key={loop.id}>
+                <td>{loop.name}</td>
+                <td>
+                  <StatusPill value={loop.status} />
+                </td>
+                <td>{new Date(loop.updatedAt).toLocaleString()}</td>
+                <td>
+                  {loop.isDirectUpload ? (
+                    <div className="stack-sm">
+                      <strong>Direct upload</strong>
+                      <span className="muted loop-table-subtext">Published from one pre-built MP4</span>
+                    </div>
+                  ) : (
+                    `${loop.completeSlots}/10 complete`
+                  )}
+                </td>
+                <td>
+                  <div className="button-row table-actions">
+                    <Link className="button button-secondary" href={`/loops/${loop.id}`}>
+                      {loop.isDirectUpload ? "View" : "Open"}
+                    </Link>
+                    {loop.status === "PUBLISHED" ? (
+                      <button
+                        className="button button-secondary"
+                        disabled={processingLoopId === loop.id}
+                        onClick={() => void handlePause(loop)}
+                        type="button"
+                      >
+                        {processingLoopId === loop.id ? (
+                          <span className="button-inline">
+                            <span aria-hidden className="button-spinner" />
+                            Working
+                          </span>
+                        ) : (
+                          "Pause"
+                        )}
+                      </button>
+                    ) : null}
+                    {loop.status !== "PUBLISHED" && loop.status !== "PUBLISHING" ? (
+                      <button
+                        className="button button-danger"
+                        disabled={processingLoopId === loop.id}
+                        onClick={() => void handleDelete(loop)}
+                        type="button"
+                      >
+                        {processingLoopId === loop.id ? (
+                          <span className="button-inline">
+                            <span aria-hidden className="button-spinner" />
+                            Deleting
+                          </span>
+                        ) : (
+                          "Delete"
+                        )}
+                      </button>
+                    ) : null}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <PaginationControls page={page} pageSize={pageSize} pathname="/loops" total={total} />
     </div>
   );
 }

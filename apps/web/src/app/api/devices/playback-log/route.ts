@@ -4,11 +4,16 @@ import { prisma } from "@orison/db";
 import { playbackLogBatchSchema } from "@orison/shared";
 
 import { requireDevice } from "@/lib/device-auth";
-import { apiError, apiResponse } from "@/lib/http";
+import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
+import { enforceDeviceRateLimit } from "@/lib/rate-limit";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = playbackLogBatchSchema.parse(await request.json());
+    const body = await parseJsonBody(request, playbackLogBatchSchema);
+    enforceDeviceRateLimit(request, "device-playback-log", body.serialNumber, {
+      limit: 60,
+      windowMs: 5 * 60 * 1000,
+    });
     const device = await requireDevice(request, body.serialNumber);
 
     await prisma.playbackLog.createMany({
@@ -28,4 +33,3 @@ export async function POST(request: NextRequest) {
     return apiError(error);
   }
 }
-

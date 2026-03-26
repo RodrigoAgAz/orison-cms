@@ -5,6 +5,7 @@ import { deviceManifestResponseSchema } from "@orison/shared";
 
 import { requireDevice } from "@/lib/device-auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
+import { enforceDeviceRateLimit } from "@/lib/rate-limit";
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,6 +14,10 @@ export async function GET(request: NextRequest) {
       throw new ApiError("Missing X-Device-Serial header", 400);
     }
 
+    enforceDeviceRateLimit(request, "device-manifest", serialNumber, {
+      limit: 180,
+      windowMs: 5 * 60 * 1000,
+    });
     await requireDevice(request, serialNumber);
 
     const loop = await prisma.loop.findFirst({
@@ -37,4 +42,3 @@ export async function GET(request: NextRequest) {
     return apiError(error);
   }
 }
-

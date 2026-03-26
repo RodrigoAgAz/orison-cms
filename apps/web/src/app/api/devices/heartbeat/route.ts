@@ -4,19 +4,19 @@ import { prisma } from "@orison/db";
 import { heartbeatSchema } from "@orison/shared";
 
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
-import { env } from "@/lib/env";
+import { authenticateDeviceRequest } from "@/lib/device-auth";
+import { enforceDeviceRateLimit } from "@/lib/rate-limit";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await parseJsonBody(request, heartbeatSchema);
-    const authorization = request.headers.get("authorization");
-    const token = authorization?.startsWith("Bearer ")
-      ? authorization.slice("Bearer ".length)
-      : request.headers.get("x-device-token");
-
-    if (token !== env.deviceSharedToken) {
-      return apiResponse({ error: "Invalid device token" }, { status: 401 });
-    }
+    enforceDeviceRateLimit(request, "device-heartbeat", body.serialNumber, {
+      limit: 120,
+      windowMs: 5 * 60 * 1000,
+    });
+    await authenticateDeviceRequest(request, body.serialNumber, {
+      allowUnregisteredSharedToken: true,
+    });
 
     const device = await prisma.device.upsert({
       where: { serialNumber: body.serialNumber },
@@ -58,4 +58,3 @@ export async function POST(request: NextRequest) {
     return apiError(error);
   }
 }
-

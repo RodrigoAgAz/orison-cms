@@ -19,6 +19,14 @@ const toneMap: Record<string, string> = {
   inactive: "pill pill-muted",
 };
 
+function formatLabel(value: string) {
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase())
+    .join(" ");
+}
+
 export function StatusPill({ value }: Props) {
-  return <span className={clsx(toneMap[value] ?? "pill pill-muted")}>{value}</span>;
+  return <span className={clsx(toneMap[value] ?? "pill pill-muted")}>{formatLabel(value)}</span>;
 }

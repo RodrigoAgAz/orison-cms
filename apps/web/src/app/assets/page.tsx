@@ -1,4 +1,7 @@
+import { assetCategories, type AssetCategory } from "@orison/shared/src/constants";
+
 import { AssetLibrary } from "@/components/asset-library";
+import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
 import { getAssetLibraryData } from "@/lib/queries";
 
@@ -16,9 +19,36 @@ function normaliseMetadata(value: unknown) {
   );
 }
 
-export default async function AssetsPage() {
+type Props = {
+  searchParams?: {
+    page?: string;
+    search?: string;
+    category?: string;
+  };
+};
+
+function parsePage(value: string | undefined) {
+  const page = Number(value);
+  return Number.isInteger(page) && page > 0 ? page : 1;
+}
+
+function parseCategory(value: string | undefined): AssetCategory | "ALL" {
+  if (!value || value === "ALL") {
+    return "ALL";
+  }
+
+  return assetCategories.includes(value as AssetCategory) ? (value as AssetCategory) : "ALL";
+}
+
+export default async function AssetsPage({ searchParams }: Props) {
   await requireUser();
-  const assets = await getAssetLibraryData();
+  const page = parsePage(searchParams?.page);
+  const result = await getAssetLibraryData({
+    page,
+    pageSize: 18,
+    search: searchParams?.search,
+    category: parseCategory(searchParams?.category),
+  });
 
   return (
     <div className="page">
@@ -32,8 +62,10 @@ export default async function AssetsPage() {
         </div>
       </div>
 
+      <PageErrorNotice message={result.error} title="Asset library unavailable" />
+
       <AssetLibrary
-        assets={assets.map((asset) => ({
+        assets={result.items.map((asset) => ({
           id: asset.id,
           filename: asset.filename,
           category: asset.category,
@@ -74,6 +106,11 @@ export default async function AssetsPage() {
             })),
           ],
         }))}
+        currentCategory={result.category}
+        currentQuery={result.search}
+        page={result.page}
+        pageSize={result.pageSize}
+        total={result.total}
       />
     </div>
   );

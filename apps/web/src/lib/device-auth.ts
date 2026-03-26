@@ -1,12 +1,12 @@
 import { compare } from "bcryptjs";
 import type { NextRequest } from "next/server";
 
-import { prisma } from "@orison/db";
+import { prisma, type Device } from "@orison/db";
 
 import { ApiError } from "./http";
 import { env } from "./env";
 
-function readBearerToken(request: NextRequest) {
+export function readBearerToken(request: NextRequest) {
   const header = request.headers.get("authorization");
   if (!header?.startsWith("Bearer ")) {
     return null;
@@ -15,7 +15,27 @@ function readBearerToken(request: NextRequest) {
   return header.slice("Bearer ".length);
 }
 
-export async function requireDevice(request: NextRequest, serialNumber: string) {
+export function getRequestIp(request: NextRequest) {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0]?.trim() ?? "unknown";
+  }
+
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) {
+    return realIp;
+  }
+
+  return "unknown";
+}
+
+export async function authenticateDeviceRequest(
+  request: NextRequest,
+  serialNumber: string,
+  options?: {
+    allowUnregisteredSharedToken?: boolean;
+  },
+) {
   const token =
     readBearerToken(request) ??
     request.headers.get("x-device-token") ??
@@ -29,11 +49,7 @@ export async function requireDevice(request: NextRequest, serialNumber: string) 
     where: { serialNumber },
   });
 
-  if (!device) {
-    throw new ApiError("Device not registered", 404);
-  }
-
-  if (device.apiTokenHash) {
+  if (device?.apiTokenHash) {
     const valid = await compare(token, device.apiTokenHash);
     if (!valid) {
       throw new ApiError("Invalid device token", 401);
@@ -45,6 +61,18 @@ export async function requireDevice(request: NextRequest, serialNumber: string) 
     throw new ApiError("Invalid device token", 401);
   }
 
+  if (!device && !options?.allowUnregisteredSharedToken) {
+    throw new ApiError("Device not registered", 404);
+  }
+
   return device;
 }
 
+export async function requireDevice(request: NextRequest, serialNumber: string): Promise<Device> {
+  const device = await authenticateDeviceRequest(request, serialNumber);
+  if (!device) {
+    throw new ApiError("Device not registered", 404);
+  }
+
+  return device;
+}

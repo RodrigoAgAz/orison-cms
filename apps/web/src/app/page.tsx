@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { PageErrorNotice } from "@/components/page-error-notice";
 import { StatCard } from "@/components/stat-card";
 import { StatusPill } from "@/components/status-pill";
 import { requireUser } from "@/lib/auth";
@@ -7,7 +8,7 @@ import { getDashboardData, resolveDeviceStatus } from "@/lib/queries";
 
 export default async function DashboardPage() {
   await requireUser();
-  const { activity, devices, publishedLoop, stats } = await getDashboardData();
+  const { activity, devices, publishedLoop, stats, error } = await getDashboardData();
 
   return (
     <div className="page">
@@ -40,6 +41,8 @@ export default async function DashboardPage() {
         <StatCard label="Fleet Uptime" value={`${stats.uptimePercent}%`} />
       </section>
 
+      <PageErrorNotice message={error} title="Dashboard data unavailable" />
+
       <div className="grid-two">
         <section className="card stack">
           <div className="card-header">
@@ -52,9 +55,9 @@ export default async function DashboardPage() {
           {devices.length === 0 ? (
             <div className="empty-state">
               <strong>No devices registered</strong>
-              <p>No devices registered — go to Devices to add your fleet.</p>
-              <Link className="button button-secondary" href="/devices">
-                Open Devices
+              <p>Register your first cab screen to start monitoring heartbeats, sync state, and fleet health.</p>
+              <Link className="button button-primary" href="/devices">
+                Register First Device
               </Link>
             </div>
           ) : (

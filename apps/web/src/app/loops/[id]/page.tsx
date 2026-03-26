@@ -4,6 +4,7 @@ import type { AssetCategory } from "@orison/shared/src/constants";
 
 import { DirectLoopViewer } from "@/components/direct-loop-viewer";
 import { LoopBuilder } from "@/components/loop-builder";
+import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
 import { getLoopBuilderData } from "@/lib/queries";
 
@@ -96,6 +97,7 @@ export default async function LoopBuilderPage({ params }: Props) {
 
   return (
     <div className="page">
+      <PageErrorNotice message={data.error} title="Loop data unavailable" />
       <LoopBuilder
         advertisementAssets={data.advertisementAssets.map(mapAsset)}
         staticCreativeAssets={data.staticCreativeAssets.map(mapAsset)}

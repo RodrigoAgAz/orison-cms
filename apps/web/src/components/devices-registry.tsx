@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Modal } from "@/components/modal";
+import { PaginationControls } from "@/components/pagination-controls";
 import { StatusDot } from "@/components/status-dot";
 import { useToast } from "@/components/toast-provider";
 
@@ -32,9 +33,12 @@ type DeviceItem = {
 type Props = {
   devices: DeviceItem[];
   publishedLoopId: string | null;
+  page: number;
+  pageSize: number;
+  total: number;
 };
 
-export function DevicesRegistry({ devices, publishedLoopId }: Props) {
+export function DevicesRegistry({ devices, publishedLoopId, page, pageSize, total }: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const [registerOpen, setRegisterOpen] = useState(false);
@@ -108,12 +112,8 @@ export function DevicesRegistry({ devices, publishedLoopId }: Props) {
       {devices.length === 0 ? (
         <div className="empty-state">
           <strong>No devices registered yet</strong>
-          <p>Add your first cab screen unit to start tracking sync, heartbeats, and storage.</p>
-          <button
-            className="button button-primary"
-            onClick={() => setRegisterOpen(true)}
-            type="button"
-          >
+          <p>Add your first cab screen unit to start tracking sync, heartbeats, storage, and player health.</p>
+          <button className="button button-primary" onClick={() => setRegisterOpen(true)} type="button">
             Register the first device
           </button>
         </div>
@@ -134,40 +134,40 @@ export function DevicesRegistry({ devices, publishedLoopId }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {devices.map((device) => {
-                  return (
-                    <tr key={device.id}>
-                      <td>
-                        <strong>{device.serialNumber}</strong>
-                        {device.hpTaxiCabId ? (
-                          <div className="muted">HP Taxi ID: {device.hpTaxiCabId}</div>
-                        ) : null}
-                      </td>
-                      <td>{device.cabLicenseNumber ?? "n/a"}</td>
-                      <td>{device.driverName ?? "n/a"}</td>
-                      <td>
-                        <StatusDot label={device.status} status={device.status} />
-                      </td>
-                      <td>
-                        {device.currentLoopId
-                          ? device.currentLoopId === publishedLoopId
-                            ? "Current published loop"
-                            : device.currentLoopId
-                          : "None"}
-                      </td>
-                      <td>{device.lastSyncAt ? new Date(device.lastSyncAt).toLocaleString() : "Never"}</td>
-                      <td>
-                        {device.lastHeartbeatAt
-                          ? new Date(device.lastHeartbeatAt).toLocaleString()
-                          : "Never"}
-                      </td>
-                      <td>{device.storageFreeMb ? `${device.storageFreeMb} MB` : "n/a"}</td>
-                    </tr>
-                  );
-                })}
+                {devices.map((device) => (
+                  <tr key={device.id}>
+                    <td>
+                      <strong>{device.serialNumber}</strong>
+                      {device.hpTaxiCabId ? (
+                        <div className="muted">HP Taxi ID: {device.hpTaxiCabId}</div>
+                      ) : null}
+                    </td>
+                    <td>{device.cabLicenseNumber ?? "n/a"}</td>
+                    <td>{device.driverName ?? "n/a"}</td>
+                    <td>
+                      <StatusDot label={device.status} status={device.status} />
+                    </td>
+                    <td>
+                      {device.currentLoopId
+                        ? device.currentLoopId === publishedLoopId
+                          ? "Current published loop"
+                          : device.currentLoopId
+                        : "None"}
+                    </td>
+                    <td>{device.lastSyncAt ? new Date(device.lastSyncAt).toLocaleString() : "Never"}</td>
+                    <td>
+                      {device.lastHeartbeatAt
+                        ? new Date(device.lastHeartbeatAt).toLocaleString()
+                        : "Never"}
+                    </td>
+                    <td>{device.storageFreeMb ? `${device.storageFreeMb} MB` : "n/a"}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
+
+          <PaginationControls page={page} pageSize={pageSize} pathname="/devices" total={total} />
 
           <div className="stack">
             {devices.slice(0, 5).map((device) => (
@@ -251,7 +251,14 @@ export function DevicesRegistry({ devices, publishedLoopId }: Props) {
 
             <div className="button-row">
               <button className="button button-primary" disabled={saving} type="submit">
-                {saving ? "Registering..." : "Register Device"}
+                {saving ? (
+                  <span className="button-inline">
+                    <span aria-hidden className="button-spinner" />
+                    Registering device
+                  </span>
+                ) : (
+                  "Register Device"
+                )}
               </button>
             </div>
           </form>

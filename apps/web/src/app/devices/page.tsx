@@ -1,10 +1,25 @@
 import { DevicesRegistry } from "@/components/devices-registry";
+import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
 import { getDevicesData, resolveDeviceStatus } from "@/lib/queries";
 
-export default async function DevicesPage() {
+type Props = {
+  searchParams?: {
+    page?: string;
+  };
+};
+
+function parsePage(value: string | undefined) {
+  const page = Number(value);
+  return Number.isInteger(page) && page > 0 ? page : 1;
+}
+
+export default async function DevicesPage({ searchParams }: Props) {
   await requireUser();
-  const { devices, publishedLoopId } = await getDevicesData();
+  const result = await getDevicesData({
+    page: parsePage(searchParams?.page),
+    pageSize: 12,
+  });
 
   return (
     <div className="page">
@@ -16,18 +31,23 @@ export default async function DevicesPage() {
         </div>
       </div>
 
+      <PageErrorNotice message={result.error} title="Device registry unavailable" />
+
       <DevicesRegistry
-        devices={devices.map((device) => ({
+        devices={result.devices.map((device) => ({
           ...device,
           lastSyncAt: device.lastSyncAt?.toISOString() ?? null,
           lastHeartbeatAt: device.lastHeartbeatAt?.toISOString() ?? null,
-          status: resolveDeviceStatus(device, publishedLoopId),
+          status: resolveDeviceStatus(device, result.publishedLoopId),
           heartbeats: device.heartbeats.map((heartbeat) => ({
             ...heartbeat,
             receivedAt: heartbeat.receivedAt.toISOString(),
           })),
         }))}
-        publishedLoopId={publishedLoopId}
+        page={result.page}
+        pageSize={result.pageSize}
+        publishedLoopId={result.publishedLoopId}
+        total={result.total}
       />
     </div>
   );

@@ -1,9 +1,61 @@
 import { eachDayOfInterval, format, subDays } from "date-fns";
 
-import { prisma } from "@orison/db";
+import { prisma, type Prisma } from "@orison/db";
+import type { AssetCategory } from "@orison/shared/src/constants";
 
 import { getCmsSettings } from "./cms-settings";
 import { getPublicUrl } from "./storage";
+
+function formatQueryFailure(scope: string, error: unknown) {
+  console.error(error);
+  return `${scope} could not be loaded. Check the server logs and refresh.`;
+}
+
+type AssetLibraryItem = Prisma.AssetGetPayload<{
+  select: {
+    id: true;
+    filename: true;
+    category: true;
+    status: true;
+    mimeType: true;
+    durationMs: true;
+    width: true;
+    height: true;
+    fileSize: true;
+    thumbnailKey: true;
+    s3Key: true;
+    metadata: true;
+    createdAt: true;
+    slotPlacements: {
+      select: {
+        slot: {
+          select: {
+            position: true;
+            loop: {
+              select: {
+                id: true;
+                name: true;
+                status: true;
+              };
+            };
+          };
+        };
+      };
+    };
+    staticSlots: {
+      select: {
+        position: true;
+        loop: {
+          select: {
+            id: true;
+            name: true;
+            status: true;
+          };
+        };
+      };
+    };
+  };
+}>;
 
 export function resolveDeviceStatus(device: {
   isActive: boolean;
@@ -70,9 +122,9 @@ export async function getDashboardData() {
         impressionsToday,
         uptimePercent,
       },
+      error: null,
     };
   } catch (error) {
-    console.error(error);
     return {
       devices: [],
       publishedLoop: null,
@@ -84,6 +136,7 @@ export async function getDashboardData() {
         impressionsToday: 0,
         uptimePercent: 0,
       },
+      error: formatQueryFailure("Dashboard data", error),
     };
   }
 }
@@ -122,21 +175,56 @@ export async function getCurrentPublishedLoop() {
   }
 }
 
-export async function getLoopListData() {
+export async function getLoopListData({
+  page = 1,
+  pageSize = 12,
+}: {
+  page?: number;
+  pageSize?: number;
+} = {}) {
   try {
-    return await prisma.loop.findMany({
-      orderBy: { updatedAt: "desc" },
-      include: {
-        slots: {
-          include: {
-            contents: true,
+    const [items, total] = await Promise.all([
+      prisma.loop.findMany({
+        orderBy: { updatedAt: "desc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          updatedAt: true,
+          compiledVideoUrl: true,
+          compiledVideoKey: true,
+          slots: {
+            select: {
+              id: true,
+              contents: {
+                select: {
+                  id: true,
+                },
+              },
+            },
           },
         },
-      },
-    });
+      }),
+      prisma.loop.count(),
+    ]);
+
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      error: null,
+    };
   } catch (error) {
-    console.error(error);
-    return [];
+    return {
+      items: [],
+      total: 0,
+      page,
+      pageSize,
+      error: formatQueryFailure("Loop library", error),
+    };
   }
 }
 
@@ -192,9 +280,9 @@ export async function getLoopBuilderData(loopId: string) {
       staticCreativeAssets,
       fillerAssets,
       settings,
+      error: null,
     };
   } catch (error) {
-    console.error(error);
     return {
       loop: null,
       advertisementAssets: [],
@@ -206,63 +294,169 @@ export async function getLoopBuilderData(loopId: string) {
         heartbeatIntervalSeconds: 300,
         notificationEmails: [],
       },
+      error: formatQueryFailure("Loop builder", error),
     };
   }
 }
 
-export async function getAssetLibraryData() {
+export async function getAssetLibraryData({
+  page = 1,
+  pageSize = 18,
+  search,
+  category,
+}: {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  category?: AssetCategory | "ALL";
+} = {}) {
   try {
-    return prisma.asset.findMany({
-      orderBy: { createdAt: "desc" },
-      include: {
-        slotPlacements: {
-          include: {
-            slot: {
-              include: {
-                loop: true,
+    const where: Prisma.AssetWhereInput = {
+      ...(category && category !== "ALL" ? { category } : {}),
+      ...(search
+        ? {
+            OR: [
+              {
+                filename: {
+                  contains: search,
+                  mode: "insensitive" as const,
+                },
+              },
+              {
+                metadata: {
+                  path: ["advertiserName"],
+                  string_contains: search,
+                },
+              },
+              {
+                metadata: {
+                  path: ["campaignName"],
+                  string_contains: search,
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const [items, total] = await Promise.all([
+      prisma.asset.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          filename: true,
+          category: true,
+          status: true,
+          mimeType: true,
+          durationMs: true,
+          width: true,
+          height: true,
+          fileSize: true,
+          thumbnailKey: true,
+          s3Key: true,
+          metadata: true,
+          createdAt: true,
+          slotPlacements: {
+            select: {
+              slot: {
+                select: {
+                  position: true,
+                  loop: {
+                    select: {
+                      id: true,
+                      name: true,
+                      status: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          staticSlots: {
+            select: {
+              position: true,
+              loop: {
+                select: {
+                  id: true,
+                  name: true,
+                  status: true,
+                },
               },
             },
           },
         },
-        staticSlots: {
-          include: {
-            loop: true,
-          },
-        },
-      },
-    });
+      }),
+      prisma.asset.count({ where }),
+    ]) as [AssetLibraryItem[], number];
+
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      search: search ?? "",
+      category: category ?? "ALL",
+      error: null,
+    };
   } catch (error) {
-    console.error(error);
-    return [];
+    return {
+      items: [] as AssetLibraryItem[],
+      total: 0,
+      page,
+      pageSize,
+      search: search ?? "",
+      category: category ?? "ALL",
+      error: formatQueryFailure("Asset library", error),
+    };
   }
 }
 
-export async function getDevicesData() {
+export async function getDevicesData({
+  page = 1,
+  pageSize = 12,
+}: {
+  page?: number;
+  pageSize?: number;
+} = {}) {
   try {
-    const publishedLoop = await prisma.loop.findFirst({
-      where: { status: "PUBLISHED" },
-      orderBy: { publishedAt: "desc" },
-    });
-
-    const devices = await prisma.device.findMany({
-      orderBy: { serialNumber: "asc" },
-      include: {
-        heartbeats: {
-          orderBy: { receivedAt: "desc" },
-          take: 6,
+    const [publishedLoop, devices, total] = await Promise.all([
+      prisma.loop.findFirst({
+        where: { status: "PUBLISHED" },
+        orderBy: { publishedAt: "desc" },
+      }),
+      prisma.device.findMany({
+        orderBy: { serialNumber: "asc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        include: {
+          heartbeats: {
+            orderBy: { receivedAt: "desc" },
+            take: 6,
+          },
         },
-      },
-    });
+      }),
+      prisma.device.count(),
+    ]);
 
     return {
       devices,
+      total,
+      page,
+      pageSize,
       publishedLoopId: publishedLoop?.id ?? null,
+      error: null,
     };
   } catch (error) {
-    console.error(error);
     return {
       devices: [],
+      total: 0,
+      page,
+      pageSize,
       publishedLoopId: null,
+      error: formatQueryFailure("Device registry", error),
     };
   }
 }
@@ -340,13 +534,14 @@ export async function getAnalyticsData() {
         count: entry._count,
       })),
       fleetUptimePercent: deviceCount === 0 ? 0 : Math.round((onlineDevices / deviceCount) * 100),
+      error: null,
     };
   } catch (error) {
-    console.error(error);
     return {
       impressionsSeries: [],
       adBreakdown: [],
       fleetUptimePercent: 0,
+      error: formatQueryFailure("Analytics", error),
     };
   }
 }
@@ -363,9 +558,9 @@ export async function getSettingsData() {
     return {
       settings,
       users,
+      error: null,
     };
   } catch (error) {
-    console.error(error);
     return {
       settings: {
         defaultFillerTemplate: [],
@@ -374,6 +569,7 @@ export async function getSettingsData() {
         notificationEmails: [],
       },
       users: [],
+      error: formatQueryFailure("Settings", error),
     };
   }
 }

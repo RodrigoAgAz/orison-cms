@@ -38,13 +38,38 @@ export async function POST(_: Request, { params }: Props) {
       });
     }
 
-    await prisma.loop.update({
-      where: { id: loop.id },
+    const transition = await prisma.loop.updateMany({
+      where: {
+        id: loop.id,
+        status: loop.status,
+      },
       data: {
         status: "PUBLISHING",
         publishError: null,
       },
     });
+
+    if (transition.count === 0) {
+      const current = await prisma.loop.findUnique({
+        where: { id: loop.id },
+        select: {
+          id: true,
+          status: true,
+          publishError: true,
+        },
+      });
+
+      if (!current) {
+        throw new ApiError("Loop not found", 404);
+      }
+
+      return apiResponse({
+        ok: true,
+        status: current.status,
+        loopId: current.id,
+        publishError: current.publishError,
+      });
+    }
 
     try {
       await publishLoop(loop.id, user.id);
@@ -53,19 +78,12 @@ export async function POST(_: Request, { params }: Props) {
       await prisma.loop.update({
         where: { id: loop.id },
         data: {
-          status: "DRAFT",
+          status: loop.status,
           publishError: message,
         },
       });
       throw new ApiError(message, 500);
     }
-
-    await prisma.loop.update({
-      where: { id: loop.id },
-      data: {
-        status: "PUBLISHED",
-      },
-    });
 
     revalidatePath("/");
     revalidatePath("/loops");
