@@ -63,7 +63,7 @@ export default async function DashboardPage() {
           ) : (
             <div className="fleet-grid">
               {devices.map((device) => {
-                const status = resolveDeviceStatus(device, publishedLoop?.id ?? null);
+                const status = resolveDeviceStatus(device, device.expectedLoopId);
                 return (
                   <div className="fleet-dot-card" key={device.id}>
                     <span

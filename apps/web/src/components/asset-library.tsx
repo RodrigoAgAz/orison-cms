@@ -49,6 +49,7 @@ const categories = [
   "ALL",
   "ADVERTISEMENT",
   "STATIC_CREATIVE",
+  "SAFETY_MESSAGE",
   "FILLER_WEATHER",
   "FILLER_NEWS",
   "FILLER_BRANDED",

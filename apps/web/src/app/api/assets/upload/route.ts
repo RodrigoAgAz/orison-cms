@@ -42,6 +42,9 @@ export async function POST(request: Request) {
       : undefined;
 
     const upload = await writeUploadedFileToTemp(file);
+    if (form.data.category === "SAFETY_MESSAGE" && !(file.type || "").startsWith("video/")) {
+      throw new ApiError("Safety message uploads must be video files", 400);
+    }
     const assetId = randomUUID().replace(/-/g, "");
     const keys = assetKeys(assetId, file.name);
 

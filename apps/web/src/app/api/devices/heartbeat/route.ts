@@ -50,6 +50,7 @@ export async function POST(request: NextRequest) {
         playerStatus: body.playerStatus,
         networkType: body.networkType,
         signalStrength: body.signalStrength,
+        locationData: body.location ?? undefined,
       },
     });
 

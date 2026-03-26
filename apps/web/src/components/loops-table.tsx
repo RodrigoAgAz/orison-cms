@@ -14,6 +14,7 @@ type LoopRow = {
   status: string;
   updatedAt: string;
   completeSlots: number;
+  targetGroupName: string;
   isDirectUpload: boolean;
 };
 
@@ -120,6 +121,7 @@ export function LoopsTable({ loops, page, pageSize, total }: Props) {
             <tr>
               <th>Name</th>
               <th>Status</th>
+              <th>Audience</th>
               <th>Updated</th>
               <th>Slot Coverage</th>
               <th />
@@ -132,6 +134,7 @@ export function LoopsTable({ loops, page, pageSize, total }: Props) {
                 <td>
                   <StatusPill value={loop.status} />
                 </td>
+                <td>{loop.targetGroupName}</td>
                 <td>{new Date(loop.updatedAt).toLocaleString()}</td>
                 <td>
                   {loop.isDirectUpload ? (

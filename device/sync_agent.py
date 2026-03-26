@@ -18,6 +18,7 @@ from common import (
     build_headers,
     copy_fallback_to_current,
     current_manifest_path,
+    current_safety_file,
     ensure_directories,
     load_config,
     read_json,
@@ -77,11 +78,12 @@ class SyncAgent:
         local = self.load_local_manifest()
 
         if local and local.get("loopId") == remote["loopId"] and local.get("checksum") == remote["checksum"]:
+            self.sync_player_flags(remote)
             self.logger.info("loop already current: %s", remote["loopId"])
             return
 
         staging_dir = self.download_loop(remote)
-        self.activate(staging_dir, remote["loopId"])
+        self.activate(staging_dir, remote)
         self.send_sync_heartbeat(remote["loopId"])
         self.logger.info("activated loop %s", remote["loopId"])
 
@@ -134,6 +136,17 @@ class SyncAgent:
             expected_checksum = manifest.get("compiledVideoChecksum")
             if expected_checksum and sha256_file(video_path) != expected_checksum:
                 raise RuntimeError("compiled loop checksum mismatch")
+
+            safety_payload = manifest.get("safetyVideo") or {}
+            safety_url = safety_payload.get("url")
+            safety_target = current_safety_file(staging_dir)
+            if safety_url:
+                self.download_file(str(safety_url), safety_target, timeout, download_limit)
+                safety_checksum = safety_payload.get("checksum")
+                if safety_checksum and sha256_file(safety_target) != safety_checksum:
+                    raise RuntimeError("safety video checksum mismatch")
+            else:
+                safety_target.unlink(missing_ok=True)
 
             manifest_slots = {
                 int(slot.get("position", 0)): slot for slot in manifest.get("slots", [])
@@ -225,7 +238,8 @@ class SyncAgent:
         if last_error:
             raise last_error
 
-    def activate(self, staging_dir: Path, loop_id: str) -> None:
+    def activate(self, staging_dir: Path, manifest_info: dict) -> None:
+        loop_id = str(manifest_info["loopId"])
         if not self.is_valid_loop_directory(staging_dir):
             raise RuntimeError(f"staging directory is not ready for activation: {staging_dir}")
 
@@ -244,7 +258,14 @@ class SyncAgent:
             raise
 
         command_id = f"reload-{loop_id}-{int(time.time() * 1000)}"
-        write_player_command("reload", loopId=loop_id, commandId=command_id, activatedAt=utc_now_iso())
+        write_player_command(
+            "reload",
+            loopId=loop_id,
+            commandId=command_id,
+            activatedAt=utc_now_iso(),
+            disabled=bool(manifest_info.get("disabled")),
+            disabledReason=manifest_info.get("disabledReason"),
+        )
 
         if self.wait_for_player_confirmation(command_id, loop_id):
             if PREVIOUS_DIR.exists():
@@ -255,6 +276,14 @@ class SyncAgent:
         self.logger.error("player did not confirm activation for %s, rolling back", loop_id)
         self.rollback_activation(loop_id)
         raise RuntimeError(f"player failed to confirm loop activation: {loop_id}")
+
+    def sync_player_flags(self, manifest_info: dict) -> None:
+        write_player_command(
+          "set_disabled",
+          loopId=manifest_info.get("loopId"),
+          disabled=bool(manifest_info.get("disabled")),
+          disabledReason=manifest_info.get("disabledReason"),
+        )
 
     def wait_for_player_confirmation(self, command_id: str, loop_id: str) -> bool:
         deadline = time.monotonic() + PLAYER_CONFIRMATION_TIMEOUT_SECONDS

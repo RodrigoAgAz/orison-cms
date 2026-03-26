@@ -172,6 +172,9 @@ export async function processAssetUpload(assetId: string, tempFilePath: string) 
     }
 
     const metadata = await extractMetadata(outputPath);
+    if (asset.category === "SAFETY_MESSAGE" && (metadata.durationMs ?? 0) > 30_000) {
+      throw new Error("Safety message videos must be 30 seconds or shorter");
+    }
     const upload = await checksumFile(outputPath);
     await putObject({
       key: asset.s3Key,

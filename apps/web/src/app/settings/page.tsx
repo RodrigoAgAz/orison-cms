@@ -5,7 +5,7 @@ import { getSettingsData } from "@/lib/queries";
 
 export default async function SettingsPage() {
   await requireUser();
-  const { settings, users, error } = await getSettingsData();
+  const { settings, users, safetyAssets, error } = await getSettingsData();
 
   return (
     <div className="page">
@@ -19,7 +19,7 @@ export default async function SettingsPage() {
 
       <PageErrorNotice message={error} title="Settings unavailable" />
 
-      <SettingsForm settings={settings} users={users} />
+      <SettingsForm safetyAssets={safetyAssets} settings={settings} users={users} />
     </div>
   );
 }

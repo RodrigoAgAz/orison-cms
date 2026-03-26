@@ -8,7 +8,13 @@ type Props = {
     syncIntervalSeconds: number;
     heartbeatIntervalSeconds: number;
     notificationEmails: string[];
+    safetyVideoAssetId: string | null;
   };
+  safetyAssets: Array<{
+    id: string;
+    filename: string;
+    durationMs: number | null;
+  }>;
   users: Array<{
     id: string;
     name: string;
@@ -17,13 +23,14 @@ type Props = {
   }>;
 };
 
-export function SettingsForm({ settings, users }: Props) {
+export function SettingsForm({ settings, safetyAssets, users }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [state, setState] = useState({
     syncIntervalSeconds: String(settings.syncIntervalSeconds),
     heartbeatIntervalSeconds: String(settings.heartbeatIntervalSeconds),
     notificationEmails: settings.notificationEmails.join(", "),
+    safetyVideoAssetId: settings.safetyVideoAssetId ?? "",
     fillers: settings.defaultFillerTemplate,
   });
 
@@ -44,6 +51,7 @@ export function SettingsForm({ settings, users }: Props) {
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean),
+        safetyVideoAssetId: state.safetyVideoAssetId || null,
         defaultFillerTemplate: state.fillers,
       }),
     });
@@ -110,6 +118,34 @@ export function SettingsForm({ settings, users }: Props) {
             placeholder="ops@orisonscreens.com, jack@orisonscreens.com"
           />
         </label>
+
+        <div className="stack">
+          <strong>Safety video</strong>
+          <p className="muted">
+            This non-skippable clip plays once at journey start before ad playback begins. Upload safety
+            message assets in the library using the SAFETY_MESSAGE category.
+          </p>
+          <label className="field">
+            <span>Active safety video</span>
+            <select
+              value={state.safetyVideoAssetId}
+              onChange={(event) =>
+                setState((current) => ({
+                  ...current,
+                  safetyVideoAssetId: event.target.value,
+                }))
+              }
+            >
+              <option value="">None configured</option>
+              {safetyAssets.map((asset) => (
+                <option key={asset.id} value={asset.id}>
+                  {asset.filename}
+                  {asset.durationMs ? ` (${Math.round(asset.durationMs / 1000)}s)` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
 
         <div className="stack">
           <strong>Default filler template</strong>

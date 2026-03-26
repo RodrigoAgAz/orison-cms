@@ -25,8 +25,21 @@ type Props = {
       assetId: string | null;
       label: string;
       count: number;
+      completionRate: number;
     }>;
     fleetUptimePercent: number;
+    journeyMetrics: {
+      todayCount: number;
+      weekCount: number;
+      monthCount: number;
+      averageDurationMs: number;
+      adPlaysPerJourney: number;
+    };
+    deviceLocations: Array<{
+      serialNumber: string;
+      lastHeartbeatAt: string | null;
+      locationData: unknown;
+    }>;
   };
 };
 
@@ -35,6 +48,17 @@ function formatChartDate(value: string) {
     month: "short",
     day: "numeric",
   });
+}
+
+function formatDuration(valueMs: number) {
+  if (!valueMs) {
+    return "0m";
+  }
+
+  const totalSeconds = Math.round(valueMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
 }
 
 export function AnalyticsDashboard({ analytics }: Props) {
@@ -93,8 +117,27 @@ export function AnalyticsDashboard({ analytics }: Props) {
           <strong className="stat-value">{analytics.impressionsSeries.length}</strong>
         </div>
         <div className="card stat-card">
-          <span className="stat-label">Ad Assets</span>
-          <strong className="stat-value">{analytics.adBreakdown.length}</strong>
+          <span className="stat-label">Journeys Today</span>
+          <strong className="stat-value">{analytics.journeyMetrics.todayCount}</strong>
+        </div>
+        <div className="card stat-card">
+          <span className="stat-label">Journeys This Week</span>
+          <strong className="stat-value">{analytics.journeyMetrics.weekCount}</strong>
+        </div>
+      </section>
+
+      <section className="stats-grid">
+        <div className="card stat-card">
+          <span className="stat-label">Journeys This Month</span>
+          <strong className="stat-value">{analytics.journeyMetrics.monthCount}</strong>
+        </div>
+        <div className="card stat-card">
+          <span className="stat-label">Avg Journey</span>
+          <strong className="stat-value">{formatDuration(analytics.journeyMetrics.averageDurationMs)}</strong>
+        </div>
+        <div className="card stat-card">
+          <span className="stat-label">Ad Plays / Journey</span>
+          <strong className="stat-value">{analytics.journeyMetrics.adPlaysPerJourney}</strong>
         </div>
         <div className="card stat-card">
           <span className="stat-label">Peak Daily Plays</span>
@@ -193,6 +236,76 @@ export function AnalyticsDashboard({ analytics }: Props) {
             <div className="empty-state compact">
               <strong>No playback data yet</strong>
               <p>Per-ad performance will appear once advertisement playback logs arrive.</p>
+            </div>
+          )}
+        </section>
+      </div>
+
+      <div className="grid-two analytics-grid">
+        <section className="card stack">
+          <div className="card-header">
+            <div>
+              <span className="eyebrow">Completion</span>
+              <h2>Per Ad Completion Rate</h2>
+            </div>
+          </div>
+
+          {analytics.adBreakdown.length === 0 ? (
+            <div className="empty-state compact">
+              <strong>No playback data yet</strong>
+              <p>Completion rates will appear once advertisement playback logs are uploaded.</p>
+            </div>
+          ) : (
+            <div className="chart-list">
+              {analytics.adBreakdown.map((entry) => (
+                <div className="activity-item" key={entry.assetId ?? entry.label}>
+                  <strong>{entry.label}</strong>
+                  <div className="muted">
+                    {entry.count} plays / {entry.completionRate}% completed
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="card stack">
+          <div className="card-header">
+            <div>
+              <span className="eyebrow">Location</span>
+              <h2>Latest Cell Tower Snapshot</h2>
+            </div>
+          </div>
+
+          {analytics.deviceLocations.length === 0 ? (
+            <div className="empty-state compact">
+              <strong>No device heartbeats yet</strong>
+              <p>Latest modem cell-tower IDs will appear here once devices report in.</p>
+            </div>
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Device</th>
+                    <th>Last Heartbeat</th>
+                    <th>Location Data</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analytics.deviceLocations.map((entry) => (
+                    <tr key={entry.serialNumber}>
+                      <td>{entry.serialNumber}</td>
+                      <td>{entry.lastHeartbeatAt ? new Date(entry.lastHeartbeatAt).toLocaleString() : "Never"}</td>
+                      <td>
+                        <code className="inline-json">
+                          {entry.locationData ? JSON.stringify(entry.locationData) : "None"}
+                        </code>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </section>

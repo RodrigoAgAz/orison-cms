@@ -13,24 +13,32 @@ export const manifestContentSchema = z.object({
 
 export const manifestSlotSchema = z.object({
   position: z.number().int().min(0).max(9),
+  staticImageAssetId: z.string().nullable().optional(),
   staticImageUrl: z.string().url().nullable().optional(),
   staticImageChecksum: z.string().nullable().optional(),
   advertisementVideoUrl: z.string().url().nullable().optional(),
   contents: z.array(manifestContentSchema),
 });
 
+export const safetyVideoManifestSchema = z.object({
+  url: z.string().url(),
+  checksum: z.string(),
+  durationMs: z.number().int().positive(),
+});
+
 export const compiledLoopManifestSchema = z.object({
   version: z.string(),
   loopId: z.string(),
   loopName: z.string(),
+  targetGroupId: z.string().nullable().optional(),
   publishedAt: z.string().datetime(),
   checksum: z.string(),
   totalDurationMs: z.number().int().positive(),
   compiledVideoUrl: z.string().url().nullable().optional(),
   compiledVideoChecksum: z.string().optional().nullable(),
+  safetyVideo: safetyVideoManifestSchema.optional(),
   slots: z.array(manifestSlotSchema),
   totalDownloadSizeBytes: z.number().int().nonnegative(),
 });
 
 export type CompiledLoopManifest = z.infer<typeof compiledLoopManifestSchema>;
-

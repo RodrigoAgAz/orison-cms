@@ -62,9 +62,14 @@ type Props = {
     name: string;
     status: string;
     publishError?: string | null;
+    targetGroupId?: string | null;
     slots: SlotItem[];
   };
   advertisementAssets: AssetOption[];
+  deviceGroups: Array<{
+    id: string;
+    name: string;
+  }>;
   staticCreativeAssets: AssetOption[];
   fillerAssets: AssetOption[];
   fillerTemplate: Array<{
@@ -156,6 +161,7 @@ function buildPreviewItems(slots: SlotItem[], scope: "slot" | "loop", selectedPo
 export function LoopBuilder({
   loop,
   advertisementAssets,
+  deviceGroups,
   staticCreativeAssets,
   fillerAssets,
   fillerTemplate,
@@ -171,6 +177,7 @@ export function LoopBuilder({
     [allAssets],
   );
   const [name, setName] = useState(loop.name);
+  const [targetGroupId, setTargetGroupId] = useState(loop.targetGroupId ?? "");
   const [status, setStatus] = useState(loop.status);
   const [publishError, setPublishError] = useState(loop.publishError ?? null);
   const [slots, setSlots] = useState(() =>
@@ -185,6 +192,7 @@ export function LoopBuilder({
   const [error, setError] = useState<string | null>(null);
   const [dirtySlots, setDirtySlots] = useState<number[]>([]);
   const [dirtyName, setDirtyName] = useState(false);
+  const [dirtyTargetGroup, setDirtyTargetGroup] = useState(false);
   const [adPickerOpen, setAdPickerOpen] = useState(false);
   const [staticPickerOpen, setStaticPickerOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -485,8 +493,8 @@ export function LoopBuilder({
     replaceSelectedSlot([...(selectedAd ? [{ ...selectedAd, asset: selectedAd.asset }] : []), ...nextFillers]);
   }
 
-  async function saveLoopName() {
-    if (!dirtyName) {
+  async function saveLoopDetails() {
+    if (!dirtyName && !dirtyTargetGroup) {
       return true;
     }
 
@@ -495,15 +503,19 @@ export function LoopBuilder({
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({
+        name,
+        targetGroupId: targetGroupId || null,
+      }),
     });
 
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(body?.error ?? "Unable to save loop name");
+      throw new Error(body?.error ?? "Unable to save loop details");
     }
 
     setDirtyName(false);
+    setDirtyTargetGroup(false);
     return true;
   }
 
@@ -542,7 +554,7 @@ export function LoopBuilder({
   }
 
   async function persistChanges(options?: { silent?: boolean }) {
-    if (!dirtyName && dirtySlots.length === 0) {
+    if (!dirtyName && !dirtyTargetGroup && dirtySlots.length === 0) {
       return true;
     }
 
@@ -550,7 +562,7 @@ export function LoopBuilder({
     setError(null);
 
     try {
-      await saveLoopName();
+      await saveLoopDetails();
       await saveDirtySlots();
       setPublishError(null);
 
@@ -592,8 +604,12 @@ export function LoopBuilder({
       return;
     }
 
+    const targetLabel =
+      targetGroupId && deviceGroups.find((group) => group.id === targetGroupId)?.name
+        ? deviceGroups.find((group) => group.id === targetGroupId)?.name
+        : "All Devices";
     const confirmed = window.confirm(
-      "This will compile the latest loop and push it to all active cab devices. Continue?",
+      `This will compile the latest loop and publish it to ${targetLabel}. Continue?`,
     );
     if (!confirmed) {
       return;
@@ -764,6 +780,23 @@ export function LoopBuilder({
               />
               <StatusPill value={status} />
             </div>
+            <label className="field compact-field loop-target-field">
+              <span>Publish to</span>
+              <select
+                onChange={(event) => {
+                  setTargetGroupId(event.target.value);
+                  setDirtyTargetGroup(true);
+                }}
+                value={targetGroupId}
+              >
+                <option value="">All Devices</option>
+                {deviceGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <div className="muted">
               {validSlotCount}/10 slots ready. Each slot needs one 12 second ad and 48 seconds of filler.
             </div>
@@ -796,7 +829,7 @@ export function LoopBuilder({
                 publishing ||
                 archiving ||
                 status === "PUBLISHING" ||
-                (!dirtyName && dirtySlots.length === 0)
+                (!dirtyName && !dirtyTargetGroup && dirtySlots.length === 0)
               }
               onClick={() => void persistChanges()}
               type="button"

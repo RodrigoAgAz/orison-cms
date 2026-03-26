@@ -100,12 +100,17 @@ export default async function LoopBuilderPage({ params }: Props) {
       <PageErrorNotice message={data.error} title="Loop data unavailable" />
       <LoopBuilder
         advertisementAssets={data.advertisementAssets.map(mapAsset)}
+        deviceGroups={data.deviceGroups.map((group) => ({
+          id: group.id,
+          name: group.name,
+        }))}
         staticCreativeAssets={data.staticCreativeAssets.map(mapAsset)}
         fillerAssets={data.fillerAssets.map(mapAsset)}
         fillerTemplate={data.settings.defaultFillerTemplate}
         loop={{
           ...data.loop,
           publishError: data.loop.publishError,
+          targetGroupId: data.loop.targetGroupId ?? null,
           slots: data.loop.slots.map((slot) => ({
             ...slot,
             staticCreativeId: slot.staticCreativeId,

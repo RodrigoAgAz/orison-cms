@@ -1,10 +1,11 @@
 import { type NextRequest } from "next/server";
 
-import { prisma } from "@orison/db";
 import { deviceManifestResponseSchema } from "@orison/shared";
 
 import { requireDevice } from "@/lib/device-auth";
+import { getFleetControlState } from "@/lib/fleet-control";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
+import { getPublishedLoopRoutingSnapshot, resolveExpectedLoopForGroup } from "@/lib/loop-routing";
 import { enforceDeviceRateLimit } from "@/lib/rate-limit";
 
 export async function GET(request: NextRequest) {
@@ -18,12 +19,14 @@ export async function GET(request: NextRequest) {
       limit: 180,
       windowMs: 5 * 60 * 1000,
     });
-    await requireDevice(request, serialNumber);
 
-    const loop = await prisma.loop.findFirst({
-      where: { status: "PUBLISHED" },
-      orderBy: { publishedAt: "desc" },
-    });
+    const [device, routing, fleetControl] = await Promise.all([
+      requireDevice(request, serialNumber),
+      getPublishedLoopRoutingSnapshot(),
+      getFleetControlState(),
+    ]);
+
+    const loop = resolveExpectedLoopForGroup(device.groupId, routing);
 
     if (!loop?.manifestUrl) {
       throw new ApiError("No published loop available", 404);
@@ -36,6 +39,8 @@ export async function GET(request: NextRequest) {
         version: loop.version,
         checksum: loop.checksum ?? "",
         compiledVideoUrl: loop.compiledVideoUrl,
+        disabled: device.isDisabled || fleetControl.disabled,
+        disabledReason: device.isDisabled ? device.disabledReason : fleetControl.reason,
       }),
     );
   } catch (error) {

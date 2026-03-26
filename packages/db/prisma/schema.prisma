@@ -22,6 +22,16 @@ enum Role {
   EDITOR
 }
 
+model DeviceGroup {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  devices     Device[]
+  loops       Loop[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 model Asset {
   id             String           @id @default(cuid())
   filename       String
@@ -46,6 +56,7 @@ model Asset {
 enum AssetCategory {
   ADVERTISEMENT
   STATIC_CREATIVE
+  SAFETY_MESSAGE
   FILLER_WEATHER
   FILLER_NEWS
   FILLER_BRANDED
@@ -65,6 +76,8 @@ model Loop {
   publishError     String?
   version          Int         @default(1)
   checksum         String?
+  targetGroupId    String?
+  targetGroup      DeviceGroup? @relation(fields: [targetGroupId], references: [id], onDelete: SetNull)
   slots            Slot[]
   publishedAt      DateTime?
   publishedBy      String?
@@ -125,7 +138,11 @@ model Device {
   cabLicenseNumber String?
   driverName       String?
   hpTaxiCabId      String?
+  groupId          String?
+  group            DeviceGroup?      @relation(fields: [groupId], references: [id], onDelete: SetNull)
   isActive         Boolean           @default(true)
+  isDisabled       Boolean           @default(false)
+  disabledReason   String?
   currentLoopId    String?
   lastSyncAt       DateTime?
   lastHeartbeatAt  DateTime?
@@ -154,6 +171,7 @@ model DeviceHeartbeat {
   playerStatus      String?
   networkType       String?
   signalStrength    Int?
+  locationData      Json?
   receivedAt        DateTime  @default(now())
 
   @@index([deviceId, receivedAt])
@@ -163,16 +181,25 @@ model PlaybackLog {
   id            String          @id @default(cuid())
   deviceId       String
   device         Device          @relation(fields: [deviceId], references: [id])
+  deviceSerial   String?
   loopId         String
-  slotPosition   Int
-  contentType    SlotContentType
+  slotPosition   Int?
+  contentType    SlotContentType?
   assetId        String?
+  playbackType   String?
+  eventName      String?
+  mode           String?
+  playerState    String?
   playedAt       DateTime
   completedFull  Boolean         @default(true)
+  durationMs     Int?
+  journeyId      String?
+  locationData   Json?
   createdAt      DateTime        @default(now())
 
   @@index([deviceId, playedAt])
   @@index([loopId, playedAt])
+  @@index([journeyId, playedAt])
 }
 
 model ActivityEvent {
@@ -191,8 +218,13 @@ enum ActivityEventType {
   ASSET_UPLOADED
   ASSET_READY
   DEVICE_REGISTERED
+  DEVICE_GROUP_CREATED
+  DEVICE_GROUP_UPDATED
+  DEVICE_GROUP_DELETED
   DEVICE_SYNCED
   DEVICE_OFFLINE
+  DEVICE_DISABLED
+  DEVICE_ENABLED
   SYNC_FAILED
 }
 

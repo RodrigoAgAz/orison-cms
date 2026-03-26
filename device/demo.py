@@ -13,6 +13,7 @@ import tempfile
 import termios
 import time
 import tty
+from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -26,11 +27,21 @@ CONTENT_DIR = SCRIPT_DIR / "demo_content"
 STATICS_DIR = CONTENT_DIR / "statics"
 MANIFEST_PATH = CONTENT_DIR / "manifest.json"
 LOOP_PATH = CONTENT_DIR / "loop.mp4"
+SAFETY_PATH = CONTENT_DIR / "safety.mp4"
 DEFAULT_STATIC_IMAGE_PATH = SCRIPT_DIR / "orison_static_fallback.jpg"
 MPV_SOCKET_PATH = "/tmp/orison-demo-mpv.sock"
 CHUNK_SIZE = 1024 * 1024
-VIDEO_MODE = "VIDEO_MODE"
-SILENT_MODE = "SILENT_MODE"
+WIND_DOWN_SECONDS = 5
+
+
+class DemoState(Enum):
+    IDLE = "IDLE"
+    SAFETY = "SAFETY"
+    JOURNEY = "JOURNEY"
+    SILENT = "SILENT"
+    WIND_DOWN = "WIND_DOWN"
+    DISABLED = "DISABLED"
+
 
 DEFAULT_CONFIG = {
     "device": {
@@ -157,6 +168,21 @@ def download_file(url: str, target_path: Path, expected_checksum: str | None, la
         raise
 
 
+def download_json(url: str, expected_checksum: str | None, label: str) -> dict[str, Any]:
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=CONTENT_DIR if CONTENT_DIR.exists() else None, suffix=".json") as handle:
+        temp_path = Path(handle.name)
+
+    try:
+        download_file(url, temp_path, None, label)
+        with temp_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if expected_checksum and payload.get("checksum") != expected_checksum:
+            raise RuntimeError("Manifest checksum mismatch.")
+        return payload
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def ensure_slot_static(slot_index: int, slot_payload: dict[str, Any] | None) -> None:
     static_target = STATICS_DIR / f"slot_{slot_index:02d}.jpg"
     static_url = slot_payload.get("staticImageUrl") if slot_payload else None
@@ -173,52 +199,70 @@ def ensure_slot_static(slot_index: int, slot_payload: dict[str, Any] | None) -> 
     shutil.copy2(DEFAULT_STATIC_IMAGE_PATH, static_target)
 
 
-def ensure_latest_loop(config: dict[str, Any]) -> dict[str, Any]:
-    remote_manifest = fetch_manifest_info(config)
-    local_manifest = load_local_manifest()
-    slot_lookup = {int(slot.get("position", 0)): slot for slot in remote_manifest.get("slots", [])}
+def ensure_safety_video(manifest: dict[str, Any]) -> None:
+    safety_payload = manifest.get("safetyVideo") or {}
+    safety_url = safety_payload.get("url")
+    if safety_url:
+        download_file(str(safety_url), SAFETY_PATH, safety_payload.get("checksum"), "Downloading safety.mp4")
+        return
 
-    remote_checksum = str(remote_manifest.get("checksum") or "")
+    SAFETY_PATH.unlink(missing_ok=True)
+
+
+def ensure_latest_loop(config: dict[str, Any]) -> dict[str, Any]:
+    manifest_info = fetch_manifest_info(config)
+    local_manifest = load_local_manifest()
+    remote_checksum = str(manifest_info.get("checksum") or "")
     local_checksum = str(local_manifest.get("checksum") or "") if local_manifest else ""
 
-    if LOOP_PATH.exists() and remote_checksum and remote_checksum == local_checksum:
-        expected_loop_checksum = remote_manifest.get("compiledVideoChecksum")
-        if expected_loop_checksum and sha256_file(LOOP_PATH) != expected_loop_checksum:
-            print("Cached loop checksum mismatch. Re-downloading current loop.")
-        else:
-            for slot_index in range(10):
-                ensure_slot_static(slot_index, slot_lookup.get(slot_index))
-            print(f"Using cached loop {remote_manifest.get('loopId')}.")
-            return remote_manifest
+    if LOOP_PATH.exists() and local_manifest and remote_checksum and remote_checksum == local_checksum:
+        local_manifest["disabled"] = bool(manifest_info.get("disabled"))
+        local_manifest["disabledReason"] = manifest_info.get("disabledReason")
+        print(f"Using cached loop {local_manifest.get('loopId')}.")
+        return local_manifest
 
-    compiled_video_url = remote_manifest.get("compiledVideoUrl")
+    manifest_url = manifest_info.get("manifestUrl")
+    if not manifest_url:
+        raise RuntimeError("Manifest response did not include manifestUrl.")
+
+    manifest = download_json(str(manifest_url), manifest_info.get("checksum"), "Downloading manifest.json")
+    manifest["disabled"] = bool(manifest_info.get("disabled"))
+    manifest["disabledReason"] = manifest_info.get("disabledReason")
+
+    compiled_video_url = manifest.get("compiledVideoUrl") or manifest_info.get("compiledVideoUrl")
     if not compiled_video_url:
         raise RuntimeError("Manifest did not include a compiledVideoUrl.")
 
-    print(f"New loop available: {remote_manifest.get('loopName', remote_manifest.get('loopId', 'unknown'))}")
-    download_file(str(compiled_video_url), LOOP_PATH, remote_manifest.get("compiledVideoChecksum"), "Downloading loop.mp4")
+    print(f"New loop available: {manifest.get('loopName', manifest.get('loopId', 'unknown'))}")
+    download_file(str(compiled_video_url), LOOP_PATH, manifest.get("compiledVideoChecksum"), "Downloading loop.mp4")
 
+    slot_lookup = {int(slot.get("position", 0)): slot for slot in manifest.get("slots", [])}
     for slot_index in range(10):
         ensure_slot_static(slot_index, slot_lookup.get(slot_index))
 
-    save_manifest(remote_manifest)
-    return remote_manifest
+    ensure_safety_video(manifest)
+    save_manifest(manifest)
+    return manifest
 
 
 class DemoPlayer:
     def __init__(self, manifest: dict[str, Any]) -> None:
         self.manifest = manifest
         self.process: subprocess.Popen[str] | None = None
-        self.mode = VIDEO_MODE
-        self.loop_started_monotonic = time.monotonic()
+        self.state = DemoState.DISABLED if manifest.get("disabled") else DemoState.IDLE
+        self.loop_started_monotonic: float | None = None
+        self.idle_started_monotonic = time.monotonic()
+        self.wind_down_started_monotonic: float | None = None
         self.last_silent_slot_index: int | None = None
+        self.last_idle_slot_index: int | None = None
 
     def start(self) -> None:
-        self.start_mpv(LOOP_PATH)
-        print("Press spacebar to toggle silent mode. Ctrl+C to stop.")
+        self.start_mpv(DEFAULT_STATIC_IMAGE_PATH, loop_forever=False)
+        self.transition(self.state, reset_idle_clock=True)
+        print("Controls: j start/end journey, space mute/unmute, d driver override, Ctrl+C to stop.")
         self.event_loop()
 
-    def start_mpv(self, media_path: Path) -> None:
+    def start_mpv(self, media_path: Path, *, loop_forever: bool) -> None:
         if self.process and self.process.poll() is None:
             self.process.terminate()
             try:
@@ -233,8 +277,9 @@ class DemoPlayer:
             [
                 "mpv",
                 "--fullscreen=yes",
-                "--loop-file=inf",
+                f"--loop-file={'inf' if loop_forever else 'no'}",
                 "--image-display-duration=inf",
+                "--keep-open=yes",
                 f"--input-ipc-server={MPV_SOCKET_PATH}",
                 str(media_path),
             ],
@@ -253,14 +298,36 @@ class DemoPlayer:
         except OSError:
             return False
 
-    def load_file(self, media_path: Path) -> None:
+    def load_file(self, media_path: Path, *, loop_forever: bool) -> None:
+        if not self.send_mpv_command({"command": ["set_property", "loop-file", "inf" if loop_forever else "no"]}):
+            self.start_mpv(media_path, loop_forever=loop_forever)
+            return
+
         if not self.send_mpv_command({"command": ["loadfile", str(media_path), "replace"]}):
-            self.start_mpv(media_path)
+            self.start_mpv(media_path, loop_forever=loop_forever)
 
-    def seek_video_to_elapsed(self, elapsed_seconds: float) -> None:
-        self.send_mpv_command({"command": ["seek", max(elapsed_seconds, 0.0), "absolute", "exact"]})
+    def get_mpv_property(self, property_name: str) -> Any | None:
+        if not os.path.exists(MPV_SOCKET_PATH):
+            return None
 
-    def loop_duration_seconds(self) -> float:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(MPV_SOCKET_PATH)
+                client.sendall((json.dumps({"command": ["get_property", property_name]}) + "\n").encode("utf-8"))
+                response = client.recv(4096).decode("utf-8")
+            payload = json.loads(response)
+            if payload.get("error") not in (None, "success"):
+                return None
+            return payload.get("data")
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def journey_elapsed_seconds(self) -> float:
+        if self.loop_started_monotonic is None:
+            return 0.0
+        return max(time.monotonic() - self.loop_started_monotonic, 0.0)
+
+    def current_loop_duration_seconds(self) -> float:
         duration_ms = self.manifest.get("totalDurationMs")
         try:
             duration_seconds = float(duration_ms) / 1000.0
@@ -270,11 +337,11 @@ class DemoPlayer:
             pass
         return 600.0
 
-    def elapsed_seconds(self) -> float:
-        return (time.monotonic() - self.loop_started_monotonic) % self.loop_duration_seconds()
-
     def current_slot_index(self) -> int:
-        return int(self.elapsed_seconds() // 60) % 10
+        return int(self.journey_elapsed_seconds() // 60) % 10
+
+    def idle_slot_index(self) -> int:
+        return int((time.monotonic() - self.idle_started_monotonic) // 60) % 10
 
     def static_path_for_slot(self, slot_index: int) -> Path:
         path = STATICS_DIR / f"slot_{slot_index:02d}.jpg"
@@ -282,36 +349,129 @@ class DemoPlayer:
             return path
         return DEFAULT_STATIC_IMAGE_PATH
 
-    def toggle_mode(self) -> None:
-        if self.mode == VIDEO_MODE:
-            slot_index = self.current_slot_index()
-            self.load_file(self.static_path_for_slot(slot_index))
-            self.mode = SILENT_MODE
-            self.last_silent_slot_index = slot_index
+    def safety_finished(self) -> bool:
+        eof_reached = self.get_mpv_property("eof-reached")
+        if eof_reached is True:
+            return True
+
+        time_pos = self.get_mpv_property("time-pos")
+        duration_ms = int((self.manifest.get("safetyVideo") or {}).get("durationMs") or 0)
+        if time_pos is None or duration_ms <= 0:
+            return False
+        return float(time_pos) * 1000 >= max(duration_ms - 250, 0)
+
+    def transition(self, new_state: DemoState, *, reset_idle_clock: bool = False) -> None:
+        self.state = new_state
+
+        if new_state == DemoState.DISABLED:
+            self.load_file(DEFAULT_STATIC_IMAGE_PATH, loop_forever=False)
             return
 
-        elapsed = self.elapsed_seconds()
-        self.load_file(LOOP_PATH)
-        time.sleep(0.25)
-        self.seek_video_to_elapsed(elapsed)
-        self.mode = VIDEO_MODE
-        self.last_silent_slot_index = None
-
-    def sync_silent_mode(self) -> None:
-        if self.mode != SILENT_MODE:
+        if new_state == DemoState.IDLE:
+            self.loop_started_monotonic = None
+            self.last_silent_slot_index = None
+            if reset_idle_clock:
+                self.idle_started_monotonic = time.monotonic()
+            self.last_idle_slot_index = None
+            self.show_idle_slot(force_reload=True)
             return
 
+        if new_state == DemoState.SAFETY:
+            if not SAFETY_PATH.exists():
+                self.loop_started_monotonic = time.monotonic()
+                self.transition(DemoState.JOURNEY)
+                return
+
+            self.load_file(SAFETY_PATH, loop_forever=False)
+            return
+
+        if new_state == DemoState.JOURNEY:
+            if self.loop_started_monotonic is None:
+                self.loop_started_monotonic = time.monotonic()
+            self.load_file(LOOP_PATH, loop_forever=True)
+            self.send_mpv_command(
+                {
+                    "command": [
+                        "seek",
+                        self.journey_elapsed_seconds() % self.current_loop_duration_seconds(),
+                        "absolute",
+                        "exact",
+                    ]
+                }
+            )
+            return
+
+        if new_state == DemoState.SILENT:
+            self.last_silent_slot_index = None
+            self.show_silent_slot(force_reload=True)
+            return
+
+        if new_state == DemoState.WIND_DOWN:
+            self.wind_down_started_monotonic = time.monotonic()
+            self.load_file(DEFAULT_STATIC_IMAGE_PATH, loop_forever=False)
+
+    def start_or_end_journey(self) -> None:
+        if self.state == DemoState.DISABLED:
+            return
+
+        if self.state == DemoState.IDLE:
+            self.transition(DemoState.SAFETY)
+            return
+
+        if self.state == DemoState.SAFETY:
+            self.transition(DemoState.IDLE, reset_idle_clock=True)
+            return
+
+        self.transition(DemoState.WIND_DOWN)
+
+    def driver_override(self) -> None:
+        if self.state in {DemoState.SAFETY, DemoState.DISABLED, DemoState.IDLE}:
+            return
+        self.transition(DemoState.WIND_DOWN)
+
+    def toggle_silent(self) -> None:
+        if self.state == DemoState.JOURNEY:
+            self.transition(DemoState.SILENT)
+        elif self.state == DemoState.SILENT:
+            self.transition(DemoState.JOURNEY)
+
+    def show_idle_slot(self, *, force_reload: bool = False) -> None:
+        slot_index = self.idle_slot_index()
+        if force_reload or slot_index != self.last_idle_slot_index:
+            self.load_file(self.static_path_for_slot(slot_index), loop_forever=False)
+            self.last_idle_slot_index = slot_index
+
+    def show_silent_slot(self, *, force_reload: bool = False) -> None:
         slot_index = self.current_slot_index()
-        if slot_index == self.last_silent_slot_index:
+        if force_reload or slot_index != self.last_silent_slot_index:
+            self.load_file(self.static_path_for_slot(slot_index), loop_forever=False)
+            self.last_silent_slot_index = slot_index
+
+    def tick(self) -> None:
+        if self.state == DemoState.DISABLED:
             return
 
-        self.load_file(self.static_path_for_slot(slot_index))
-        self.last_silent_slot_index = slot_index
+        if self.state == DemoState.IDLE:
+            self.show_idle_slot()
+            return
+
+        if self.state == DemoState.SAFETY and self.safety_finished():
+            self.loop_started_monotonic = time.monotonic()
+            self.transition(DemoState.JOURNEY)
+            return
+
+        if self.state == DemoState.SILENT:
+            self.show_silent_slot()
+            return
+
+        if self.state == DemoState.WIND_DOWN and self.wind_down_started_monotonic:
+            if time.monotonic() - self.wind_down_started_monotonic >= WIND_DOWN_SECONDS:
+                self.transition(DemoState.IDLE, reset_idle_clock=True)
 
     def event_loop(self) -> None:
         if not sys.stdin.isatty():
             while self.process and self.process.poll() is None:
-                self.sync_silent_mode()
+                self.tick()
                 time.sleep(1)
             return
 
@@ -322,9 +482,15 @@ class DemoPlayer:
             tty.setcbreak(fd)
             while self.process and self.process.poll() is None:
                 readable, _, _ = select.select([sys.stdin], [], [], 1.0)
-                if readable and sys.stdin.read(1) == " ":
-                    self.toggle_mode()
-                self.sync_silent_mode()
+                if readable:
+                    key = sys.stdin.read(1)
+                    if key == " ":
+                        self.toggle_silent()
+                    elif key.lower() == "j":
+                        self.start_or_end_journey()
+                    elif key.lower() == "d":
+                        self.driver_override()
+                self.tick()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, previous_settings)
 
@@ -333,7 +499,11 @@ def main() -> None:
     config = ensure_config()
     ensure_mpv_installed()
     manifest = ensure_latest_loop(config)
-    print(f"Ready to play loop {manifest.get('loopId')} ({manifest.get('totalDurationMs')} ms).")
+    print(
+        "Ready to play loop "
+        f"{manifest.get('loopId')} ({manifest.get('totalDurationMs')} ms)"
+        f"{' [DISABLED]' if manifest.get('disabled') else ''}."
+    )
     DemoPlayer(manifest).start()
 
 

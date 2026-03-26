@@ -1,6 +1,7 @@
 export const assetCategories = [
   "ADVERTISEMENT",
   "STATIC_CREATIVE",
+  "SAFETY_MESSAGE",
   "FILLER_WEATHER",
   "FILLER_NEWS",
   "FILLER_BRANDED",
@@ -21,10 +22,18 @@ export const activityEventTypes = [
   "ASSET_UPLOADED",
   "ASSET_READY",
   "DEVICE_REGISTERED",
+  "DEVICE_GROUP_CREATED",
+  "DEVICE_GROUP_UPDATED",
+  "DEVICE_GROUP_DELETED",
   "DEVICE_SYNCED",
   "DEVICE_OFFLINE",
+  "DEVICE_DISABLED",
+  "DEVICE_ENABLED",
   "SYNC_FAILED",
 ] as const;
+
+export const playbackModes = ["journey", "silent", "idle"] as const;
+export const playerStates = ["IDLE", "SAFETY", "JOURNEY", "SILENT", "WIND_DOWN", "DISABLED"] as const;
 
 export const queueNames = {
   assetProcessing: "asset-processing",
@@ -63,3 +72,5 @@ export type LoopStatus = (typeof loopStatuses)[number];
 export type UserRole = (typeof userRoles)[number];
 export type SlotContentType = (typeof slotContentTypes)[number];
 export type ActivityEventType = (typeof activityEventTypes)[number];
+export type PlaybackMode = (typeof playbackModes)[number];
+export type PlayerState = (typeof playerStates)[number];

@@ -80,6 +80,7 @@ export default async function LoopsPage({ searchParams }: Props) {
             status: loop.status,
             updatedAt: loop.updatedAt.toISOString(),
             completeSlots: loop.slots.filter((slot) => slot.contents.length > 0).length,
+            targetGroupName: loop.targetGroup?.name ?? "All devices",
             isDirectUpload:
               loop.slots.length === 0 && Boolean(loop.compiledVideoUrl || loop.compiledVideoKey),
           }))}

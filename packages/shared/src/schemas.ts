@@ -7,6 +7,8 @@ import {
   defaultHeartbeatIntervalSeconds,
   defaultSyncIntervalSeconds,
   loopStatuses,
+  playbackModes,
+  playerStates,
   queueNames,
   slotContentTypes,
   userRoles,
@@ -18,6 +20,8 @@ export const loopStatusSchema = z.enum(loopStatuses);
 export const slotContentTypeSchema = z.enum(slotContentTypes);
 export const userRoleSchema = z.enum(userRoles);
 export const activityEventTypeSchema = z.enum(activityEventTypes);
+export const playbackModeSchema = z.enum(playbackModes);
+export const playerStateSchema = z.enum(playerStates);
 
 export const jsonObjectSchema = z.record(z.any());
 
@@ -41,6 +45,7 @@ export const createLoopSchema = z.object({
 export const updateLoopSchema = z.object({
   name: z.string().min(2).max(120).optional(),
   status: loopStatusSchema.optional(),
+  targetGroupId: z.string().min(1).nullable().optional(),
 });
 
 export const assetListQuerySchema = z.object({
@@ -65,8 +70,16 @@ export const deviceRegistrationSchema = z.object({
 });
 
 export const deviceUpdateSchema = deviceRegistrationSchema.partial().extend({
+  groupId: z.string().min(1).nullable().optional(),
   isActive: z.boolean().optional(),
+  isDisabled: z.boolean().optional(),
+  disabledReason: z.string().max(500).optional().nullable(),
   firmwareVersion: z.string().max(32).optional().nullable(),
+});
+
+export const deviceGroupInputSchema = z.object({
+  name: z.string().min(2).max(120),
+  description: z.string().max(500).optional().nullable(),
 });
 
 export const heartbeatSchema = z.object({
@@ -78,17 +91,26 @@ export const heartbeatSchema = z.object({
   cpuTemp: z.number().min(0).optional().nullable(),
   uptimeSeconds: z.number().int().min(0).optional().nullable(),
   memoryUsedPercent: z.number().min(0).max(100).optional().nullable(),
-  playerStatus: z.enum(["playing", "idle", "fallback", "error"]).optional().nullable(),
+  playerStatus: z.enum(["playing", "silent", "disabled", "idle", "fallback", "error"]).optional().nullable(),
   networkType: z.enum(["4g", "ethernet", "wifi", "unknown"]).optional().nullable(),
   signalStrength: z.number().int().optional().nullable(),
+  location: jsonObjectSchema.nullable().optional(),
 });
 
 export const playbackLogEntrySchema = z.object({
-  slotPosition: z.number().int().min(0).max(9),
-  contentType: slotContentTypeSchema,
+  slotPosition: z.number().int().min(0).max(9).nullable().optional(),
+  contentType: slotContentTypeSchema.nullable().optional(),
+  type: z.string().max(64).nullable().optional(),
+  event: z.string().max(64).nullable().optional(),
   assetId: z.string().optional().nullable(),
   playedAt: z.string().datetime(),
   completedFull: z.boolean().default(true),
+  mode: playbackModeSchema.nullable().optional(),
+  state: playerStateSchema.nullable().optional(),
+  durationMs: z.number().int().min(0).nullable().optional(),
+  journeyId: z.string().max(128).nullable().optional(),
+  location: jsonObjectSchema.nullable().optional(),
+  deviceSerial: z.string().max(64).nullable().optional(),
 });
 
 export const playbackLogBatchSchema = z.object({
@@ -108,6 +130,7 @@ export const settingsSchema = z.object({
   syncIntervalSeconds: z.number().int().min(60).default(defaultSyncIntervalSeconds),
   heartbeatIntervalSeconds: z.number().int().min(60).default(defaultHeartbeatIntervalSeconds),
   notificationEmails: z.array(z.string().email()).default([]),
+  safetyVideoAssetId: z.string().nullable().default(null),
 });
 
 export const assetProcessingJobSchema = z.object({
@@ -133,6 +156,8 @@ export const deviceManifestResponseSchema = z.object({
   version: z.number().int().positive(),
   checksum: z.string(),
   compiledVideoUrl: z.string().url().nullable(),
+  disabled: z.boolean().default(false),
+  disabledReason: z.string().nullable().optional(),
 });
 
 export type SlotContentInput = z.infer<typeof slotContentInputSchema>;
@@ -141,6 +166,7 @@ export type CreateLoopInput = z.infer<typeof createLoopSchema>;
 export type UpdateLoopInput = z.infer<typeof updateLoopSchema>;
 export type DeviceRegistrationInput = z.infer<typeof deviceRegistrationSchema>;
 export type DeviceUpdateInput = z.infer<typeof deviceUpdateSchema>;
+export type DeviceGroupInput = z.infer<typeof deviceGroupInputSchema>;
 export type DeviceHeartbeatInput = z.infer<typeof heartbeatSchema>;
 export type PlaybackLogBatchInput = z.infer<typeof playbackLogBatchSchema>;
 export type SettingsInput = z.infer<typeof settingsSchema>;

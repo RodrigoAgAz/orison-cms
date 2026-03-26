@@ -27,6 +27,7 @@ RUNTIME_DIR = BASE_DIR / "runtime"
 PLAYBACK_LOG_PATH = LOG_DIR / "playback.jsonl"
 PLAYER_COMMAND_PATH = RUNTIME_DIR / "player_command.json"
 PLAYER_STATE_PATH = RUNTIME_DIR / "player_state.json"
+LAST_LOCATION_PATH = RUNTIME_DIR / "last_location.json"
 DEFAULT_STATIC_IMAGE_PATH = Path(__file__).resolve().with_name("orison_static_fallback.jpg")
 
 
@@ -125,6 +126,10 @@ def current_manifest_path() -> Path:
 
 def current_loop_file() -> Path:
     return CURRENT_DIR / "loop.mp4"
+
+
+def current_safety_file(base_dir: Path | None = None) -> Path:
+    return (base_dir or CURRENT_DIR) / "safety.mp4"
 
 
 def statics_dir(base_dir: Path | None = None) -> Path:

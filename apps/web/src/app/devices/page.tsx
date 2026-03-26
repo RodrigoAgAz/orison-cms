@@ -6,6 +6,7 @@ import { getDevicesData, resolveDeviceStatus } from "@/lib/queries";
 type Props = {
   searchParams?: {
     page?: string;
+    group?: string;
   };
 };
 
@@ -19,6 +20,7 @@ export default async function DevicesPage({ searchParams }: Props) {
   const result = await getDevicesData({
     page: parsePage(searchParams?.page),
     pageSize: 12,
+    groupId: searchParams?.group,
   });
 
   return (
@@ -38,15 +40,18 @@ export default async function DevicesPage({ searchParams }: Props) {
           ...device,
           lastSyncAt: device.lastSyncAt?.toISOString() ?? null,
           lastHeartbeatAt: device.lastHeartbeatAt?.toISOString() ?? null,
-          status: resolveDeviceStatus(device, result.publishedLoopId),
+          status: resolveDeviceStatus(device, device.expectedLoopId),
           heartbeats: device.heartbeats.map((heartbeat) => ({
             ...heartbeat,
             receivedAt: heartbeat.receivedAt.toISOString(),
           })),
         }))}
+        fleetControl={result.fleetControl}
+        groups={result.groups}
         page={result.page}
         pageSize={result.pageSize}
         publishedLoopId={result.publishedLoopId}
+        selectedGroupId={result.selectedGroupId}
         total={result.total}
       />
     </div>

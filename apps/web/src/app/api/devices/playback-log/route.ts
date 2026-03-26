@@ -19,12 +19,20 @@ export async function POST(request: NextRequest) {
     await prisma.playbackLog.createMany({
       data: body.logs.map((log) => ({
         deviceId: device.id,
+        deviceSerial: log.deviceSerial ?? body.serialNumber,
         loopId: device.currentLoopId ?? "unknown",
-        slotPosition: log.slotPosition,
-        contentType: log.contentType,
+        slotPosition: log.slotPosition ?? null,
+        contentType: log.contentType ?? null,
         assetId: log.assetId,
+        playbackType: log.type ?? null,
+        eventName: log.event ?? null,
+        mode: log.mode ?? null,
+        playerState: log.state ?? null,
         playedAt: new Date(log.playedAt),
         completedFull: log.completedFull,
+        durationMs: log.durationMs ?? null,
+        journeyId: log.journeyId ?? null,
+        locationData: log.location ?? undefined,
       })),
     });
 

@@ -18,6 +18,7 @@ import {
 import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
+import { getCmsSettings } from "./cms-settings";
 import { commandExists, extractMetadata } from "./media";
 import {
   deleteObject,
@@ -36,6 +37,13 @@ type LoopWithContents = Loop & {
       contents: Array<SlotContent & { asset: Asset }>;
     }
   >;
+};
+
+type SafetyVideoManifestData = {
+  url: string;
+  checksum: string;
+  durationMs: number;
+  fileSizeBytes: number;
 };
 
 type DirectLoopUploadOptions = {
@@ -277,7 +285,10 @@ export async function updateSlotContents(
 }
 
 export async function buildPreviewManifest(loopId: string) {
-  const loop = (await loadLoop(loopId)) as LoopWithContents | null;
+  const [loop, safetyVideo] = await Promise.all([
+    loadLoop(loopId) as Promise<LoopWithContents | null>,
+    loadSafetyVideoManifestData(),
+  ]);
   if (!loop) {
     throw new Error("Loop not found");
   }
@@ -288,6 +299,7 @@ export async function buildPreviewManifest(loopId: string) {
 
     return {
       position: slot.position,
+      staticImageAssetId: slot.staticCreativeId ?? null,
       staticImageUrl: slot.staticCreative ? getPublicUrl(slot.staticCreative.s3Key) : null,
       staticImageChecksum: slot.staticCreative?.checksum ?? null,
       advertisementVideoUrl: advertisement ? getPublicUrl(advertisement.asset.s3Key) : null,
@@ -308,8 +320,17 @@ export async function buildPreviewManifest(loopId: string) {
     version: "1.0",
     loopId: loop.id,
     loopName: loop.name,
+    targetGroupId: loop.targetGroupId ?? null,
     publishedAt: new Date().toISOString(),
     totalDurationMs: loopDurationMs,
+    safetyVideo:
+      safetyVideo && safetyVideo.durationMs > 0
+        ? {
+            url: safetyVideo.url,
+            checksum: safetyVideo.checksum,
+            durationMs: safetyVideo.durationMs,
+          }
+        : undefined,
     slots,
     totalDownloadSizeBytes: sortedSlots.reduce(
       (total, slot) =>
@@ -317,7 +338,7 @@ export async function buildPreviewManifest(loopId: string) {
         slot.contents.reduce((slotSum, content) => slotSum + content.asset.fileSize, 0) +
         (slot.staticCreative?.fileSize ?? 0),
       0,
-    ),
+    ) + (safetyVideo?.fileSizeBytes ?? 0),
     compiledVideoUrl: loop.compiledVideoUrl,
     compiledVideoChecksum: null,
   };
@@ -353,6 +374,34 @@ async function ensureLoopPublishable(loop: LoopWithContents) {
       throw new Error(`Slot ${slot.position + 1} contains assets that are not ready`);
     }
   }
+}
+
+async function loadSafetyVideoManifestData(): Promise<SafetyVideoManifestData | null> {
+  const settings = await getCmsSettings();
+  if (!settings.safetyVideoAssetId) {
+    return null;
+  }
+
+  const asset = await prisma.asset.findUnique({
+    where: { id: settings.safetyVideoAssetId },
+  });
+
+  if (
+    !asset ||
+    asset.status !== "READY" ||
+    asset.category !== "SAFETY_MESSAGE" ||
+    !asset.durationMs ||
+    asset.durationMs <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    url: getPublicUrl(asset.s3Key),
+    checksum: asset.checksum ?? "",
+    durationMs: asset.durationMs,
+    fileSizeBytes: asset.fileSize,
+  };
 }
 
 async function runFfmpeg(args: string[]) {
@@ -649,6 +698,7 @@ export async function publishDirectLoopUpload({
     throw new Error("Direct loop uploads must be 14 minutes or shorter");
   }
 
+  const [safetyVideo] = await Promise.all([loadSafetyVideoManifestData()]);
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
   const outputPath = path.join(tempDir, "loop.mp4");
   let compiledSourcePath = outputPath;
@@ -692,10 +742,19 @@ export async function publishDirectLoopUpload({
       version: "1.0",
       loopId: loop.id,
       loopName: loop.name,
+      targetGroupId: loop.targetGroupId ?? null,
       publishedAt: publishedAt.toISOString(),
       totalDurationMs: durationMs,
+      safetyVideo:
+        safetyVideo && safetyVideo.durationMs > 0
+          ? {
+              url: safetyVideo.url,
+              checksum: safetyVideo.checksum,
+              durationMs: safetyVideo.durationMs,
+            }
+          : undefined,
       slots: [],
-      totalDownloadSizeBytes: outputStats.size,
+      totalDownloadSizeBytes: outputStats.size + (safetyVideo?.fileSizeBytes ?? 0),
       compiledVideoUrl,
       compiledVideoChecksum,
     };
