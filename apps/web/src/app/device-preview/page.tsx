@@ -24,22 +24,24 @@ export const viewport: Viewport = {
 };
 
 export default async function DevicePreviewPage() {
-  const publishedLoop = await getCurrentPublishedLoop();
+  const loop = await getCurrentPublishedLoop();
 
-  if (!publishedLoop?.compiledVideoUrl) {
+  if (!loop?.compiledVideoUrl) {
     return (
-      <main className="device-preview-screen device-preview-empty" role="status">
-        <span>No published loop available.</span>
+      <main className="device-preview-screen">
+        <div className="device-preview-overlay" role="status">
+          <strong>No published loop available</strong>
+          <span>Publish a loop to preview the current fleet programme.</span>
+        </div>
       </main>
     );
   }
 
   return (
     <DevicePreviewPlayer
-      loopName={publishedLoop.name}
-      videoUrl={`${publishedLoop.compiledVideoUrl}?v=${encodeURIComponent(
-        publishedLoop.checksum ?? publishedLoop.updatedAt.toISOString(),
-      )}`}
+      loopName={loop.name}
+      safetyMedia={loop.safetyVideo ?? null}
+      videoUrl={loop.compiledVideoUrl}
     />
   );
 }

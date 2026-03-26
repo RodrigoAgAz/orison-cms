@@ -534,6 +534,8 @@ export async function getCurrentPublishedLoop() {
       select: {
         id: true,
         name: true,
+        manifestUrl: true,
+        manifestKey: true,
         compiledVideoUrl: true,
         compiledVideoKey: true,
         publishedAt: true,
@@ -546,10 +548,46 @@ export async function getCurrentPublishedLoop() {
       return null;
     }
 
+    const manifestUrl = loop.manifestUrl ?? (loop.manifestKey ? getPublicUrl(loop.manifestKey) : null);
+    let safetyVideo: {
+      url: string;
+      durationMs: number;
+      mimeType: string;
+    } | null = null;
+
+    if (manifestUrl) {
+      try {
+        const response = await fetch(manifestUrl, {
+          cache: "no-store",
+        });
+
+        if (response.ok) {
+          const manifest = (await response.json()) as {
+            safetyVideo?: {
+              url?: string | null;
+              durationMs?: number | null;
+              mimeType?: string | null;
+            };
+          };
+
+          if (manifest.safetyVideo?.url && manifest.safetyVideo.durationMs) {
+            safetyVideo = {
+              url: manifest.safetyVideo.url,
+              durationMs: manifest.safetyVideo.durationMs,
+              mimeType: manifest.safetyVideo.mimeType ?? "video/mp4",
+            };
+          }
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
     return {
       ...loop,
       compiledVideoUrl:
         loop.compiledVideoUrl ?? (loop.compiledVideoKey ? getPublicUrl(loop.compiledVideoKey) : null),
+      safetyVideo,
     };
   } catch (error) {
     console.error(error);
