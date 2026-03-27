@@ -119,7 +119,7 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
 
       <video
         aria-label={`${loopName} preview`}
-        autoPlay={!hasSafetyMedia}
+        autoPlay
         className="device-preview-video"
         loop
         muted
