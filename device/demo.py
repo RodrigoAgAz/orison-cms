@@ -391,6 +391,7 @@ class DemoPlayer:
         return str((self.manifest.get("safetyVideo") or {}).get("mimeType") or "").startswith("image/")
 
     def transition(self, new_state: DemoState, *, reset_idle_clock: bool = False) -> None:
+        previous_state = self.state
         self.state = new_state
         if new_state != DemoState.SAFETY:
             self.safety_started_monotonic = None
@@ -422,7 +423,10 @@ class DemoPlayer:
         if new_state == DemoState.JOURNEY:
             if self.loop_started_monotonic is None:
                 self.loop_started_monotonic = time.monotonic()
-            self.load_file(LOOP_PATH, loop_forever=True)
+            if previous_state == DemoState.SAFETY and self.safety_is_image():
+                self.start_mpv(LOOP_PATH, loop_forever=True)
+            else:
+                self.load_file(LOOP_PATH, loop_forever=True)
             self.send_mpv_command(
                 {
                     "command": [

@@ -69,6 +69,10 @@ const s3Client =
       })
     : null;
 
+export function hasRemoteObjectStorage() {
+  return Boolean(s3Client && env.s3Bucket);
+}
+
 function localPathForKey(key: string) {
   const normalized = path.normalize(key).replace(/^(\.\.(\/|\\|$))+/, "");
   return path.join(localStorageRoot, normalized);
@@ -173,6 +177,16 @@ export async function getSignedAssetUrl(key: string, expiresIn = 60 * 60) {
   }
 
   return getPublicUrl(key);
+}
+
+export async function getStorageRouteRedirectUrl(key: string) {
+  requireObjectStorage();
+
+  if (hasRemoteObjectStorage()) {
+    return getSignedAssetUrl(key);
+  }
+
+  return null;
 }
 
 async function responseBodyToBuffer(body: Readable) {
