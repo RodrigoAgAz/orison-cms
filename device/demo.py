@@ -132,28 +132,40 @@ def print_progress(label: str, downloaded: int, total: int | None) -> None:
     print(f"\r{label}: {size_mb:6.1f} MB", end="", flush=True)
 
 
+def ensure_curl_installed() -> None:
+    if shutil.which("curl"):
+        return
+
+    raise RuntimeError("curl is required to download demo media files.")
+
+
 def download_file(url: str, target_path: Path, expected_checksum: str | None, label: str) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_curl_installed()
 
     with tempfile.NamedTemporaryFile("wb", delete=False, dir=target_path.parent, suffix=".part") as handle:
         temp_path = Path(handle.name)
 
-    request = Request(url, method="GET")
-    downloaded = 0
-
     try:
-        with urlopen(request, timeout=300) as response, temp_path.open("wb") as handle:
-            total_header = response.headers.get("Content-Length")
-            total = int(total_header) if total_header and total_header.isdigit() else None
-
-            while True:
-                chunk = response.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                downloaded += len(chunk)
-                print_progress(label, downloaded, total)
-
+        print(f"{label}...")
+        subprocess.run(
+            [
+                "curl",
+                "-L",
+                "--fail",
+                "--show-error",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--retry-delay",
+                "2",
+                "--progress-bar",
+                "--output",
+                str(temp_path),
+                url,
+            ],
+            check=True,
+        )
         print()
 
         if expected_checksum:
@@ -272,7 +284,10 @@ class DemoPlayer:
 
     def start(self) -> None:
         self.start_mpv(DEFAULT_STATIC_IMAGE_PATH, loop_forever=False)
-        self.transition(self.state, reset_idle_clock=True)
+        if self.state == DemoState.DISABLED:
+            self.transition(DemoState.DISABLED, reset_idle_clock=True)
+        else:
+            self.transition(DemoState.SAFETY)
         print("Controls: j start/end journey, space mute/unmute, d driver override, Ctrl+C to stop.")
         self.event_loop()
 
