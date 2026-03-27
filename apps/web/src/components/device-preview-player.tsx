@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type DevicePreviewPlayerProps = {
   loopName: string;
@@ -15,11 +15,18 @@ type DevicePreviewPlayerProps = {
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
 export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DevicePreviewPlayerProps) {
-  const [phase, setPhase] = useState<"safety" | "loop">(safetyMedia ? "safety" : "loop");
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const loopVideoRef = useRef<HTMLVideoElement | null>(null);
+  const [activeSurface, setActiveSurface] = useState<"safety" | "loop">(safetyMedia ? "safety" : "loop");
+  const [safetyReady, setSafetyReady] = useState(!safetyMedia);
+  const [loopReady, setLoopReady] = useState(false);
+  const [shouldEnterLoop, setShouldEnterLoop] = useState(!safetyMedia);
+  const [status, setStatus] = useState<"loading" | "error">("loading");
 
   useEffect(() => {
-    setPhase(safetyMedia ? "safety" : "loop");
+    setActiveSurface(safetyMedia ? "safety" : "loop");
+    setSafetyReady(!safetyMedia);
+    setLoopReady(false);
+    setShouldEnterLoop(!safetyMedia);
     setStatus("loading");
   }, [safetyMedia, videoUrl]);
 
@@ -33,24 +40,45 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
 
   useEffect(() => {
     if (
-      phase !== "safety" ||
+      activeSurface !== "safety" ||
       !safetyMedia ||
       !safetyMedia.mimeType.startsWith("image/") ||
-      status !== "ready"
+      !safetyReady
     ) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      setStatus("loading");
-      setPhase("loop");
+      setShouldEnterLoop(true);
     }, safetyMedia.durationMs);
 
     return () => window.clearTimeout(timer);
-  }, [phase, safetyMedia, status]);
+  }, [activeSurface, safetyMedia, safetyReady]);
+
+  useEffect(() => {
+    if (activeSurface !== "safety") {
+      return;
+    }
+
+    loopVideoRef.current?.load();
+  }, [activeSurface, videoUrl]);
+
+  useEffect(() => {
+    if (!shouldEnterLoop || !loopReady) {
+      return;
+    }
+
+    setActiveSurface("loop");
+    setStatus("loading");
+
+    const playPromise = loopVideoRef.current?.play();
+    void playPromise?.catch(() => {
+      setStatus("error");
+    });
+  }, [loopReady, shouldEnterLoop]);
 
   function loadingLabel() {
-    if (phase === "safety" && safetyMedia) {
+    if (activeSurface === "safety" && safetyMedia && !safetyReady) {
       return "Loading safety message...";
     }
 
@@ -58,27 +86,77 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
   }
 
   function handleSafetyError() {
+    setShouldEnterLoop(true);
+    setActiveSurface("loop");
+
+    if (loopReady) {
+      const playPromise = loopVideoRef.current?.play();
+      void playPromise?.catch(() => {
+        setStatus("error");
+      });
+      return;
+    }
+
     setStatus("loading");
-    setPhase("loop");
   }
+
+  const showOverlay =
+    status === "error" || (activeSurface === "safety" ? !safetyReady : !loopReady);
+
+  const visibleSurfaceStyle = {
+    position: "absolute" as const,
+    inset: 0,
+    opacity: 1,
+  };
+
+  const hiddenSurfaceStyle = {
+    position: "absolute" as const,
+    inset: 0,
+    opacity: 0,
+    pointerEvents: "none" as const,
+  };
 
   return (
     <main className="device-preview-screen">
-      {status !== "ready" ? (
+      {showOverlay ? (
         <div className="device-preview-overlay" role="status">
           <strong>{status === "loading" ? loadingLabel() : "Unable to load published loop video."}</strong>
           {status === "error" ? <span>Check the published loop and safety asset URLs, then try again.</span> : null}
         </div>
       ) : null}
 
-      {phase === "safety" && safetyMedia ? (
+      <video
+        aria-label={`${loopName} preview`}
+        autoPlay={!safetyMedia}
+        className="device-preview-video"
+        loop
+        muted
+        onCanPlay={() => {
+          setLoopReady(true);
+          if (activeSurface === "loop") {
+            setStatus("loading");
+          }
+        }}
+        onError={() => setStatus("error")}
+        playsInline
+        preload="auto"
+        ref={loopVideoRef}
+        src={videoUrl}
+        style={activeSurface === "loop" ? visibleSurfaceStyle : hiddenSurfaceStyle}
+      />
+
+      {activeSurface === "safety" && safetyMedia ? (
         safetyMedia.mimeType.startsWith("image/") ? (
           <img
             alt={`${loopName} safety message`}
             className="device-preview-video"
             onError={handleSafetyError}
-            onLoad={() => setStatus("ready")}
+            onLoad={() => {
+              setSafetyReady(true);
+              setStatus("loading");
+            }}
             src={safetyMedia.url}
+            style={visibleSurfaceStyle}
           />
         ) : (
           <video
@@ -86,31 +164,21 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
             autoPlay
             className="device-preview-video"
             muted
-            onCanPlay={() => setStatus("ready")}
-            onEnded={() => {
+            onCanPlay={() => {
+              setSafetyReady(true);
               setStatus("loading");
-              setPhase("loop");
+            }}
+            onEnded={() => {
+              setShouldEnterLoop(true);
             }}
             onError={handleSafetyError}
             playsInline
             preload="auto"
             src={safetyMedia.url}
+            style={visibleSurfaceStyle}
           />
         )
-      ) : (
-        <video
-          aria-label={`${loopName} preview`}
-          autoPlay
-          className="device-preview-video"
-          loop
-          muted
-          onCanPlay={() => setStatus("ready")}
-          onError={() => setStatus("error")}
-          playsInline
-          preload="auto"
-          src={videoUrl}
-        />
-      )}
+      ) : null}
     </main>
   );
 }
