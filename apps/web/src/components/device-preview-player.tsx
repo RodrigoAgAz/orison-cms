@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type DevicePreviewPlayerProps = {
   loopName: string;
@@ -16,9 +16,11 @@ const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 
 export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DevicePreviewPlayerProps) {
   const hasSafetyMedia = Boolean(safetyMedia);
+  const loopVideoRef = useRef<HTMLVideoElement | null>(null);
   const [phase, setPhase] = useState<"safety" | "loop">(hasSafetyMedia ? "safety" : "loop");
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [showSafetyCover, setShowSafetyCover] = useState(hasSafetyMedia);
+  const [loopReady, setLoopReady] = useState(false);
   const safetyIsImage = useMemo(
     () => Boolean(safetyMedia?.mimeType.startsWith("image/")),
     [safetyMedia?.mimeType],
@@ -28,6 +30,7 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
     setPhase(hasSafetyMedia ? "safety" : "loop");
     setStatus("loading");
     setShowSafetyCover(hasSafetyMedia);
+    setLoopReady(false);
   }, [hasSafetyMedia, safetyMedia, videoUrl]);
 
   useEffect(() => {
@@ -51,6 +54,29 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
     return () => window.clearTimeout(timer);
   }, [phase, safetyIsImage, safetyMedia, status]);
 
+  useEffect(() => {
+    if (phase !== "loop" || !loopReady) {
+      return;
+    }
+
+    const video = loopVideoRef.current;
+    if (!video) {
+      return;
+    }
+
+    if (video.currentTime !== 0) {
+      video.currentTime = 0;
+    }
+
+    const playPromise = video.play();
+    void playPromise?.catch(() => {
+      setStatus("error");
+    });
+
+    setShowSafetyCover(false);
+    setStatus("ready");
+  }, [loopReady, phase]);
+
   function loadingLabel() {
     if (phase === "safety" && safetyMedia) {
       return "Loading safety message...";
@@ -65,12 +91,21 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
     setPhase("loop");
   }
 
-  const showOverlay = status === "error" || (status !== "ready" && !showSafetyCover);
+  const showOverlay =
+    status === "error" ||
+    (phase === "safety" ? status !== "ready" && !showSafetyCover : !loopReady && !showSafetyCover);
 
   const visibleSurfaceStyle = {
     position: "absolute" as const,
     inset: 0,
     opacity: 1,
+  };
+
+  const hiddenSurfaceStyle = {
+    position: "absolute" as const,
+    inset: 0,
+    opacity: 0,
+    pointerEvents: "none" as const,
   };
 
   return (
@@ -82,27 +117,28 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
         </div>
       ) : null}
 
-      {phase === "loop" ? (
-        <video
-          aria-label={`${loopName} preview`}
-          autoPlay
-          className="device-preview-video"
-          loop
-          muted
-          onCanPlay={() => {
+      <video
+        aria-label={`${loopName} preview`}
+        autoPlay={!hasSafetyMedia}
+        className="device-preview-video"
+        loop
+        muted
+        onCanPlay={() => {
+          setLoopReady(true);
+          if (!hasSafetyMedia || phase === "loop") {
             setStatus("ready");
-            setShowSafetyCover(false);
-          }}
-          onError={() => {
-            setShowSafetyCover(false);
-            setStatus("error");
-          }}
-          playsInline
-          preload="auto"
-          src={videoUrl}
-          style={visibleSurfaceStyle}
-        />
-      ) : null}
+          }
+        }}
+        onError={() => {
+          setShowSafetyCover(false);
+          setStatus("error");
+        }}
+        playsInline
+        preload="auto"
+        ref={loopVideoRef}
+        src={videoUrl}
+        style={showSafetyCover ? hiddenSurfaceStyle : visibleSurfaceStyle}
+      />
 
       {safetyMedia && showSafetyCover ? (
         safetyIsImage ? (
@@ -122,7 +158,6 @@ export function DevicePreviewPlayer({ loopName, videoUrl, safetyMedia }: DeviceP
             muted
             onCanPlay={() => setStatus("ready")}
             onEnded={() => {
-              setStatus("loading");
               setPhase("loop");
             }}
             onError={handleSafetyError}
