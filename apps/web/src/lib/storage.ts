@@ -58,7 +58,11 @@ const s3Client =
     ? new S3Client({
         region: env.s3Region,
         endpoint: env.s3Endpoint,
-        forcePathStyle: Boolean(env.s3Endpoint),
+        // S3_FORCE_PATH_STYLE=false selects virtual-hosted URLs, which Railway buckets created
+        // after its URL-style change require; path-style stays the default with an endpoint.
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE
+          ? process.env.S3_FORCE_PATH_STYLE === "true"
+          : Boolean(env.s3Endpoint),
         credentials:
           env.awsAccessKeyId && env.awsSecretAccessKey
             ? {
