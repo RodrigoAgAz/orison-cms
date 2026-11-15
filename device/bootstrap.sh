@@ -34,6 +34,9 @@ sudo tee "$BASE_DIR/config.json" >/dev/null <<EOF
     "screenResolution": "1280x800",
     "fallbackContentPath": "/opt/orison/content/fallback/orison_fallback.mp4"
   },
+  "location": {
+    "gpsEnabled": true
+  },
   "health": {
     "heartbeatIntervalSeconds": 300,
     "logUploadIntervalSeconds": 3600,
@@ -45,7 +48,7 @@ EOF
 sudo chmod 600 "$BASE_DIR/config.json"
 sudo python3 -m pip install requests psutil --break-system-packages
 
-sudo cp "$SCRIPT_DIR"/*.py "$BASE_DIR/"
+sudo cp "$SCRIPT_DIR"/*.py "$SCRIPT_DIR"/VERSION "$BASE_DIR/"
 sudo cp "$SCRIPT_DIR"/systemd/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable orison-sync.service orison-player.service orison-health.service

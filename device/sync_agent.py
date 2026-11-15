@@ -9,6 +9,7 @@ from pathlib import Path
 
 import requests
 
+from sync_signal import SYNC_REQUEST_PATH, consume_sync_request
 from common import (
     CURRENT_DIR,
     DEFAULT_STATIC_IMAGE_PATH,
@@ -33,6 +34,7 @@ from common import (
 
 
 PLAYER_CONFIRMATION_TIMEOUT_SECONDS = 30
+SYNC_REQUEST_POLL_SECONDS = 5
 
 
 class SyncAgent:
@@ -46,14 +48,28 @@ class SyncAgent:
         self.ensure_boot_content()
 
         self.logger.info("sync agent started")
+        consume_sync_request()  # a request left over from before restart is moot: we sync right now
         while True:
             try:
                 self.sync_once()
                 interval = int(self.config.raw["sync"]["checkIntervalSeconds"])
-                time.sleep(interval)
+                self.wait_for_next_sync(interval)
             except Exception as error:  # noqa: BLE001
                 self.logger.exception("sync cycle failed: %s", error)
-                time.sleep(30)
+                self.wait_for_next_sync(30)
+
+    def wait_for_next_sync(self, seconds: float, sleep=time.sleep, monotonic=time.monotonic) -> bool:
+        """Sleep up to `seconds` in short steps; return True early if health_monitor requested a sync."""
+        deadline = monotonic() + seconds
+        while True:
+            request = consume_sync_request(SYNC_REQUEST_PATH)
+            if request is not None:
+                self.logger.info("on-demand sync requested: %s", request.get("reasons"))
+                return True
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return False
+            sleep(min(SYNC_REQUEST_POLL_SECONDS, remaining))
 
     def ensure_boot_content(self) -> None:
         self.cleanup_staging()

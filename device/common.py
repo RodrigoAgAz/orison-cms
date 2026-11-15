@@ -51,6 +51,17 @@ class DeviceConfig:
     def cdn_base_url(self) -> str:
         return str(self.raw["device"].get("cdnBaseUrl", "")).rstrip("/")
 
+    @property
+    def gps_enabled(self) -> bool:
+        """location.gpsEnabled, default True; tolerant of a missing/odd section in older config.json files."""
+        section = self.raw.get("location")
+        if not isinstance(section, dict):
+            return True
+        value = section.get("gpsEnabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off"}
+        return bool(value)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
