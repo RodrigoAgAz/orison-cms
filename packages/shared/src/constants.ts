@@ -30,6 +30,13 @@ export const activityEventTypes = [
   "DEVICE_DISABLED",
   "DEVICE_ENABLED",
   "SYNC_FAILED",
+  "LOOP_ASSIGNED",
+  "LOOP_ARCHIVED",
+  "LOOP_UPLOAD_FAILED",
+  "USER_CREATED",
+  "USER_UPDATED",
+  "USER_DELETED",
+  "USER_PASSWORD_CHANGED",
 ] as const;
 
 export const playbackModes = ["journey", "silent", "idle"] as const;
