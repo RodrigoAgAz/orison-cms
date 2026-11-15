@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { ZodSchema } from "zod";
+import type { ZodTypeAny, output } from "zod";
 
 export class ApiError extends Error {
   constructor(
@@ -35,7 +35,9 @@ export function apiError(error: unknown) {
   );
 }
 
-export async function parseJsonBody<T>(request: Request, schema: ZodSchema<T>) {
+// Typed by the schema's output: a schema with .catch()/.default() has a wider input type, and
+// inferring T from ZodSchema<T> would pick that input (e.g. unknown) instead of the parsed type.
+export async function parseJsonBody<S extends ZodTypeAny>(request: Request, schema: S): Promise<output<S>> {
   const body = await request.json();
   const result = schema.safeParse(body);
   if (!result.success) {
