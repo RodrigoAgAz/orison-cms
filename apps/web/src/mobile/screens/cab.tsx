@@ -62,7 +62,8 @@ export function CabScreen({ id }: { id: string }) {
   const inheritName = group ? `${group.name}’s video` : "the video for all cabs";
   const inheritLoop = group?.loop ?? overview.data?.fleetLoop ?? null;
   const pending = !data.isUpToDate && data.expected;
-  const lag = overview.data?.changeLagMinutes ?? 5;
+  // This cab's own figure: older screen software only checks for changes every 30 minutes.
+  const lag = data.changeLagMinutes;
 
   return (
     <Screen>
@@ -82,9 +83,15 @@ export function CabScreen({ id }: { id: string }) {
           <Freshness updatedAt={cab.updatedAt} loading={cab.loading} onRefresh={() => void cab.refresh()} />
         </div>
         {data.status === "paused" ? (
-          <Notice tone="warn" title="Screen paused">
-            {data.pausedReason ? `Reason: ${data.pausedReason}. ` : ""}It shows a still Orison picture instead of videos until it&rsquo;s resumed.
-          </Notice>
+          data.cabPaused ? (
+            <Notice tone="warn" title="Screen paused">
+              {data.pausedReason ? `Reason: ${data.pausedReason}. ` : ""}It shows a still Orison picture instead of videos until it&rsquo;s resumed.
+            </Notice>
+          ) : (
+            <Notice tone="warn" title="All screens paused">
+              Every cab screen is paused from the desktop site. This one shows a still Orison picture until all screens are resumed.
+            </Notice>
+          )
         ) : passenger ? (
           <p className="m-cabhead-passenger">{passenger}</p>
         ) : null}
@@ -195,13 +202,23 @@ export function CabScreen({ id }: { id: string }) {
 
       <Section title="Screen">
         <div className="m-card">
-          {data.isPaused ? (
+          {data.cabPaused ? (
             <>
-              <p className="m-body-text">The screen in {data.label} is paused: passengers see a still Orison picture instead of videos. Resume it to start playing again.</p>
+              <p className="m-body-text">
+                The screen in {data.label} is paused: passengers see a still Orison picture instead of videos. Resume it to start playing again.
+                {data.fleetPaused ? " All screens are also paused from the desktop site, so it won’t play until those are resumed too." : ""}
+              </p>
               <button type="button" className="m-btn m-btn-primary m-btn-block" onClick={() => setPauseOpen(true)} data-testid="resume-cab">
                 <PlayIcon size={18} /> Resume this screen
               </button>
             </>
+          ) : data.fleetPaused ? (
+            <div data-testid="fleet-paused">
+              <Notice tone="warn" title="All screens are paused">
+                {data.pausedReason && data.pausedReason !== "All cabs are paused" ? `Reason: ${data.pausedReason}. ` : ""}Every cab screen has been
+                paused from the desktop site, so this one can&rsquo;t be resumed on its own. It plays again when all screens are resumed there.
+              </Notice>
+            </div>
           ) : (
             <>
               <p className="m-body-text">Pausing stops videos on this screen (it shows a still Orison picture instead), for example while the cab is off the road.</p>
@@ -241,7 +258,8 @@ function PauseSheet({ cab, open, onClose, onDone }: { cab: CabDetail; open: bool
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const resuming = cab.isPaused;
+  // Only the cab's own pause can be undone here; an all-screens pause is lifted on the desktop site.
+  const resuming = cab.cabPaused;
 
   async function submit() {
     setBusy(true);
@@ -283,12 +301,16 @@ function PauseSheet({ cab, open, onClose, onDone }: { cab: CabDetail; open: bool
       {resuming ? (
         <p className="m-body-text">
           It will start playing again{" "}
-          {isSwitchedOn(cab) || cab.lastSeenAt ? "within a few minutes if the cab is on, or the next time it’s switched on" : "when it’s switched on"}.
+          {isSwitchedOn(cab) || cab.lastSeenAt
+            ? `within about ${plural(cab.changeLagMinutes, "minute")} if the cab is on, or the next time it’s switched on`
+            : "when it’s switched on"}
+          .{cab.fleetPaused ? " All screens are also paused from the desktop site, so it won’t play until those are resumed too." : ""}
         </p>
       ) : (
         <>
           <p className="m-body-text">
-            Passengers in {cab.label} will see a still Orison picture instead of videos until you resume it. Other cabs aren&rsquo;t affected.
+            Passengers in {cab.label} will see a still Orison picture instead of videos until you resume it
+            {isSwitchedOn(cab) ? ` (it takes effect within about ${plural(cab.changeLagMinutes, "minute")})` : ""}. Other cabs aren&rsquo;t affected.
           </p>
           <label className="m-field">
             <span>Reason (optional)</span>

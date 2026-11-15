@@ -113,10 +113,10 @@ async function goto(page, url) {
   await page.goto(`${BASE}${url}`, { waitUntil: "domcontentloaded" });
 }
 
-async function makeVideo(file, seconds = 3) {
+async function makeVideo(file, seconds = 3, size = "1280x720") {
   await run("ffmpeg", [
     "-y", "-v", "error",
-    "-f", "lavfi", "-i", `testsrc2=size=1280x720:rate=30:duration=${seconds}`,
+    "-f", "lavfi", "-i", `testsrc2=size=${size}:rate=30:duration=${seconds}`,
     "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${seconds}`,
     "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mov", file,
   ]);
@@ -183,6 +183,16 @@ async function main() {
     const portrait = loopsByName["Demo · Portrait phone clip"];
     assert(theatre && spring && portrait, "demo loops exist");
 
+    await check("change times follow each cab's software (1.1.0: one heartbeat; older: 30 minutes)", async () => {
+      const lagOf = (serial) => cabBySerial[serial].changeLagMinutes;
+      assert(lagOf("DEMO-CAB-01") === 5, `1.1.0 cab lag ${lagOf("DEMO-CAB-01")}`);
+      assert(lagOf("DEMO-CAB-04") === 30 && lagOf("DEMO-CAB-02") === 30, "1.0.0 cabs lag 30");
+      assert(overview.changeLagMinutes === 30, `fleet worst case ${overview.changeLagMinutes}`);
+      assert(overview.changeLag.minMinutes === 5 && overview.changeLag.maxMinutes === 30, `range ${JSON.stringify(overview.changeLag)}`);
+      const detail = (await apiJson(page, `/api/m/cabs/${cabBySerial["DEMO-CAB-04"].id}`)).body;
+      assert(detail.firmwareVersion === "1.0.0" && detail.changeLagMinutes === 30, "detail carries firmware and lag");
+    });
+
     await check("home shows screens on, what plays and every cab", async () => {
       await goto(page, "/m");
       await page.getByTestId("cab-list").waitFor();
@@ -229,6 +239,8 @@ async function main() {
       await shot(page, "cab-never-seen", { fullPage: true });
       await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-04"].id}`);
       await page.getByTestId("cab-pending").waitFor();
+      // DEMO-CAB-04 runs firmware 1.0.0, which only checks for changes every 30 minutes.
+      assert((await page.getByTestId("cab-pending").textContent()).includes("within about 30 minutes"), "old-firmware cab: 30 minutes");
       await shot(page, "cab-switching");
       await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-06"].id}`);
       await page.getByTestId("resume-cab").waitFor();
@@ -247,7 +259,9 @@ async function main() {
       assert((await page.locator('[data-testid="cab-map"] [data-approx="true"]').count()) === located.filter((c) => c.location.source === "cell").length, "approx markers");
       await page.getByTestId("tiles-failed").waitFor({ timeout: 15_000 });
       await shot(page, "map");
-      await page.locator('[data-testid="map-marker"]', { hasText: "LX21 KCB" }).click();
+      // Demo positions drift with the clock, so another pin can sit on top of this one: send the
+      // click to the marker itself rather than to whatever is drawn at its centre.
+      await page.locator('[data-testid="map-marker"]', { hasText: "LX21 KCB" }).dispatchEvent("click");
       await page.getByTestId("map-card").waitFor();
       await shot(page, "map-selected-cab");
       await page.getByTestId("map-missing").click();
@@ -271,9 +285,21 @@ async function main() {
       assert(countText.includes(`This changes ${following} cab`), `impact text "${countText}" vs ${following}`);
       assert((await page.getByTestId("confirm-question").textContent()).includes("all cabs"), "question names all cabs");
       assert((await page.getByTestId("confirm-change").textContent()).includes(`${following} cab`), "button states count");
+      const changingOn = fresh.cabs.filter(
+        (cab) => cab.expectedSource === "fleet" && ["online", "updating"].includes(cab.status) && cab.playing?.id !== theatre.id,
+      );
+      const lags = [...new Set(changingOn.map((cab) => cab.changeLagMinutes))].sort((a, b) => a - b);
+      const impactText = await page.getByTestId("impact").textContent();
+      if (lags.length > 1) {
+        assert(impactText.includes(`within about ${lags[0]} minutes, or up to ${lags.at(-1)} minutes for cabs on older software`), `mixed lag wording: ${impactText}`);
+      } else if (lags.length === 1) {
+        assert(impactText.includes(`within about ${lags[0]} minutes`), `lag wording: ${impactText}`);
+      }
       await shot(page, "change-confirm-fleet", { fullPage: true });
       await page.getByTestId("confirm-change").click();
       await page.getByTestId("change-done").waitFor();
+      // The done screen counts the server's answer (affectedCabs), not the phone's prediction.
+      assert((await page.getByTestId("done-summary").textContent()).includes(`${following} cab`), "done count from the server");
       await shot(page, "change-done-fleet");
       const served = await manifestFor("DEMO-CAB-08"); // City group, follows all cabs
       assert(served.loopId === theatre.id, `DEMO-CAB-08 served ${served.loopId}`);
@@ -427,6 +453,53 @@ async function main() {
       await shot(page, "videos-after-remove");
     });
 
+    // ---------------------------------------------------------------- queue + newer change wins (E, F)
+    await check("uploads are prepared one at a time; an upload whose target changed meanwhile stays in Videos and says why", async () => {
+      const city = overview.groups.find((group) => group.name === "Demo · City");
+      const slow = await makeVideo(path.join(workDir, "slow.mov"), 60, "1920x1080");
+      const quick = await makeVideo(path.join(workDir, "quick.mov"), 3);
+      const { readFileSync } = await import("node:fs");
+      const post = async (name, file, target) => {
+        const query = new URLSearchParams({ name, filename: path.basename(file) });
+        if (target) query.set("target", JSON.stringify(target));
+        const response = await page.request.post(`${BASE}/api/m/upload?${query}`, {
+          data: readFileSync(file),
+          headers: { "Content-Type": "video/quicktime" },
+          timeout: 120_000,
+        });
+        const body = await response.json();
+        assert(response.status() === 202, `upload ${name}: ${response.status()} ${JSON.stringify(body)}`);
+        created.loops.add(body.loopId);
+        return body.loopId;
+      };
+      const firstId = await post(`E2E first in line ${RUN_ID}`, slow, null);
+      const secondName = `E2E superseded ${RUN_ID}`;
+      const secondId = await post(secondName, quick, { type: "group", groupId: city.id });
+      const waiting = (await apiJson(page, `/api/m/loops/${secondId}`)).body;
+      assert(waiting.processing.state === "processing" && waiting.processing.waiting === true, `second waits: ${JSON.stringify(waiting.processing)}`);
+      await goto(page, `/m/videos/${secondId}`);
+      await page.getByText("Waiting its turn").waitFor();
+      await shot(page, "video-waiting-its-turn");
+      // Someone changes what the City group plays while the upload is still being prepared.
+      const assigned = await apiJson(page, "/api/m/assign", { method: "POST", data: { loopId: spring.id, target: { type: "group", groupId: city.id } } });
+      assert(assigned.status === 200, `assign ${assigned.status}`);
+      let second = null;
+      for (let i = 0; i < 120; i += 1) {
+        second = (await apiJson(page, `/api/m/loops/${secondId}`)).body;
+        if (second.processing.state !== "processing") break;
+        await page.waitForTimeout(1500);
+      }
+      assert(second.processing.state === "ready", `second ready: ${JSON.stringify(second.processing)}`);
+      assert(/wasn't put on group Demo · City, because what group Demo · City plays was changed while this video was uploading/.test(second.processing.error ?? ""), `note: ${second.processing.error}`);
+      assert(!second.liveOn.groups.some((group) => group.id === city.id) && second.liveOn.cabCount === 0, "not live anywhere");
+      assert((await manifestFor("DEMO-CAB-08")).loopId === spring.id, "City keeps the newer choice");
+      const first = (await apiJson(page, `/api/m/loops/${firstId}`)).body;
+      assert(first.processing.state === "ready" && first.liveOn.cabCount === 0, "first upload ready, in Videos only");
+      await goto(page, `/m/videos/${secondId}`);
+      await page.getByText("Ready, but not put on screens").waitFor();
+      await shot(page, "video-target-superseded", { fullPage: true });
+    });
+
     // ---------------------------------------------------------------- pause / resume
     await check("pause and resume a cab's screen", async () => {
       const cab = cabBySerial["DEMO-CAB-01"];
@@ -444,6 +517,31 @@ async function main() {
       await page.getByTestId("pause-confirm").click();
       await page.getByTestId("pause-cab").waitFor();
       assert((await manifestFor("DEMO-CAB-01")).disabled === false, "device resumed");
+    });
+
+    await check("all screens paused: a cab explains it and offers no resume that can't work", async () => {
+      const paused = await apiJson(page, "/api/devices/disable-all", { method: "PUT", data: { reason: "E2E fleet pause" } });
+      assert(paused.status === 200, `disable-all ${paused.status}`);
+      try {
+        const cab = cabBySerial["DEMO-CAB-01"];
+        const api = (await apiJson(page, `/api/m/cabs/${cab.id}`)).body;
+        assert(api.fleetPaused === true && api.cabPaused === false && api.isPaused === true, `pause fields ${JSON.stringify([api.fleetPaused, api.cabPaused])}`);
+        await goto(page, `/m/cabs/${cab.id}`);
+        await page.getByTestId("fleet-paused").waitFor();
+        assert((await page.getByTestId("resume-cab").count()) === 0, "no per-cab resume during an all-screens pause");
+        assert((await page.getByTestId("fleet-paused").textContent()).includes("can’t be resumed on its own"), "explains why");
+        await page.getByTestId("fleet-paused").scrollIntoViewIfNeeded();
+        await shot(page, "cab-fleet-paused");
+        // A cab that is also paused on its own can still be resumed, and says the rest applies.
+        await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-06"].id}`);
+        await page.getByTestId("resume-cab").waitFor();
+        await page.getByTestId("resume-cab").click();
+        await page.getByTestId("pause-sheet").waitFor();
+        assert((await page.getByTestId("pause-sheet").textContent()).includes("All screens are also paused"), "resume sheet mentions the all-screens pause");
+        await page.keyboard.press("Escape");
+      } finally {
+        await apiJson(page, "/api/devices/enable-all", { method: "PUT", data: {} });
+      }
     });
 
     // ---------------------------------------------------------------- freshness
@@ -473,6 +571,8 @@ async function main() {
       await page.fill('input[name="repeat"]', temp);
       await page.getByRole("button", { name: "Change password" }).click();
       await page.getByTestId("password-done").waitFor();
+      // Changing your own password signs you out elsewhere but keeps this phone signed in.
+      assert((await apiJson(page, "/api/settings")).status === 200, "still signed in after own password change");
       await shot(page, "password-changed");
       // and back
       await page.fill('input[name="current"]', temp);
@@ -515,6 +615,44 @@ async function main() {
       await page.getByTestId("team-remove-confirm").click();
       await row.waitFor({ state: "detached" });
       created.users.delete(tester.email);
+    });
+
+    await check("a reset or removed teammate's session stops working on every route", async () => {
+      const mate = { name: `E2E Mate ${RUN_ID}`, email: `e2e-mate-${RUN_ID}@example.com`, password: "Welcome-123" };
+      const made = await apiJson(page, "/api/users", { method: "POST", data: { ...mate, role: "EDITOR" } });
+      assert(made.status === 200 || made.status === 201, `create ${made.status}`);
+      created.users.add(mate.email);
+      const other = await newPhoneContext(browser);
+      try {
+        const mp = await other.newPage();
+        const signIn = async (password) => {
+          const response = await mp.request.post(`${BASE}/api/auth/login`, { data: { email: mate.email, password } });
+          assert(response.ok(), `teammate login ${response.status()}`);
+        };
+        await signIn(mate.password);
+        const status = async (url, init) => (await apiJson(mp, url, init)).status;
+        const cab = cabBySerial["DEMO-CAB-03"];
+        assert((await status("/api/settings")) === 200 && (await status("/api/m/overview")) === 200, "teammate signed in");
+        // Admin resets their password (e.g. the phone was lost).
+        const reset = await apiJson(page, `/api/users/${made.body.id}`, { method: "PATCH", data: { password: "Another-456" } });
+        assert(reset.status === 200, `reset ${reset.status}`);
+        assert((await status("/api/settings")) === 401, "old session refused on settings");
+        assert((await status("/api/loops")) === 401, "old session refused on loops");
+        assert((await status(`/api/devices/${cab.id}/disable`, { method: "POST", data: { reason: "should not work" } })) === 401, "old session cannot pause a cab");
+        assert((await status("/api/m/overview")) === 401, "old session refused on the phone API");
+        assert((await apiJson(page, `/api/m/cabs/${cab.id}`)).body.cabPaused === false, "cab was not paused");
+        await mp.goto(`${BASE}/m`, { waitUntil: "domcontentloaded" });
+        await mp.waitForURL(/\/m\/login/);
+        // Signing in again works; then the admin removes them.
+        await signIn("Another-456");
+        assert((await status("/api/loops")) === 200, "new session works");
+        const removed = await apiJson(page, `/api/users/${made.body.id}`, { method: "DELETE" });
+        assert(removed.status === 200, `delete ${removed.status}`);
+        created.users.delete(mate.email);
+        assert((await status("/api/loops")) === 401 && (await status(`/api/devices/${cab.id}`)) === 401, "removed user refused");
+      } finally {
+        await other.close();
+      }
     });
 
     // ---------------------------------------------------------------- 401 and sign out

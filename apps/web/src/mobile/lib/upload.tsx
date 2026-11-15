@@ -14,6 +14,11 @@ import type { AssignTarget, LoopSummary } from "./types";
 export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 export const MAX_UPLOAD_SECONDS = 14 * 60;
 export const ACCEPTED_EXTENSIONS = [".mp4", ".mov", ".m4v"];
+/**
+ * The server stops a request whose body has not fully arrived within this long (REQUEST_TIMEOUT_SECONDS,
+ * apps/web/scripts/server-timeouts.cjs). A proxy in front of it may be stricter.
+ */
+export const UPLOAD_TIME_LIMIT_SECONDS = 30 * 60;
 
 export type UploadPhase = "uploading" | "processing" | "ready" | "failed";
 
@@ -32,6 +37,8 @@ export type UploadJob = {
   error: string | null;
   /** Ready, but the server could not put it where it was asked to go. */
   warning: string | null;
+  /** Failed phase only: we could not find out whether the server received the video. */
+  uncertain?: boolean;
   loop: LoopSummary | null;
 };
 
@@ -57,6 +64,28 @@ function remember(job: UploadJob | null) {
   }
 }
 
+const UNCERTAIN_MESSAGE =
+  "The connection dropped just as the video finished sending, so we can't tell whether it arrived. Look in Videos in a few minutes: if it's there, it's being prepared (and goes where you chose). If it isn't, upload it again.";
+const INTERRUPTED_MESSAGE =
+  "The upload was interrupted before the whole video was sent, probably by a weak connection or the phone locking. Nothing was saved. Try again with the app open, ideally on Wi-Fi.";
+
+function uploadParams(job: Pick<UploadJob, "name" | "fileName" | "target">) {
+  const params = new URLSearchParams({ name: job.name, filename: job.fileName || "video.mov" });
+  if (job.target) params.set("target", JSON.stringify(job.target));
+  return params.toString();
+}
+
+/** The upload's row if the server created one (matched by name, created after we started). */
+async function findReceivedUpload(job: Pick<UploadJob, "name" | "startedAt">) {
+  const { items } = await api<{ items: LoopSummary[] }>("/api/m/loops");
+  return (
+    items.find(
+      (loop) =>
+        loop.name === job.name && loop.source === "upload" && new Date(loop.createdAt).getTime() >= job.startedAt - 60_000,
+    ) ?? null
+  );
+}
+
 function uploadErrorMessage(status: number, body: string) {
   let message: string | null = null;
   try {
@@ -74,6 +103,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [job, setJob] = useState<UploadJob | null>(null);
   const xhrRef = useRef<XMLHttpRequest | null>(null);
   const pollRef = useRef<number | null>(null);
+  // Key of the upload this provider is currently sending (null once cancelled or dismissed).
+  const activeKeyRef = useRef<string | null>(null);
 
   const update = useCallback((patch: Partial<UploadJob> | ((job: UploadJob) => Partial<UploadJob>)) => {
     setJob((current) => {
@@ -164,58 +195,137 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         loop: null,
       };
       setJob(fresh);
+      activeKeyRef.current = fresh.key;
 
-      const params = new URLSearchParams({ name, filename: file.name || "video.mov" });
-      if (target) params.set("target", JSON.stringify(target));
-      const xhr = new XMLHttpRequest();
-      xhrRef.current = xhr;
-      xhr.open("POST", `/api/m/upload?${params.toString()}`);
-      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-      xhr.setRequestHeader("Accept", "application/json");
-      xhr.upload.onprogress = (event) => {
-        const elapsed = (Date.now() - fresh.startedAt) / 1000;
-        update({ loaded: event.loaded, rate: elapsed > 1 ? event.loaded / elapsed : null });
-      };
-      xhr.onload = () => {
-        xhrRef.current = null;
-        if (xhr.status === 401) {
-          sendToLogin();
-          return;
-        }
-        if (xhr.status === 202 || xhr.status === 200) {
-          let loopId: string | null = null;
-          try {
-            loopId = (JSON.parse(xhr.responseText) as { loopId?: string }).loopId ?? null;
-          } catch {
-            loopId = null;
-          }
-          if (!loopId) {
-            update({ phase: "failed", error: "The server didn't confirm the upload. Please try again." });
+      const query = uploadParams(fresh);
+      const fail = (error: string, extra: Partial<UploadJob> = {}) => update({ phase: "failed", error, ...extra });
+
+      // The send did not end with an answer we can read (connection dropped, proxy error, or the
+      // server refused early while we were still sending). Find out what actually happened
+      // instead of guessing.
+      const settleUnknown = async (sentAll: boolean) => {
+        try {
+          const received = await findReceivedUpload(fresh);
+          if (received) {
+            update({ phase: "processing", loaded: fresh.size, loopId: received.id, loop: received });
+            void invalidate("/api/m/loops");
+            poll(received.id);
             return;
           }
-          update({ phase: "processing", loaded: fresh.size, loopId });
-          void invalidate("/api/m/loops");
-          poll(loopId);
+        } catch {
+          // offline: fall through
+        }
+        try {
+          await api<{ ok: true }>(`/api/m/upload?${query}`);
+        } catch (error) {
+          if (error instanceof ApiFailure && !error.network && error.status !== 401) {
+            fail(`The server didn't accept this upload: ${error.message}`);
+            return;
+          }
+          if (error instanceof ApiFailure && error.status === 401) return; // sent to sign in
+        }
+        if (sentAll) {
+          fail(UNCERTAIN_MESSAGE, { uncertain: true });
+          // Keep looking for a few minutes: the server may still be receiving the last bytes.
+          let tries = 0;
+          const recheck = async () => {
+            tries += 1;
+            if (activeKeyRef.current !== fresh.key) return;
+            const received = await findReceivedUpload(fresh).catch(() => null);
+            if (received) {
+              setJob((current) =>
+                current && current.key === fresh.key && current.phase === "failed"
+                  ? { ...current, phase: "processing", error: null, uncertain: false, loaded: fresh.size, loopId: received.id, loop: received }
+                  : current,
+              );
+              void invalidate("/api/m/loops");
+              poll(received.id);
+            } else if (tries < 9) {
+              window.setTimeout(() => void recheck(), 20_000);
+            }
+          };
+          window.setTimeout(() => void recheck(), 20_000);
           return;
         }
-        update({ phase: "failed", error: uploadErrorMessage(xhr.status, xhr.responseText) });
+        fail(INTERRUPTED_MESSAGE);
       };
-      xhr.onerror = () => {
-        xhrRef.current = null;
-        update({
-          phase: "failed",
-          error: "The upload was interrupted, probably by a weak connection. Nothing was saved. Try again when you have a better signal or Wi-Fi.",
+
+      const send = () => {
+        const xhr = new XMLHttpRequest();
+        xhrRef.current = xhr;
+        let loaded = 0;
+        xhr.open("POST", `/api/m/upload?${query}`);
+        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+        xhr.setRequestHeader("Accept", "application/json");
+        xhr.upload.onprogress = (event) => {
+          loaded = event.loaded;
+          const elapsed = (Date.now() - fresh.startedAt) / 1000;
+          update({ loaded: event.loaded, rate: elapsed > 1 ? event.loaded / elapsed : null });
+        };
+        xhr.upload.onload = () => {
+          loaded = fresh.size;
+        };
+        // Within 2% of the end, the last progress event may simply not have fired.
+        const sentAll = () => loaded >= fresh.size * 0.98;
+        xhr.onload = () => {
+          xhrRef.current = null;
+          if (xhr.status === 401) {
+            sendToLogin();
+            return;
+          }
+          if (xhr.status === 202 || xhr.status === 200) {
+            let loopId: string | null = null;
+            try {
+              loopId = (JSON.parse(xhr.responseText) as { loopId?: string }).loopId ?? null;
+            } catch {
+              loopId = null;
+            }
+            if (!loopId) {
+              void settleUnknown(true);
+              return;
+            }
+            update({ phase: "processing", loaded: fresh.size, loopId });
+            void invalidate("/api/m/loops");
+            poll(loopId);
+            return;
+          }
+          if (xhr.status === 0 || xhr.status >= 500) {
+            // A proxy error or timeout: the server may have the video even though we got no answer.
+            void settleUnknown(sentAll());
+            return;
+          }
+          fail(uploadErrorMessage(xhr.status, xhr.responseText));
+        };
+        xhr.onerror = () => {
+          xhrRef.current = null;
+          void settleUnknown(sentAll());
+        };
+        xhr.onabort = () => {
+          xhrRef.current = null;
+        };
+        xhr.send(file);
+      };
+
+      // Check the details first (signed in, name, target still exists) so a refusal is reported
+      // as such rather than as a dropped connection half-way through sending.
+      void api<{ ok: true }>(`/api/m/upload?${query}`)
+        .then(() => {
+          if (activeKeyRef.current === fresh.key) send();
+        })
+        .catch((error) => {
+          if (error instanceof ApiFailure && error.status === 401) return;
+          fail(
+            error instanceof ApiFailure && error.network
+              ? "No connection, so the upload didn't start. Nothing was sent. Try again when you have a signal."
+              : `The upload didn't start: ${error instanceof Error ? error.message : "please try again"}`,
+          );
         });
-      };
-      xhr.onabort = () => {
-        xhrRef.current = null;
-      };
-      xhr.send(file);
     },
     [poll, update],
   );
 
   const cancel = useCallback(() => {
+    activeKeyRef.current = null;
     xhrRef.current?.abort();
     xhrRef.current = null;
     setJob(null);
@@ -223,6 +333,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const dismiss = useCallback(() => {
+    activeKeyRef.current = null;
     if (pollRef.current) window.clearTimeout(pollRef.current);
     setJob(null);
     remember(null);

@@ -2,7 +2,7 @@
 // are meant to be "alive", through the HTTP API (POST /api/devices/heartbeat), like a device would.
 // With --loop it repeats every 5 minutes until stopped.
 // Target server: DEMO_BASE_URL, else APP_URL from .env, else http://localhost:3000.
-import { DEMO_CABS, DEMO_CELL_RAW, loadEnv, wander } from "./common";
+import { DEMO_CABS, DEMO_CELL_RAW, demoFirmware, loadEnv, wander } from "./common";
 
 loadEnv();
 
@@ -44,7 +44,7 @@ async function round() {
         : { method: "gps", lat: position.lat, lng: position.lng, accuracyM: 9, speedKmh: 21, fixTime: new Date().toISOString() };
     const payload = {
       serialNumber: cab.serial,
-      firmwareVersion: "2.4.0",
+      firmwareVersion: demoFirmware(cab),
       storageFreeMb: 18_000 - index * 900,
       currentLoopId: device.currentLoopId,
       cpuTemp: 51,

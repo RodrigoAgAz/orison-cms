@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { DEMO_CABS, DEMO_CELL, DEMO_CELL_RAW, DEMO_GROUPS, DEMO_LOOPS, loadEnv, wander, webRoot } from "./common";
+import { DEMO_CABS, DEMO_CELL, DEMO_CELL_RAW, DEMO_GROUPS, DEMO_LOOPS, demoFirmware, loadEnv, wander, webRoot } from "./common";
 
 loadEnv();
 // Local storage lives under <cwd>/tmp/storage; the Next server runs from apps/web.
@@ -94,7 +94,7 @@ async function main() {
         originalFilename: path.basename(file),
         tempFilePath: file,
         tempDir: uploadDir,
-        publishedByUserId: admin.id,
+        publishedBy: { id: admin.id, name: admin.name },
       });
       const after = await prisma.loop.findUniqueOrThrow({ where: { id: loop.id } });
       if (after.status !== "PUBLISHED") {
@@ -182,7 +182,7 @@ async function main() {
           deviceId: device.id,
           receivedAt,
           ipAddress: `10.20.0.${index + 10}`,
-          firmwareVersion: "2.4.0",
+          firmwareVersion: demoFirmware(cab),
           storageFreeMb: 18_000 - index * 900,
           currentLoopId: reportedLoopId,
           cpuTemp: 48 + (step % 7),
@@ -217,7 +217,7 @@ async function main() {
         currentLoopId: reportedLoopId,
         lastHeartbeatAt: last?.receivedAt ?? null,
         lastSyncAt: last?.receivedAt ?? null,
-        firmwareVersion: last ? "2.4.0" : null,
+        firmwareVersion: last ? demoFirmware(cab) : null,
         storageFreeMb: last?.storageFreeMb ?? null,
         ipAddress: last?.ipAddress ?? null,
         notes: `Demo cab (${cab.scenario})`,

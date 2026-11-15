@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
-import { prisma, type Asset, type Loop, type Prisma, type Slot, type SlotContent } from "@orison/db";
+import { prisma, type Asset, type Loop, type LoopStatus, type Prisma, type Slot, type SlotContent } from "@orison/db";
 import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
@@ -18,15 +18,26 @@ import {
 import { checksumJson } from "@orison/shared/src/manifest.server";
 
 import { logActivity } from "./activity";
+import { assignLoop, assignTargetSchema, describeTarget } from "./assignment";
 import { getCmsSettings } from "./cms-settings";
+import { createKeyedJobs, createLimiter, processSingleton } from "./job-limits";
+import { getLoopRoutingSnapshot } from "./loop-routing";
 import { commandExists, extractMetadata } from "./media";
 import {
   deleteObject,
   downloadObjectToFile,
+  getObjectReadLocation,
   getPublicUrl,
   putObject,
   putObjectFromFile,
 } from "./storage";
+import { enqueueUploadJob } from "./upload-queue";
+import {
+  afterConditionalPublish,
+  shouldApplyUploadTarget,
+  staleTargetMessage,
+  targetLastChangedAt,
+} from "./upload-rules";
 
 const execFileAsync = promisify(execFile);
 
@@ -414,8 +425,8 @@ async function loadSafetyVideoManifestData(): Promise<SafetyVideoManifestData | 
   };
 }
 
-async function runFfmpeg(args: string[]) {
-  await execFileAsync("ffmpeg", ["-y", ...args]);
+async function runFfmpeg(args: string[], options: { timeoutMs?: number } = {}) {
+  await execFileAsync("ffmpeg", ["-y", ...args], options.timeoutMs ? { timeout: options.timeoutMs } : {});
 }
 
 async function normalizeImageToClip(
@@ -455,13 +466,17 @@ async function normalizeImageToClip(
   ]);
 }
 
-const LOOP_FRAME_FILTER =
-  "scale=1280:800:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1," +
-  "pad=1280:800:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p";
-// HDR (iPhone HLG / PQ) -> SDR BT.709 before scaling; requires ffmpeg built with libzimg.
+const LOOP_FIT_FILTER = "scale=1280:800:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1";
+const LOOP_PAD_FILTER = "pad=1280:800:(ow-iw)/2:(oh-ih)/2:black";
+const LOOP_FRAME_FILTER = `${LOOP_FIT_FILTER},${LOOP_PAD_FILTER},fps=30,format=yuv420p`;
+// HDR (iPhone HLG / PQ) -> SDR BT.709; requires ffmpeg built with libzimg. The float tone-map is
+// the expensive part, so the picture is first scaled down to the screen size and the frame rate
+// reduced to 30 fps, then tone-mapped, then padded (a 4K60 clip tone-mapped at full size is
+// several times slower).
 const HDR_TONEMAP_FILTER =
   "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0," +
   "zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
+export const HDR_LOOP_FILTER = `${LOOP_FIT_FILTER},fps=30,${HDR_TONEMAP_FILTER},${LOOP_PAD_FILTER},format=yuv420p`;
 
 let zscaleAvailable: Promise<boolean> | null = null;
 function hasZscaleFilter() {
@@ -487,7 +502,7 @@ async function transcodeCompiledLoopVideo(
   metadata?: Awaited<ReturnType<typeof extractMetadata>>,
 ) {
   const tonemap = isHdrTransfer(metadata?.colorTransfer) && (await hasZscaleFilter());
-  const filter = tonemap ? `${HDR_TONEMAP_FILTER},${LOOP_FRAME_FILTER}` : LOOP_FRAME_FILTER;
+  const filter = tonemap ? HDR_LOOP_FILTER : LOOP_FRAME_FILTER;
   await runFfmpeg([
     "-i",
     inputPath,
@@ -808,7 +823,11 @@ async function prepareLoopVideo(tempFilePath: string, workDir: string): Promise<
 /** Extract a JPEG still (640px wide) from a compiled loop video. */
 export async function generatePosterImage(videoPath: string, outputPath: string, durationMs?: number | null) {
   const seekSeconds = durationMs && durationMs < 2000 ? (durationMs / 2000).toFixed(2) : "1";
+  const isUrl = /^https?:\/\//.test(videoPath);
   await runFfmpeg([
+    // Over HTTP(S) ffmpeg reads the header and seeks with range requests, so only a few MB of a
+    // faststart MP4 are fetched. Give up on a stalled connection instead of hanging.
+    ...(isUrl ? ["-rw_timeout", "30000000"] : []),
     "-ss",
     seekSeconds,
     "-i",
@@ -820,18 +839,22 @@ export async function generatePosterImage(videoPath: string, outputPath: string,
     "-q:v",
     "4",
     outputPath,
-  ]);
+  ], { timeoutMs: 2 * 60 * 1000 });
 }
 
 /**
- * Upload the compiled video, manifest and poster for an existing Loop row and mark it PUBLISHED.
- * Cleans up uploaded objects if anything fails.
+ * Upload the compiled video, manifest and poster for an existing Loop row and mark it PUBLISHED,
+ * but only if the row is still in `requireStatus` (checked atomically in the same UPDATE). A phone
+ * upload that was removed (archived) or marked failed while it was being prepared is therefore
+ * never published, and the caller must not apply its target. Returns null in that case.
+ * Cleans up uploaded objects if anything fails or the publish is refused.
  */
 async function publishPreparedLoopVideo(options: {
   loop: Loop;
   prepared: PreparedLoopVideo;
   workDir: string;
   publishedByUserId: string;
+  requireStatus: LoopStatus;
   activity: { message: string; metadata: Record<string, unknown> };
 }) {
   const { loop, prepared, workDir, publishedByUserId } = options;
@@ -887,8 +910,8 @@ async function publishPreparedLoopVideo(options: {
       console.warn(`poster generation failed for loop ${loop.id}`, error);
     }
 
-    await prisma.loop.update({
-      where: { id: loop.id },
+    const updated = await prisma.loop.updateMany({
+      where: { id: loop.id, status: options.requireStatus },
       data: {
         status: "PUBLISHED",
         publishedAt,
@@ -903,6 +926,13 @@ async function publishPreparedLoopVideo(options: {
         posterKey: storedPosterKey,
       },
     });
+    if (updated.count === 0) {
+      // Removed or given up on while it was being prepared: discard what was stored.
+      await deleteObject(manifestKey).catch(() => undefined);
+      await deleteObject(compiledVideoKey).catch(() => undefined);
+      await deleteObject(posterKey).catch(() => undefined);
+      return null;
+    }
 
     await logActivity("LOOP_PUBLISHED", options.activity.message, {
       loopId: loop.id,
@@ -946,16 +976,21 @@ export async function publishDirectLoopUpload({
   try {
     const prepared = await prepareLoopVideo(tempFilePath, workDir);
     loop = await prisma.loop.create({ data: { name, status: "DRAFT" } });
-    return await publishPreparedLoopVideo({
+    const published = await publishPreparedLoopVideo({
       loop,
       prepared,
       workDir,
       publishedByUserId,
+      requireStatus: "DRAFT",
       activity: {
         message: `Loop ${loop.name} published from direct upload`,
         metadata: { originalFilename, mode: "DIRECT_UPLOAD" },
       },
     });
+    if (!published) {
+      throw new Error("The loop was changed while it was being published");
+    }
+    return published;
   } catch (error) {
     if (loop) {
       await prisma.loop.delete({ where: { id: loop.id } }).catch(() => undefined);
@@ -966,14 +1001,14 @@ export async function publishDirectLoopUpload({
   }
 }
 
-/** Phone uploads still PUBLISHING after this long are treated as failed (e.g. server restart). */
-export const STALE_PUBLISHING_MS = 30 * 60 * 1000;
-export const STALE_PUBLISHING_MESSAGE = "Processing was interrupted. Please upload the video again.";
+export { STALE_PUBLISHING_MESSAGE, STALE_PUBLISHING_MS } from "./upload-rules";
 
 /** Create the Loop row for a phone upload (PUBLISHING, autoLive false) before processing. */
 export async function createPendingUploadLoop(options: {
   name: string;
   pendingTarget: Prisma.InputJsonValue | null;
+  /** When the upload was requested; a change to the same target after this wins over the upload. */
+  requestedAt?: Date;
 }) {
   return prisma.loop.create({
     data: {
@@ -981,22 +1016,75 @@ export async function createPendingUploadLoop(options: {
       status: "PUBLISHING",
       autoLive: false,
       pendingTarget: options.pendingTarget ?? undefined,
+      pendingTargetAt: options.pendingTarget ? options.requestedAt ?? new Date() : null,
     },
+  });
+}
+
+type UploadUser = { id: string; name: string };
+
+/**
+ * Apply the target chosen at upload time, unless someone changed that target after the upload was
+ * requested (then their newer choice stays and the video is just left in the library). Always
+ * clears `pendingTargetAt`, and records a plain-words note in `publishError` when the target was
+ * not applied.
+ */
+async function applyUploadTarget(loopId: string, user: UploadUser) {
+  const loop = await prisma.loop.findUniqueOrThrow({
+    where: { id: loopId },
+    select: { id: true, name: true, pendingTarget: true, pendingTargetAt: true },
+  });
+  const requestedAt = loop.pendingTargetAt;
+  const parsed = assignTargetSchema.safeParse(loop.pendingTarget);
+  if (!requestedAt || !parsed.success) {
+    await prisma.loop.update({ where: { id: loop.id }, data: { pendingTargetAt: null } });
+    return;
+  }
+  const target = parsed.data;
+  let note: string | null = null;
+  try {
+    const [{ label }, snapshot, cab] = await Promise.all([
+      describeTarget(target),
+      getLoopRoutingSnapshot(),
+      target.type === "cab"
+        ? prisma.device.findUnique({ where: { id: target.deviceId }, select: { overrideAt: true } })
+        : Promise.resolve(null),
+    ]);
+    const lastChangedAt = targetLastChangedAt(target, snapshot, cab);
+    if (shouldApplyUploadTarget(lastChangedAt, requestedAt)) {
+      await assignLoop({ loopId: loop.id, target }, user);
+    } else {
+      note = staleTargetMessage(label);
+      await logActivity("LOOP_ASSIGNMENT_SKIPPED", `"${loop.name}" was not put on ${label}: it was changed while the video was uploading`, {
+        loopId: loop.id,
+        target,
+        requestedAt: requestedAt.toISOString(),
+        changedAt: lastChangedAt?.toISOString() ?? null,
+      });
+    }
+  } catch (error) {
+    console.error(`could not apply the upload target for loop ${loop.id}`, error);
+    note = `It was saved to your videos, but couldn't be put on screens: ${
+      error instanceof Error ? error.message : "unknown error"
+    }. Choose where it plays from here.`;
+  }
+  await prisma.loop.update({
+    where: { id: loop.id },
+    data: { pendingTargetAt: null, ...(note ? { publishError: note } : {}) },
   });
 }
 
 /**
  * Run the upload pipeline for a pre-created Loop row. Never throws: failures are written to
- * `publishError` (status DRAFT). The temp directory is always removed. `onPublished` runs after
- * a successful publish (used to apply the requested assignment target).
+ * `publishError` (status DRAFT). The temp directory is always removed. Publishing only succeeds
+ * while the row is still PUBLISHING; then the requested target (if any) is applied.
  */
 export async function processUploadedLoop(options: {
   loopId: string;
   originalFilename: string;
   tempFilePath: string;
   tempDir: string;
-  publishedByUserId: string;
-  onPublished?: (loop: Loop) => Promise<void>;
+  publishedBy: UploadUser;
 }) {
   const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-mobile-loop-")).catch(() => null);
   try {
@@ -1004,37 +1092,33 @@ export async function processUploadedLoop(options: {
       throw new Error("Could not create a working directory");
     }
     const loop = await prisma.loop.findUnique({ where: { id: options.loopId } });
-    if (!loop) {
-      return;
+    if (!loop || loop.status !== "PUBLISHING") {
+      return; // removed before it was prepared
     }
     const prepared = await prepareLoopVideo(options.tempFilePath, workDir);
-    await publishPreparedLoopVideo({
+    const published = await publishPreparedLoopVideo({
       loop,
       prepared,
       workDir,
-      publishedByUserId: options.publishedByUserId,
+      publishedByUserId: options.publishedBy.id,
+      requireStatus: "PUBLISHING",
       activity: {
         message: `Loop ${loop.name} uploaded from the mobile app`,
         metadata: { originalFilename: options.originalFilename, mode: "MOBILE_UPLOAD" },
       },
     });
-    if (options.onPublished) {
-      const published = await prisma.loop.findUniqueOrThrow({ where: { id: loop.id } });
-      try {
-        await options.onPublished(published);
-      } catch (error) {
-        console.error(`post-publish step failed for loop ${loop.id}`, error);
-        await prisma.loop
-          .update({
-            where: { id: loop.id },
-            data: {
-              publishError: `Uploaded, but could not be put live: ${
-                error instanceof Error ? error.message : "unknown error"
-              }`,
-            },
-          })
-          .catch(() => undefined);
-      }
+    const next = afterConditionalPublish({
+      publishedRows: published ? 1 : 0,
+      hasPendingTarget: Boolean(loop.pendingTarget && loop.pendingTargetAt),
+    });
+    if (next === "discard") {
+      await logActivity("LOOP_UPLOAD_DISCARDED", `Upload of "${loop.name}" finished after it was removed, so it was discarded`, {
+        loopId: loop.id,
+      }).catch(() => undefined);
+      return;
+    }
+    if (next === "apply-target") {
+      await applyUploadTarget(loop.id, options.publishedBy);
     }
   } catch (error) {
     const message =
@@ -1044,8 +1128,12 @@ export async function processUploadedLoop(options: {
     if (!(error instanceof LoopUploadError)) {
       console.error(`loop upload ${options.loopId} failed`, error);
     }
+    // Only a row that is still being processed is marked failed (never one that was removed).
     await prisma.loop
-      .update({ where: { id: options.loopId }, data: { status: "DRAFT", publishError: message } })
+      .updateMany({
+        where: { id: options.loopId, status: "PUBLISHING" },
+        data: { status: "DRAFT", publishError: message, pendingTargetAt: null },
+      })
       .catch((updateError) => console.error("could not record upload failure", updateError));
     await logActivity("LOOP_UPLOAD_FAILED", `Upload of loop ${options.loopId} failed: ${message}`, {
       loopId: options.loopId,
@@ -1059,16 +1147,40 @@ export async function processUploadedLoop(options: {
   }
 }
 
-/** Fire-and-forget wrapper (long-lived Node server). */
+/**
+ * Queue an upload for processing (long-lived Node server). Phone uploads are prepared one at a
+ * time; later ones wait and are reported as waiting.
+ */
 export function startUploadedLoopProcessing(options: Parameters<typeof processUploadedLoop>[0]) {
-  void processUploadedLoop(options).catch((error) => console.error("unhandled upload pipeline error", error));
+  void enqueueUploadJob(options.loopId, () => processUploadedLoop(options)).catch((error) =>
+    console.error("unhandled upload pipeline error", error),
+  );
 }
+
+// At most two posters are generated at once, and only one job per loop: after a deploy every
+// existing loop lacks a poster and the first open of the app asks for all of them together.
+const posterJobs = processSingleton("poster-jobs", () => createKeyedJobs<string | null>(createLimiter(2)));
 
 /**
  * Lazily create (and cache in storage) a poster JPEG for a loop with a compiled video.
  * Returns the storage key, or null if the loop has no video.
  */
 export async function ensureLoopPoster(loopId: string): Promise<string | null> {
+  const loop = await prisma.loop.findUnique({
+    where: { id: loopId },
+    select: { posterKey: true, compiledVideoKey: true },
+  });
+  if (!loop?.compiledVideoKey) {
+    return null;
+  }
+  if (loop.posterKey) {
+    return loop.posterKey;
+  }
+  return posterJobs.run(loopId, () => generateLoopPoster(loopId));
+}
+
+async function generateLoopPoster(loopId: string): Promise<string | null> {
+  // Re-read: the poster may have been made while this job waited for a slot.
   const loop = await prisma.loop.findUnique({
     where: { id: loopId },
     select: { id: true, posterKey: true, compiledVideoKey: true, durationMs: true },
@@ -1079,23 +1191,45 @@ export async function ensureLoopPoster(loopId: string): Promise<string | null> {
   if (loop.posterKey) {
     return loop.posterKey;
   }
+  const videoKey = loop.compiledVideoKey;
 
   const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-poster-"));
   try {
-    const videoPath = path.join(workDir, "loop.mp4");
     const posterPath = path.join(workDir, "poster.jpg");
-    await downloadObjectToFile(loop.compiledVideoKey, videoPath);
     let durationMs = loop.durationMs;
-    if (!durationMs) {
-      durationMs = (await extractMetadata(videoPath)).durationMs ?? null;
+    const source = await getObjectReadLocation(videoKey);
+    let made = false;
+    if (source.kind === "url") {
+      // Object storage: ffmpeg reads only the start of the video over a signed URL (range
+      // requests) instead of the whole 100-300MB file.
+      try {
+        durationMs ??= (await extractMetadata(source.location)).durationMs ?? null;
+        await generatePosterImage(source.location, posterPath, durationMs);
+        made = true;
+      } catch (error) {
+        console.warn(`poster from signed URL failed for loop ${loop.id}; downloading instead`, error);
+      }
     }
-    await generatePosterImage(videoPath, posterPath, durationMs);
+    if (!made) {
+      let videoPath = source.location;
+      if (source.kind === "url") {
+        videoPath = path.join(workDir, "loop.mp4");
+        await downloadObjectToFile(videoKey, videoPath); // streamed to disk, never buffered
+      }
+      durationMs ??= (await extractMetadata(videoPath)).durationMs ?? null;
+      await generatePosterImage(videoPath, posterPath, durationMs);
+    }
     const posterKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}-poster.jpg`;
     await putObjectFromFile({ key: posterKey, filePath: posterPath, contentType: "image/jpeg" });
-    await prisma.loop.update({
-      where: { id: loop.id },
+    // Only attach it if the loop still has the same video (it may have been republished).
+    const updated = await prisma.loop.updateMany({
+      where: { id: loop.id, compiledVideoKey: videoKey },
       data: { posterKey, ...(loop.durationMs ? {} : durationMs ? { durationMs } : {}) },
     });
+    if (updated.count === 0) {
+      await deleteObject(posterKey).catch(() => undefined);
+      return (await prisma.loop.findUnique({ where: { id: loop.id }, select: { posterKey: true } }))?.posterKey ?? null;
+    }
     return posterKey;
   } finally {
     await rm(workDir, { recursive: true, force: true });

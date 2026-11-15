@@ -46,8 +46,6 @@ export type RoutingSnapshot<L extends RoutableLoop = RoutableLoop> = {
   legacyGroupLoops: Map<string, L>;
   /** Latest PUBLISHED autoLive loop with targetGroupId = null. */
   legacyFleetLoop: L | null;
-  /** Latest PUBLISHED loop of any kind (desktop "current" fallback display). */
-  latestPublishedLoop: L | null;
 };
 
 export type ExpectedSource = "cab" | "group" | "fleet";
@@ -70,7 +68,6 @@ export function buildRoutingSnapshot<L extends RoutableLoop>(input: {
   const loops = new Map<string, L>();
   const legacyGroupLoops = new Map<string, L>();
   let legacyFleetLoop: L | null = null;
-  let latestPublishedLoop: L | null = null;
 
   const sorted = input.loops
     .filter((loop) => loop.status === "PUBLISHED")
@@ -78,9 +75,6 @@ export function buildRoutingSnapshot<L extends RoutableLoop>(input: {
 
   for (const loop of sorted) {
     loops.set(loop.id, loop);
-    if (!latestPublishedLoop) {
-      latestPublishedLoop = loop;
-    }
     if (!loop.autoLive || !loop.manifestUrl) {
       continue;
     }
@@ -99,7 +93,6 @@ export function buildRoutingSnapshot<L extends RoutableLoop>(input: {
     fleetAssignment: input.fleetAssignment,
     legacyGroupLoops,
     legacyFleetLoop,
-    latestPublishedLoop,
   };
 }
 

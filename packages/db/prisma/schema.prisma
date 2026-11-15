@@ -13,6 +13,9 @@ model User {
   passwordHash String
   name         String
   role         Role     @default(EDITOR)
+  // Carried in the session token; bumping it signs the user out everywhere (password change,
+  // admin reset, role change). See lib/auth.ts.
+  sessionVersion Int    @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -96,6 +99,9 @@ model Loop {
   posterKey        String?
   // Assignment target requested at upload time, applied once processing succeeds.
   pendingTarget    Json?
+  // When the upload with pendingTarget was requested; null once the target has been applied or
+  // skipped (a newer change to the same target wins). Non-null on a PUBLISHED loop = still applying.
+  pendingTargetAt  DateTime?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 }
@@ -250,6 +256,8 @@ enum ActivityEventType {
   LOOP_ASSIGNED
   LOOP_ARCHIVED
   LOOP_UPLOAD_FAILED
+  LOOP_UPLOAD_DISCARDED
+  LOOP_ASSIGNMENT_SKIPPED
   USER_CREATED
   USER_UPDATED
   USER_DELETED

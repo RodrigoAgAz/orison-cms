@@ -2,6 +2,7 @@ import { endOfDay, startOfDay } from "date-fns";
 
 import { prisma } from "@orison/db";
 
+import { requireApiUser } from "@/lib/auth";
 import { apiError, ApiError } from "@/lib/http";
 
 function csvCell(value: string | number | boolean | null) {
@@ -11,6 +12,7 @@ function csvCell(value: string | number | boolean | null) {
 
 export async function GET(request: Request) {
   try {
+    await requireApiUser();
     const { searchParams } = new URL(request.url);
     const from = searchParams.get("from");
     const to = searchParams.get("to");

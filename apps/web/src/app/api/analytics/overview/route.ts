@@ -1,20 +1,24 @@
 import { prisma } from "@orison/db";
 import { subDays } from "date-fns";
 
+import { requireApiUser } from "@/lib/auth";
 import { getCmsSettings } from "@/lib/cms-settings";
 import { isDeviceOnline, offlineThresholdMs } from "@/lib/device-status";
+import { getLoopRoutingSnapshot, resolveFleetLoop } from "@/lib/loop-routing";
 import { apiError, apiResponse } from "@/lib/http";
 
 export async function GET() {
   try {
+    await requireApiUser();
     const since = subDays(new Date(), 30);
     const settings = await getCmsSettings();
     const thresholdMs = offlineThresholdMs(settings.heartbeatIntervalSeconds);
     const [devices, currentLoop, impressions] = await Promise.all([
       prisma.device.findMany(),
-      prisma.loop.findFirst({
-        where: { status: "PUBLISHED" },
-        orderBy: { publishedAt: "desc" },
+      // The loop the fleet is set to play (same resolver as the device manifest route).
+      getLoopRoutingSnapshot().then((snapshot) => {
+        const fleetLoop = resolveFleetLoop(snapshot);
+        return fleetLoop ? prisma.loop.findUnique({ where: { id: fleetLoop.id } }) : null;
       }),
       prisma.playbackLog.count({
         where: {

@@ -5,8 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AlertIcon, CheckIcon, UploadIcon, VideosIcon } from "../components/icons";
 import { href, Notice, Screen, Section, Sheet, Spinner, TopBar } from "../components/ui";
-import { duration, fileSize, plural, quoted } from "../lib/format";
-import { cabCount, decodeTarget, encodeTarget, impactOf, targetName } from "../lib/status";
+import { duration, fileSize, quoted } from "../lib/format";
+import { cabCount, decodeTarget, encodeTarget, impactOf, isSwitchedOn, lagPhrase, targetName } from "../lib/status";
 import { useResource } from "../lib/store";
 import type { AssignTarget, Overview } from "../lib/types";
 import {
@@ -14,6 +14,7 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_SECONDS,
   readVideoDuration,
+  UPLOAD_TIME_LIMIT_SECONDS,
   useUpload,
   type UploadJob,
 } from "../lib/upload";
@@ -235,7 +236,10 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
 
       {large && !wifi && file && !fileError ? (
         <Notice tone="info" title="Wi-Fi recommended">
-          This video is {fileSize(file.size)}. On mobile data, uploading it uses about {fileSize(file.size)} of your allowance.
+          This video is {fileSize(file.size)}. On mobile data, uploading it uses about {fileSize(file.size)} of your allowance and can take
+          a long time, because phones send much more slowly than they download. Keep Orison open with the screen on until it reaches 100%:
+          if the phone locks or you switch app, the upload stops. An upload that takes more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes is
+          stopped, so use Wi-Fi if you can.
         </Notice>
       ) : null}
       {formError ? (
@@ -269,14 +273,16 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
         {target && impact && overview.data ? (
           <p className="m-body-text">
             As soon as it&rsquo;s ready, {quoted(name.trim())} will play on{" "}
-            <b>{target.type === "fleet" ? "all cabs" : targetName(overview.data, target)}</b>, changing {cabCount(impact.cabs.length)}. Cabs that are on switch
-            within about {plural(overview.data.changeLagMinutes, "minute")} of it being ready; cabs that are off switch the next time they&rsquo;re switched on.
+            <b>{target.type === "fleet" ? "all cabs" : targetName(overview.data, target)}</b>, changing {cabCount(impact.cabs.length)}. Cabs that are on switch{" "}
+            {lagPhrase(impact.cabs.filter(isSwitchedOn), overview.data.changeLagMinutes)} of it being ready; cabs that are off switch the next time
+            they&rsquo;re switched on. If someone changes what plays there while this is uploading, their change is kept and this video just goes into
+            Videos.
           </p>
         ) : null}
         {large && !wifi && file ? (
           <Notice tone="info" title="Large video">
-            It&rsquo;s {fileSize(file.size)}. If you&rsquo;re not on Wi-Fi this uses {fileSize(file.size)} of mobile data. Keep the app open until the upload
-            reaches 100%.
+            It&rsquo;s {fileSize(file.size)}. If you&rsquo;re not on Wi-Fi this uses {fileSize(file.size)} of mobile data and can take a long time. Keep the
+            app open with the screen on until the upload reaches 100%; an upload that takes more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes is stopped.
           </Notice>
         ) : null}
       </Sheet>
@@ -315,6 +321,10 @@ function JobView({ job }: { job: UploadJob }) {
   const overview = useResource<Overview>("/api/m/overview", { refreshMs: 30_000 });
   const percent = job.size ? Math.min(100, Math.floor((job.loaded / job.size) * 100)) : 0;
   const remaining = job.rate && job.rate > 0 ? (job.size - job.loaded) / job.rate : null;
+  const elapsed = (Date.now() - job.startedAt) / 1000;
+  // At this speed the server's time limit would stop the upload before it finishes.
+  const tooSlow = remaining !== null && elapsed > 20 && elapsed + remaining > UPLOAD_TIME_LIMIT_SECONDS;
+  const waiting = job.loop?.processing.waiting ?? false;
   const steps: Array<{ key: string; label: string }> = [
     { key: "uploading", label: "Upload" },
     { key: "processing", label: "Get it ready" },
@@ -360,7 +370,16 @@ function JobView({ job }: { job: UploadJob }) {
             {fileSize(job.loaded)} of {fileSize(job.size)}
             {remaining !== null && percent < 100 ? ` · about ${remaining < 60 ? "a few seconds" : duration(remaining)} left` : ""}
           </p>
-          <Notice tone="info">Keep Orison open until this reaches 100%. After that you can close it; we&rsquo;ll finish getting the video ready.</Notice>
+          {tooSlow ? (
+            <Notice tone="warn" title="This connection is too slow" testId="upload-too-slow">
+              At this speed the upload would take more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes, and uploads that take longer are stopped. Cancel
+              it and try again on Wi-Fi, or use a shorter or smaller video.
+            </Notice>
+          ) : null}
+          <Notice tone="info">
+            Keep Orison open with the screen on until this reaches 100%: if the phone locks or you switch app, the upload stops. After that you can
+            close it; we&rsquo;ll finish getting the video ready.
+          </Notice>
           <button type="button" className="m-btn m-btn-ghost m-btn-block" onClick={cancel} data-testid="upload-cancel">
             Cancel upload
           </button>
@@ -370,13 +389,17 @@ function JobView({ job }: { job: UploadJob }) {
       {job.phase === "processing" ? (
         <div className="m-card m-job-card" data-testid="upload-processing">
           <div className="m-job-row">
-            <strong>Getting it ready for the screens</strong>
+            <strong>{waiting ? "Waiting its turn" : "Getting it ready for the screens"}</strong>
             <Spinner />
           </div>
           <div className="m-progress m-progress-indeterminate" aria-hidden="true">
             <span />
           </div>
-          <p className="m-body-text">Uploaded. We&rsquo;re now preparing it for the cab screens, which usually takes a minute or two.</p>
+          <p className="m-body-text" data-testid="upload-processing-text">
+            {waiting
+              ? "Uploaded. Another video is being prepared first (one at a time); this one starts as soon as that’s done."
+              : "Uploaded. We’re now preparing it for the cab screens, which usually takes a minute or two."}
+          </p>
           <p className="m-muted">You can leave this screen or close the app. It carries on, and shows in Videos while it&rsquo;s being prepared.</p>
         </div>
       ) : null}
@@ -395,8 +418,9 @@ function JobView({ job }: { job: UploadJob }) {
             </Notice>
           ) : job.target ? (
             <p className="m-body-text">
-              {quoted(job.name)} is going out to {impact ? cabCount(impact.cabs.length) : job.targetLabel}. Cabs that are on switch within about{" "}
-              {plural(overview.data?.changeLagMinutes ?? 5, "minute")}; cabs that are off switch the next time they&rsquo;re switched on.
+              {quoted(job.name)} is going out to {impact ? cabCount(impact.cabs.length) : job.targetLabel}. Cabs that are on switch{" "}
+              {lagPhrase((impact?.cabs ?? []).filter(isSwitchedOn), overview.data?.changeLagMinutes ?? 30)}; cabs that are off switch the next time
+              they&rsquo;re switched on.
             </p>
           ) : (
             <p className="m-body-text">{quoted(job.name)} is in Videos. Nothing on the screens has changed.</p>
@@ -421,10 +445,19 @@ function JobView({ job }: { job: UploadJob }) {
 
       {job.phase === "failed" ? (
         <div className="m-card m-job-card" data-testid="upload-failed">
-          <Notice tone="danger" title={job.loopId ? "This video couldn’t be prepared" : "The upload didn’t work"} testId="upload-failed-reason">
+          <Notice
+            tone={job.uncertain ? "warn" : "danger"}
+            title={job.uncertain ? "We can’t tell yet if it arrived" : job.loopId ? "This video couldn’t be prepared" : "The upload didn’t work"}
+            testId="upload-failed-reason"
+          >
             {job.error}
           </Notice>
           {job.loopId ? <p className="m-muted">It&rsquo;s listed in Videos so you can see what happened and remove it.</p> : null}
+          {job.uncertain ? (
+            <Link href={href("/m/videos")} className="m-btn m-btn-secondary m-btn-block" data-testid="upload-check-videos">
+              Check Videos
+            </Link>
+          ) : null}
           <button type="button" className="m-btn m-btn-primary m-btn-block" onClick={dismiss} data-testid="upload-retry">
             Choose a video again
           </button>

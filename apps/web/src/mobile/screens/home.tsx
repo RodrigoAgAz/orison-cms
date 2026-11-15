@@ -21,7 +21,7 @@ import {
   StatusShape,
 } from "../components/ui";
 import { plural, quoted, videoLength, when } from "../lib/format";
-import { cabCount, isSwitchedOn } from "../lib/status";
+import { cabCount, isSwitchedOn, lagPhrase } from "../lib/status";
 import { useResource } from "../lib/store";
 import type { LoopSummary, Overview } from "../lib/types";
 
@@ -80,7 +80,8 @@ export function HomeScreen() {
     ...(data.fleetPaused
       ? [{ key: "fleet", tone: "danger" as const, to: "/m", title: "All screens are paused", text: "Every cab screen is paused from the desktop site." }]
       : []),
-    ...lists.paused.map((cab) => ({
+    // Only screens paused on their own (an all-screens pause is the single item above).
+    ...lists.paused.filter((cab) => cab.cabPaused).map((cab) => ({
       key: `p-${cab.id}`,
       tone: "warn" as const,
       to: `/m/cabs/${cab.id}`,
@@ -275,8 +276,8 @@ export function HomeScreen() {
         )}
         {data.counts.updating > 0 ? (
           <Notice tone="info">
-            &ldquo;Switching&rdquo; means the cab is on and has been told to play a new video. Cabs switch within about{" "}
-            {plural(data.changeLagMinutes, "minute")}.
+            &ldquo;Switching&rdquo; means the cab is on and has been told to play a new video. Cabs switch{" "}
+            {lagPhrase(data.cabs.filter((cab) => cab.status === "updating"), data.changeLagMinutes)}.
           </Notice>
         ) : null}
       </Section>

@@ -65,6 +65,20 @@ export function contentLine(cab: CabSummary) {
   return `${quoted(cab.expected.name)} when it next starts`;
 }
 
+/**
+ * How long cabs take to act on a change, in words: "within about 5 minutes". Each cab's figure
+ * depends on its software (older screens only check every 30 minutes). For a mix, both bounds:
+ * "within about 5 minutes, or up to 30 minutes for cabs on older software".
+ */
+export function lagPhrase(cabs: Array<Pick<CabSummary, "changeLagMinutes">>, fallbackMinutes: number) {
+  const values = cabs.map((cab) => cab.changeLagMinutes).filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length === 0) return `within about ${plural(fallbackMinutes, "minute")}`;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (min === max) return `within about ${plural(max, "minute")}`;
+  return `within about ${plural(min, "minute")}, or up to ${plural(max, "minute")} for cabs on older software`;
+}
+
 export function sourceLine(cab: CabSummary) {
   switch (cab.expectedSource) {
     case "cab":

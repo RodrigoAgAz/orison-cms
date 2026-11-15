@@ -17,13 +17,14 @@ import {
   TopBar,
 } from "../components/ui";
 import { api } from "../lib/api";
-import { plural, quoted, videoLength } from "../lib/format";
+import { quoted, videoLength } from "../lib/format";
 import {
   cabCount,
   decodeTarget,
   encodeTarget,
   impactOf,
   isSwitchedOn,
+  lagPhrase,
   targetName,
   type Impact,
 } from "../lib/status";
@@ -268,14 +269,15 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
     setBusy(true);
     setError(null);
     try {
-      const response = await api<{ ok: true; affectedCabs: number }>("/api/m/assign", {
+      const response = await api<{ ok: true; affectedCabs: number; affectedCabIds?: string[] }>("/api/m/assign", {
         method: "POST",
         json: { loopId: inherit ? null : effectiveChoice, target },
       });
+      // The server's answer, not the phone's prediction: someone may have changed things meanwhile.
       setResult({
         target,
         loop: impact.resultLoop,
-        cabIds: impact.cabs.map((item) => item.id),
+        cabIds: response.affectedCabIds ?? [],
         affected: response.affectedCabs,
         inherit,
       });
@@ -313,7 +315,7 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
         </h2>
         {explain ? <p className="m-body-text">{explain}</p> : null}
 
-        <ImpactFacts impact={impact} lagMinutes={data.changeLagMinutes} target={target} overview={data} />
+        <ImpactFacts impact={impact} target={target} overview={data} />
 
         <div className="m-confirm-edit">
           {!(target.type === "fleet" && initialTarget === "fleet") ? (
@@ -353,11 +355,12 @@ function ChosenVideo({ loop, onChange }: { loop: LoopSummary | null; onChange: (
   );
 }
 
-function ImpactFacts({ impact, lagMinutes, target, overview }: { impact: Impact; lagMinutes: number; target: AssignTarget; overview: Overview }) {
+function ImpactFacts({ impact, target, overview }: { impact: Impact; target: AssignTarget; overview: Overview }) {
   const n = impact.cabs.length;
-  const lag = plural(lagMinutes, "minute");
   const changing = impact.cabs.filter((item) => !impact.alreadyPlaying.includes(item));
-  const on = changing.filter(isSwitchedOn).length;
+  const onCabs = changing.filter(isSwitchedOn);
+  const on = onCabs.length;
+  const lag = lagPhrase(onCabs, overview.changeLagMinutes);
   const off = changing.filter((item) => item.status === "offline").length;
   const paused = changing.filter((item) => item.status === "paused").length;
   return (
@@ -369,7 +372,7 @@ function ImpactFacts({ impact, lagMinutes, target, overview }: { impact: Impact;
         {on > 0 ? (
           <li>
             <StatusShape tone="on" /> <span>
-              <b>{on} switched on</b>: {on === 1 ? "it changes" : "they change"} within about {lag}.
+              <b>{on} switched on</b>: {on === 1 ? "it changes" : "they change"} {lag}.
             </span>
           </li>
         ) : null}
@@ -420,9 +423,10 @@ function Done({ result, overview }: { result: Result; overview: Overview }) {
     .filter((item): item is CabSummary => Boolean(item));
   const resultId = result.loop?.id;
   const changed = cabs.filter((item) => resultId && item.playing?.id === resultId);
-  const lag = plural(overview.changeLagMinutes, "minute");
   const name = result.loop ? quoted(result.loop.name) : "The new video";
-  const pendingOn = cabs.filter((item) => isSwitchedOn(item) && !changed.includes(item)).length;
+  const pendingOnCabs = cabs.filter((item) => isSwitchedOn(item) && !changed.includes(item));
+  const pendingOn = pendingOnCabs.length;
+  const lag = lagPhrase(pendingOnCabs, overview.changeLagMinutes);
   const pendingOff = cabs.filter((item) => item.status === "offline" && !changed.includes(item)).length;
 
   return (
@@ -433,9 +437,9 @@ function Done({ result, overview }: { result: Result; overview: Overview }) {
         </span>
         <h2>Done</h2>
         <p data-testid="done-summary">
-          {cabs.length === 0
+          {result.affected === 0
             ? `${name} is now set for ${targetPhrase(overview, result.target)}. No cabs needed to change.`
-            : `${name} is going out to ${cabCount(cabs.length)}.`}
+            : `${name} is going out to ${cabCount(result.affected)}.`}
         </p>
       </div>
 
@@ -444,12 +448,12 @@ function Done({ result, overview }: { result: Result; overview: Overview }) {
           <div className="m-card m-done-what">
             <h3 className="m-subhead">What happens next</h3>
             <ul className="m-facts-plain">
-              {pendingOn > 0 ? <li>Cabs that are on switch within about {lag}. This page updates as they do.</li> : null}
+              {pendingOn > 0 ? <li>Cabs that are on switch {lag}. This page updates as they do.</li> : null}
               {pendingOff > 0 ? <li>Cabs that are off switch the next time they&rsquo;re switched on.</li> : null}
               {pendingOn === 0 && pendingOff === 0 ? <li>Every cab has it already.</li> : null}
             </ul>
             <p className="m-done-progress" data-testid="done-progress">
-              <b>{changed.length}</b> of {cabCount(cabs.length)} playing it so far
+              <b>{changed.length}</b> of {cabCount(result.affected)} playing it so far
             </p>
           </div>
           <ul className="m-list m-card" data-testid="done-cabs">
@@ -464,7 +468,7 @@ function Done({ result, overview }: { result: Result; overview: Overview }) {
                         {has
                           ? "Playing it now"
                           : isSwitchedOn(item)
-                            ? `Switching, within about ${lag}`
+                            ? `Switching, ${lagPhrase([item], overview.changeLagMinutes)}`
                             : item.status === "paused"
                               ? "Will switch when its screen is resumed"
                               : "Will switch when it’s next on"}

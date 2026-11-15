@@ -23,7 +23,9 @@ import {
   type ExpectedSource,
   type LoopRoutingSnapshot,
 } from "./loop-routing";
-import { STALE_PUBLISHING_MESSAGE, STALE_PUBLISHING_MS } from "./loops";
+import { changeLagMinutesFor, summarizeChangeLag } from "./change-lag";
+import { uploadJobState, uploadsAhead } from "./upload-queue";
+import { isProcessingStale, STALE_PUBLISHING_MESSAGE, STALE_TARGET_STEP_MESSAGE } from "./upload-rules";
 
 export const LONDON_TZ = "Europe/London";
 
@@ -42,12 +44,20 @@ export const loopSummarySelect = {
   createdAt: true,
   updatedAt: true,
   autoLive: true,
+  pendingTargetAt: true,
   _count: { select: { slots: true } },
 } satisfies Prisma.LoopSelect;
 
 type LoopRow = Prisma.LoopGetPayload<{ select: typeof loopSummarySelect }>;
 
-export type LoopProcessing = { state: "processing" | "ready" | "failed"; error: string | null };
+export type LoopProcessing = {
+  state: "processing" | "ready" | "failed";
+  error: string | null;
+  /** Additive: true while a phone upload is queued behind another one (state "processing"). */
+  waiting: boolean;
+  /** Additive: uploads queued ahead of this one (0 unless waiting). */
+  queuedBehind: number;
+};
 
 export type LoopSummary = {
   id: string;
@@ -63,24 +73,44 @@ export type LoopSummary = {
   liveOn: { fleet: boolean; groups: { id: string; name: string }[]; cabCount: number };
 };
 
+/**
+ * Processing state of a loop as the phone sees it. A phone upload is "processing" while it waits
+ * in the queue, is being prepared, or is published but its requested target is still being
+ * applied (so the phone never says "on its way" before the outcome is known). The server touches
+ * the row every minute while it works on it; a row left untouched for STALE_PUBLISHING_MS is no
+ * longer being worked on and is reported as failed (or, after a publish, as ready with a note).
+ */
 export function loopProcessing(
-  loop: Pick<LoopRow, "status" | "publishError" | "updatedAt">,
+  loop: Pick<LoopRow, "id" | "status" | "publishError" | "updatedAt"> & { pendingTargetAt?: Date | null },
   now = new Date(),
+  job: { state: "waiting" | "running" | null; ahead: number } = { state: null, ahead: 0 },
 ): LoopProcessing {
+  const base = { waiting: false, queuedBehind: 0 };
+  const working = job.state !== null || !isProcessingStale(loop.updatedAt, now);
   if (loop.status === "PUBLISHING") {
-    if (now.getTime() - loop.updatedAt.getTime() > STALE_PUBLISHING_MS) {
-      return { state: "failed", error: STALE_PUBLISHING_MESSAGE };
+    if (!working) {
+      return { ...base, state: "failed", error: STALE_PUBLISHING_MESSAGE };
     }
-    return { state: "processing", error: null };
+    return {
+      state: "processing",
+      error: null,
+      waiting: job.state === "waiting",
+      queuedBehind: job.state === "waiting" ? job.ahead : 0,
+    };
   }
   if (loop.status === "PUBLISHED") {
-    // A publish that succeeded but whose requested target could not be applied keeps a note.
-    return { state: "ready", error: loop.publishError ?? null };
+    if (loop.pendingTargetAt) {
+      return working
+        ? { ...base, state: "processing", error: null }
+        : { ...base, state: "ready", error: STALE_TARGET_STEP_MESSAGE };
+    }
+    // A publish that succeeded but whose requested target was not applied keeps a note.
+    return { ...base, state: "ready", error: loop.publishError ?? null };
   }
   if (loop.publishError) {
-    return { state: "failed", error: loop.publishError };
+    return { ...base, state: "failed", error: loop.publishError };
   }
-  return { state: "ready", error: null };
+  return { ...base, state: "ready", error: null };
 }
 
 export function posterUrlFor(loop: { id: string; compiledVideoKey: string | null } | null | undefined) {
@@ -135,7 +165,7 @@ export function toLoopSummary(loop: LoopRow, liveOn: LiveOnIndex, now = new Date
     id: loop.id,
     name: loop.name,
     status: loop.status,
-    processing: loopProcessing(loop, now),
+    processing: loopProcessing(loop, now, { state: uploadJobState(loop.id), ahead: uploadsAhead(loop.id) }),
     durationMs: loop.durationMs ?? (loop._count.slots > 0 && loop.compiledVideoKey ? 600_000 : null),
     posterUrl: posterUrlFor(loop),
     videoUrl: videoUrlFor(loop),
@@ -255,6 +285,12 @@ export type CabSummary = {
   location: CabLocation | null;
   isPaused: boolean;
   pausedReason: string | null;
+  /** Additive: this cab's own screen is paused (resuming it from the phone works). */
+  cabPaused: boolean;
+  /** Additive: every screen is paused from the desktop site (resuming one cab does nothing). */
+  fleetPaused: boolean;
+  /** Additive: worst-case minutes for this cab to act on a change, from its firmware version. */
+  changeLagMinutes: number;
 };
 
 const cabDeviceSelect = {
@@ -276,6 +312,7 @@ const cabDeviceSelect = {
   locationAccuracyM: true,
   locationSource: true,
   locationAt: true,
+  firmwareVersion: true,
 } satisfies Prisma.DeviceSelect;
 
 type CabDeviceRow = Prisma.DeviceGetPayload<{ select: typeof cabDeviceSelect }>;
@@ -320,21 +357,28 @@ type CabContext = {
   snapshot: LoopRoutingSnapshot;
   thresholdMs: number;
   heartbeatIntervalMs: number;
+  lagSettings: { heartbeatIntervalSeconds: number; syncIntervalSeconds: number };
   fleetDisabled: boolean;
   fleetReason: string | null;
   loopNames: Map<string, { id: string; name: string; compiledVideoKey: string | null }>;
   now: Date;
 };
 
+/** How far back `findRunStart` looks; a run longer than this is reported as starting then. */
+export const RUN_START_LOOKBACK_MS = 30 * 24 * 3600_000;
+
 /**
  * Start of the current unbroken heartbeat run for devices whose run reaches back past the loaded
- * window (one query per such device, using the [deviceId, receivedAt] index).
+ * window (one query per such device, using the [deviceId, receivedAt] index). Bounded to the last
+ * RUN_START_LOOKBACK_MS so a cab that has been on for months does not scan its whole history on
+ * every poll; if no gap is found in that window, the start of the window is returned.
  */
-async function findRunStart(deviceId: string, gapMs: number) {
+async function findRunStart(deviceId: string, gapMs: number, now: Date) {
+  const since = new Date(now.getTime() - RUN_START_LOOKBACK_MS);
   const rows = await prisma.$queryRaw<Array<{ receivedAt: Date }>>`
     SELECT "receivedAt" FROM (
       SELECT "receivedAt", LAG("receivedAt") OVER (ORDER BY "receivedAt") AS prev
-      FROM "DeviceHeartbeat" WHERE "deviceId" = ${deviceId}
+      FROM "DeviceHeartbeat" WHERE "deviceId" = ${deviceId} AND "receivedAt" >= ${since}
     ) t
     WHERE prev IS NULL OR EXTRACT(EPOCH FROM ("receivedAt" - prev)) * 1000 > ${gapMs}
     ORDER BY "receivedAt" DESC LIMIT 1`;
@@ -363,7 +407,7 @@ async function buildCabSummary(
   let onlineSince: Date | null = current?.start ?? null;
   if (current && current.start.getTime() - windowStart.getTime() <= context.thresholdMs) {
     // The run may have started before the loaded window.
-    onlineSince = (await findRunStart(device.id, context.thresholdMs)) ?? current.start;
+    onlineSince = (await findRunStart(device.id, context.thresholdMs, now)) ?? current.start;
   }
 
   const midnight = startOfLocalDay(now, LONDON_TZ);
@@ -407,6 +451,9 @@ async function buildCabSummary(
     location: deviceLocation(device),
     isPaused: device.isDisabled || context.fleetDisabled,
     pausedReason,
+    cabPaused: device.isDisabled,
+    fleetPaused: context.fleetDisabled,
+    changeLagMinutes: changeLagMinutesFor(device.firmwareVersion, context.lagSettings),
   };
   return { summary, intervals };
 }
@@ -423,6 +470,10 @@ async function loadCabContext(snapshot?: LoopRoutingSnapshot) {
       snapshot: routing,
       thresholdMs: offlineThresholdMs(settings.heartbeatIntervalSeconds),
       heartbeatIntervalMs: settings.heartbeatIntervalSeconds * 1000,
+      lagSettings: {
+        heartbeatIntervalSeconds: settings.heartbeatIntervalSeconds,
+        syncIntervalSeconds: settings.syncIntervalSeconds,
+      },
       fleetDisabled: fleetControl.disabled,
       fleetReason: fleetControl.reason,
       loopNames: new Map(loops.map((loop) => [loop.id, loop])),
@@ -616,6 +667,10 @@ export async function getMobileOverview(user: { id: string; name: string; email:
   });
   const liveOn = buildLiveOnIndex(snapshot, groups, activeDevices);
 
+  const changeLag = summarizeChangeLag(
+    cabs.map((cab) => cab.changeLagMinutes),
+    context.lagSettings,
+  );
   const counts = { total: cabs.length, online: 0, updating: 0, offline: 0, paused: 0 };
   for (const cab of cabs) {
     if (cab.status !== "inactive") {
@@ -629,7 +684,10 @@ export async function getMobileOverview(user: { id: string; name: string; email:
     counts,
     fleetLoop: fleetLoopRow ? toLoopSummary(fleetLoopRow, liveOn, context.now) : null,
     fleetPaused: context.fleetDisabled,
-    changeLagMinutes: Math.ceil(settings.heartbeatIntervalSeconds / 60),
+    // Honest worst case for the fleet: cabs on firmware before 1.1.0 only check every sync
+    // interval (30 minutes), newer ones within a heartbeat. `changeLag` gives the range.
+    changeLagMinutes: changeLag.maxMinutes,
+    changeLag,
     groups: groups.map((group) => {
       const members = cabs.filter((cab) => cab.group?.id === group.id);
       const resolved = resolveGroupLoop(group.id, snapshot);

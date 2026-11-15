@@ -1,5 +1,6 @@
 import { prisma } from "@orison/db";
 
+import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
 import { deleteObject } from "@/lib/storage";
 
@@ -11,6 +12,7 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const asset = await prisma.asset.findUnique({
       where: { id: params.id },
       select: {
@@ -54,6 +56,7 @@ export async function GET(_: Request, { params }: Props) {
 
 export async function DELETE(_: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const asset = await prisma.asset.findUnique({
       where: { id: params.id },
       include: {

@@ -1,10 +1,12 @@
 import { prisma } from "@orison/db";
 import { assetListQuerySchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse } from "@/lib/http";
 
 export async function GET(request: Request) {
   try {
+    await requireApiUser();
     const url = new URL(request.url);
     const query = assetListQuerySchema.parse({
       category: url.searchParams.get("category") ?? undefined,

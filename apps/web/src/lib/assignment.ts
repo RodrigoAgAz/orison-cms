@@ -46,7 +46,7 @@ export async function describeTarget(target: AssignTarget) {
  * - fleet: loopId required.
  * - group: loopId null -> follow the fleet.
  * - cab: loopId null -> clear the override.
- * Returns affectedCabs = active cabs whose expected loop is now decided by this target
+ * Returns affectedCabs (and their ids) = active cabs whose expected loop is now decided by this target
  * (fleet: cabs resolving via the fleet; group: members without a cab override; cab: 1).
  */
 export async function assignLoop(
@@ -104,13 +104,18 @@ export async function assignLoop(
       select: { id: true, groupId: true, overrideLoopId: true },
     }),
   ]);
-  let affectedCabs = 0;
+  const affectedCabIds: string[] = [];
   for (const device of devices) {
     const { source } = resolveDeviceLoop(device, snapshot);
-    if (target.type === "fleet" && source === "fleet") affectedCabs += 1;
-    if (target.type === "group" && device.groupId === target.groupId && source !== "cab") affectedCabs += 1;
-    if (target.type === "cab" && device.id === target.deviceId) affectedCabs = 1;
+    if (
+      (target.type === "fleet" && source === "fleet") ||
+      (target.type === "group" && device.groupId === target.groupId && source !== "cab") ||
+      (target.type === "cab" && device.id === target.deviceId)
+    ) {
+      affectedCabIds.push(device.id);
+    }
   }
+  const affectedCabs = affectedCabIds.length;
 
   const message =
     target.type === "group" && !loopId
@@ -126,5 +131,6 @@ export async function assignLoop(
     affectedCabs,
   });
 
-  return { ok: true as const, affectedCabs };
+  // affectedCabIds is additive: the phone lists exactly these cabs on its "Done" screen.
+  return { ok: true as const, affectedCabs, affectedCabIds };
 }

@@ -63,3 +63,12 @@ export function wander(center: [number, number], step: number, seed: number): { 
     lng: center[1] + 0.006 * Math.cos(a * 0.8) + 0.002 * Math.sin(a * 2.3),
   };
 }
+
+/**
+ * Firmware each demo cab reports. 1.1.0 reacts to the heartbeat response (changes within one
+ * heartbeat); 1.0.0 is what every cab in the field runs before the rollout and only checks every
+ * 30 minutes. The cell-tower cab and the cab that is slow to switch model old firmware.
+ */
+export function demoFirmware(cab: { scenario: string }) {
+  return cab.scenario === "cell" || cab.scenario === "updating" ? "1.0.0" : "1.1.0";
+}

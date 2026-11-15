@@ -7,10 +7,20 @@ import { prisma, type Role, type User } from "@orison/db";
 
 import { env } from "./env";
 import { ApiError } from "./http";
+import { sessionVersionMatches } from "./session-version";
 
 export const SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 30;
 
-type SessionUser = Pick<User, "id" | "email" | "name" | "role">;
+type SessionUser = Pick<User, "id" | "email" | "name" | "role" | "sessionVersion">;
+
+const sessionUserSelect = {
+  id: true,
+  email: true,
+  name: true,
+  role: true,
+  sessionVersion: true,
+  createdAt: true,
+} as const;
 
 const jwtSecret = new TextEncoder().encode(env.sessionSecret);
 
@@ -28,6 +38,9 @@ export async function issueSessionToken(user: SessionUser) {
     email: user.email,
     name: user.name,
     role: user.role,
+    // Session version: bumped on password change, admin reset and role change (signs out
+    // every other device). Checked against the database wherever a session becomes a user.
+    sv: user.sessionVersion,
   })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -42,6 +55,7 @@ export async function verifySessionToken(token: string) {
     email: string;
     name: string;
     role: Role;
+    sv?: number;
   };
 }
 
@@ -63,6 +77,12 @@ export async function clearSession() {
   cookieStore.delete(env.sessionCookieName);
 }
 
+/**
+ * The signed-in user, re-read from the database: null when there is no valid token, the user no
+ * longer exists, or the token's session version is out of date (signed out everywhere). The
+ * middleware only checks the token signature (it runs on the edge without database access), so
+ * every page and API route turns the session into a user through here.
+ */
 export async function getSessionUser() {
   const cookieStore = cookies();
   const token = cookieStore.get(env.sessionCookieName)?.value;
@@ -70,17 +90,20 @@ export async function getSessionUser() {
     return null;
   }
 
+  let payload: Awaited<ReturnType<typeof verifySessionToken>>;
   try {
-    const payload = await verifySessionToken(token);
-    return {
-      id: payload.sub,
-      email: payload.email,
-      name: payload.name,
-      role: payload.role,
-    } satisfies SessionUser;
+    payload = await verifySessionToken(token);
   } catch {
     return null;
   }
+  if (typeof payload.sub !== "string") {
+    return null;
+  }
+  const user = await prisma.user.findUnique({ where: { id: payload.sub }, select: sessionUserSelect });
+  if (!user || !sessionVersionMatches(payload.sv, user.sessionVersion)) {
+    return null;
+  }
+  return user;
 }
 
 export async function requireUser() {
@@ -121,20 +144,30 @@ export async function authenticateUser(email: string, password: string) {
 
 
 /**
- * For JSON API routes: the signed-in user, re-read from the database so deleted users and role
- * changes take effect immediately. Throws ApiError(401) otherwise.
+ * For JSON API routes (every route except the device endpoints): the signed-in user, re-read
+ * from the database so deleted users, role changes and revoked sessions take effect at once.
+ * Throws ApiError(401) otherwise.
  */
 export async function requireApiUser() {
-  const session = await getSessionUser();
-  if (!session) {
-    throw new ApiError("Unauthenticated", 401);
-  }
-  const user = await prisma.user.findUnique({
-    where: { id: session.id },
-    select: { id: true, email: true, name: true, role: true, createdAt: true },
-  });
+  const user = await getSessionUser();
   if (!user) {
     throw new ApiError("Unauthenticated", 401);
+  }
+  return user;
+}
+
+/**
+ * Sign the user out on every device (bump the session version). Pass `keepCurrentSession` when the
+ * signed-in user changed their own credentials, to re-issue this device's cookie.
+ */
+export async function revokeUserSessions(userId: string, options: { keepCurrentSession?: boolean } = {}) {
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: { sessionVersion: { increment: 1 } },
+    select: sessionUserSelect,
+  });
+  if (options.keepCurrentSession) {
+    await createSession(user);
   }
   return user;
 }

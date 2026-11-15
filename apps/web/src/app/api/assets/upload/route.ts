@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { prisma, type Prisma } from "@orison/db";
 import { uploadAssetFormSchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
 import { env } from "@/lib/env";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
@@ -21,6 +22,7 @@ function assetKeys(assetId: string, filename: string) {
 
 export async function POST(request: Request) {
   try {
+    await requireApiUser();
     const formData = await request.formData();
     const file = formData.get("file");
 

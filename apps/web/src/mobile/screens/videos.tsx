@@ -86,7 +86,9 @@ function VideoRow({ loop }: { loop: LoopSummary }) {
       <span className="m-videorow-text">
         <strong>{loop.name}</strong>
         {state === "processing" ? (
-          <span className="m-videorow-status is-busy">Getting it ready for the screens…</span>
+          <span className="m-videorow-status is-busy">
+            {loop.processing.waiting ? "Waiting for another video to finish…" : "Getting it ready for the screens…"}
+          </span>
         ) : state === "failed" ? (
           <span className="m-videorow-status is-failed" data-testid="video-failed-reason">
             Couldn&rsquo;t be used: {loop.processing.error ?? "the video couldn’t be prepared."}

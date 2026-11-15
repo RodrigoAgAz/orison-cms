@@ -1,6 +1,8 @@
 "use client";
 
-// Leaflet map of cab positions. Tiles are free CARTO dark tiles (OpenStreetMap data, attributed).
+// Leaflet map of cab positions. Tiles come from the standard OpenStreetMap tile server (light
+// style, attributed as its usage policy requires; fine for a small internal team, not for heavy
+// use). Markers, accuracy circles and the trail are drawn dark enough to read on a light map.
 // If tiles can't load (no signal, blocked host) the cabs are still drawn on a plain background
 // and the map says so. A GPS position is a pin; a mobile-network (cell tower) position is an
 // "approximately here" shape with a dashed accuracy circle.
@@ -15,9 +17,8 @@ import type { CabLocation, CabSummary } from "../lib/types";
 
 type MapCab = Pick<CabSummary, "id" | "label" | "status" | "location">;
 
-const TILE_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
-const ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>';
+export const TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 const LONDON: [number, number] = [51.5072, -0.1276];
 
 function escapeHtml(value: string) {
@@ -84,7 +85,13 @@ export function CabMap({
         markerZoomAnimation: !reduceMotion,
       }).setView(LONDON, 12);
       map.attributionControl.setPrefix(false);
-      const tileLayer = L.tileLayer(TILE_URL, { attribution: ATTRIBUTION, subdomains: "abcd", maxZoom: 19, detectRetina: false });
+      const tileLayer = L.tileLayer(TILE_URL, {
+        attribution: ATTRIBUTION,
+        maxZoom: 19,
+        detectRetina: false,
+        // The OSM tile policy requires a Referer; send the site origin.
+        referrerPolicy: "strict-origin-when-cross-origin",
+      });
       let loaded = 0;
       tileLayer.on("tileload", () => {
         loaded += 1;
@@ -131,7 +138,7 @@ export function CabMap({
     if (trail && trail.length > 1) {
       L.polyline(
         trail.map((point) => [point.lat, point.lng] as [number, number]),
-        { color: "#e0b340", weight: 3, opacity: 0.55, dashArray: "2 7", lineCap: "round", interactive: false },
+        { color: "#9a6b00", weight: 4, opacity: 0.85, dashArray: "2 8", lineCap: "round", interactive: false },
       ).addTo(layer);
     }
 
@@ -144,11 +151,12 @@ export function CabMap({
       if (approx && location.accuracyM) {
         const circle = L.circle(latLng, {
           radius: location.accuracyM,
-          color: "#9fb4d6",
-          weight: 1.5,
+          color: "#1f4f9e",
+          weight: 2,
+          opacity: 0.9,
           dashArray: "5 6",
-          fillColor: "#9fb4d6",
-          fillOpacity: 0.12,
+          fillColor: "#2f6fe0",
+          fillOpacity: 0.14,
           interactive: false,
         }).addTo(layer);
         bounds.push(circle.getBounds());

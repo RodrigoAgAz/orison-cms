@@ -103,7 +103,15 @@ function UploadPill() {
     icon = <AlertIcon size={16} />;
     text = (
       <>
-        <strong>{job.name}</strong> didn&rsquo;t upload
+        {job.uncertain ? (
+          <>
+            Not sure <strong>{job.name}</strong> arrived
+          </>
+        ) : (
+          <>
+            <strong>{job.name}</strong> didn&rsquo;t upload
+          </>
+        )}
       </>
     );
   }

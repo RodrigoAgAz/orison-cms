@@ -13,6 +13,7 @@ import {
   resolveGroupLevel,
   resolveGroupLoop,
 } from "./loop-routing";
+import { publicDevice } from "./device-public";
 import { getPublicUrl } from "./storage";
 
 function formatQueryFailure(scope: string, error: unknown) {
@@ -450,7 +451,9 @@ export async function getDashboardData() {
 
     return {
       devices: devicesWithExpectations,
-      publishedLoop: routing.latestPublishedLoop,
+      // What the fleet is actually set to play (same resolver as the device manifest route), not
+      // merely the newest PUBLISHED loop: a phone upload added to the library is live nowhere.
+      publishedLoop: fleetWideLoop,
       fleetWideLoop,
       safetyVideo,
       fleetControl,
@@ -523,26 +526,34 @@ export async function getDashboardData() {
   }
 }
 
+/**
+ * The loop the fleet is set to play (cabs that follow "all cabs"), resolved with the same rules as
+ * the device manifest route. Feeds the public /device-preview page, so it must never return a loop
+ * that is merely in the library (for example a phone upload that was not put live).
+ */
 export async function getCurrentPublishedLoop() {
   try {
-    const loop = await prisma.loop.findFirst({
-      where: {
-        status: "PUBLISHED",
-        OR: [{ compiledVideoUrl: { not: null } }, { compiledVideoKey: { not: null } }],
-      },
-      orderBy: { publishedAt: "desc" },
-      select: {
-        id: true,
-        name: true,
-        manifestUrl: true,
-        manifestKey: true,
-        compiledVideoUrl: true,
-        compiledVideoKey: true,
-        publishedAt: true,
-        checksum: true,
-        updatedAt: true,
-      },
-    });
+    const fleetLoop = resolveFleetLoop(await getLoopRoutingSnapshot());
+    const loop = fleetLoop
+      ? await prisma.loop.findFirst({
+          where: {
+            id: fleetLoop.id,
+            status: "PUBLISHED",
+            OR: [{ compiledVideoUrl: { not: null } }, { compiledVideoKey: { not: null } }],
+          },
+          select: {
+            id: true,
+            name: true,
+            manifestUrl: true,
+            manifestKey: true,
+            compiledVideoUrl: true,
+            compiledVideoKey: true,
+            publishedAt: true,
+            checksum: true,
+            updatedAt: true,
+          },
+        })
+      : null;
 
     if (!loop) {
       return null;
@@ -905,7 +916,7 @@ export async function getDevicesData({
 
     return {
       devices: devices.map((device) => ({
-        ...device,
+        ...publicDevice(device),
         expectedLoopId: resolveDeviceLoop(device, routing).loop?.id ?? null,
       })),
       offlineThresholdMs: offlineThresholdMs(settings.heartbeatIntervalSeconds),
@@ -914,7 +925,8 @@ export async function getDevicesData({
       page,
       pageSize,
       selectedGroupId: filterGroupId ?? "ALL",
-      publishedLoopId: routing.latestPublishedLoop?.id ?? null,
+      // The fleet's resolved loop (what cabs that follow all cabs play).
+      publishedLoopId: resolveFleetLoop(routing)?.id ?? null,
       fleetControl,
       error: null,
     };

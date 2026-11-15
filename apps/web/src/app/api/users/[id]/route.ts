@@ -4,7 +4,7 @@ import { prisma } from "@orison/db";
 import { userRoleSchema } from "@orison/shared";
 
 import { logActivity } from "@/lib/activity";
-import { hashPassword, requireApiAdmin } from "@/lib/auth";
+import { hashPassword, requireApiAdmin, revokeUserSessions } from "@/lib/auth";
 import { apiError, apiResponse, ApiError, parseJsonBody } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -46,6 +46,11 @@ export async function PATCH(request: Request, { params }: Props) {
       },
       select: publicUserSelect,
     });
+    // A password reset or role change signs that person out on every device. An admin changing
+    // their own account stays signed in here.
+    if (body.password || (body.role && body.role !== existing.role)) {
+      await revokeUserSessions(existing.id, { keepCurrentSession: existing.id === admin.id });
+    }
     const changed = Object.keys(body).filter((key) => key !== "password");
     await logActivity(
       "USER_UPDATED",
@@ -71,6 +76,8 @@ export async function DELETE(_: Request, { params }: Props) {
     if (existing.role === "ADMIN" && (await adminCount()) <= 1) {
       throw new ApiError("You cannot delete the last admin", 409);
     }
+    // Deleting the row already invalidates their sessions (every session is checked against the
+    // database); nothing else to revoke.
     await prisma.user.delete({ where: { id: existing.id } });
     await logActivity("USER_DELETED", `${admin.name} removed ${existing.name}`, {
       userId: existing.id,

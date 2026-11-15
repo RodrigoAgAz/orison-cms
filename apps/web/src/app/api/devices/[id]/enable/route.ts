@@ -2,6 +2,8 @@ import { revalidatePath } from "next/cache";
 
 import { prisma } from "@orison/db";
 
+import { requireApiUser } from "@/lib/auth";
+import { publicDevice } from "@/lib/device-public";
 import { logActivity } from "@/lib/activity";
 import { apiError, apiResponse } from "@/lib/http";
 
@@ -13,6 +15,7 @@ type Props = {
 
 export async function PUT(_: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const device = await prisma.device.update({
       where: { id: params.id },
       data: {
@@ -29,7 +32,7 @@ export async function PUT(_: Request, { params }: Props) {
     revalidatePath("/");
     revalidatePath("/devices");
 
-    return apiResponse(device);
+    return apiResponse(publicDevice(device));
   } catch (error) {
     return apiError(error);
   }

@@ -35,15 +35,22 @@ export async function commandExists(command: string) {
 }
 
 async function ffprobe(filePath: string) {
-  const { stdout } = await execFileAsync("ffprobe", [
-    "-v",
-    "error",
-    "-print_format",
-    "json",
-    "-show_streams",
-    "-show_format",
-    filePath,
-  ]);
+  const isUrl = /^https?:\/\//.test(filePath);
+  const { stdout } = await execFileAsync(
+    "ffprobe",
+    [
+      // A signed object-storage URL: fail on a stalled connection instead of hanging.
+      ...(isUrl ? ["-rw_timeout", "30000000"] : []),
+      "-v",
+      "error",
+      "-print_format",
+      "json",
+      "-show_streams",
+      "-show_format",
+      filePath,
+    ],
+    { timeout: 2 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 },
+  );
 
   return JSON.parse(stdout) as {
     streams?: Array<{

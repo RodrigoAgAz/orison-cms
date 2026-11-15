@@ -4,6 +4,8 @@ const nextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
   experimental: {
     typedRoutes: true,
+    // src/instrumentation.ts: removes stale upload temp folders at server start.
+    instrumentationHook: true,
   },
 };
 

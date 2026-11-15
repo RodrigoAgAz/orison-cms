@@ -82,8 +82,10 @@ export function VideoScreen({ id }: { id: string }) {
       </div>
 
       {state === "processing" ? (
-        <Notice tone="info" title="Getting it ready for the screens">
-          This usually takes a minute or two. You can leave this screen; it carries on without you.
+        <Notice tone="info" title={data.processing.waiting ? "Waiting its turn" : "Getting it ready for the screens"}>
+          {data.processing.waiting
+            ? "Videos are prepared one at a time and another one is being prepared first. This one starts as soon as that’s done; you can leave this screen."
+            : "This usually takes a minute or two. You can leave this screen; it carries on without you."}
         </Notice>
       ) : null}
       {state === "failed" ? (
