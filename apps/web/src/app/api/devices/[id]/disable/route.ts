@@ -42,3 +42,6 @@ export async function PUT(request: Request, { params }: Props) {
     return apiError(error);
   }
 }
+
+/** Mobile app (CONTRACT.md) uses POST; same behaviour as PUT. */
+export const POST = PUT;

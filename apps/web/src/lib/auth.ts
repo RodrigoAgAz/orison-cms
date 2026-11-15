@@ -6,6 +6,9 @@ import { jwtVerify, SignJWT } from "jose";
 import { prisma, type Role, type User } from "@orison/db";
 
 import { env } from "./env";
+import { ApiError } from "./http";
+
+export const SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 30;
 
 type SessionUser = Pick<User, "id" | "email" | "name" | "role">;
 
@@ -28,7 +31,7 @@ export async function issueSessionToken(user: SessionUser) {
   })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("7d")
+    .setExpirationTime(`${SESSION_LIFETIME_SECONDS}s`)
     .sign(jwtSecret);
 }
 
@@ -50,7 +53,7 @@ export async function createSession(user: SessionUser) {
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
-    maxAge: 60 * 60 * 24 * 7,
+    maxAge: SESSION_LIFETIME_SECONDS,
   });
   return token;
 }
@@ -116,3 +119,30 @@ export async function authenticateUser(email: string, password: string) {
   return user;
 }
 
+
+/**
+ * For JSON API routes: the signed-in user, re-read from the database so deleted users and role
+ * changes take effect immediately. Throws ApiError(401) otherwise.
+ */
+export async function requireApiUser() {
+  const session = await getSessionUser();
+  if (!session) {
+    throw new ApiError("Unauthenticated", 401);
+  }
+  const user = await prisma.user.findUnique({
+    where: { id: session.id },
+    select: { id: true, email: true, name: true, role: true, createdAt: true },
+  });
+  if (!user) {
+    throw new ApiError("Unauthenticated", 401);
+  }
+  return user;
+}
+
+export async function requireApiAdmin() {
+  const user = await requireApiUser();
+  if (user.role !== "ADMIN") {
+    throw new ApiError("Only admins can manage the team", 403);
+  }
+  return user;
+}

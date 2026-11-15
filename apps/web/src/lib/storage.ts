@@ -229,3 +229,24 @@ export async function downloadObjectToFile(key: string, filePath: string) {
   await writeFile(filePath, buffer);
   return filePath;
 }
+
+/**
+ * Local-disk storage only: absolute path and stats for a key, or null if it does not exist.
+ * Used to stream files (with HTTP Range support) instead of buffering them.
+ */
+export async function statLocalObject(key: string) {
+  requireObjectStorage();
+  if (hasRemoteObjectStorage()) {
+    return null;
+  }
+  const filePath = localPathForKey(key);
+  if (!filePath.startsWith(localStorageRoot + path.sep)) {
+    return null;
+  }
+  try {
+    const stats = await stat(filePath);
+    return stats.isFile() ? { filePath, size: stats.size, mtime: stats.mtime } : null;
+  } catch {
+    return null;
+  }
+}

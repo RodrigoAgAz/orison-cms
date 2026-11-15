@@ -64,13 +64,14 @@ export function resolveMobileDeviceStatus(
 
 /**
  * Turn heartbeat timestamps into online intervals. Two consecutive heartbeats belong to the same
- * run when they are no more than `gapMs` apart. Each interval ends at its last heartbeat (or at
- * `now` when the run is still live, i.e. the last heartbeat is within gapMs of now).
+ * run when they are no more than `gapMs` apart. A run that is still live (its last heartbeat is
+ * within gapMs of now) ends at `now`; a closed run ends `tailMs` after its last heartbeat.
  */
 export function heartbeatIntervals(
   timestamps: Date[],
   gapMs: number,
   now: Date = new Date(),
+  tailMs = 0,
 ): Array<{ start: Date; end: Date }> {
   const sorted = timestamps.map((t) => t.getTime()).sort((a, b) => a - b);
   const intervals: Array<{ start: number; end: number }> = [];
@@ -82,10 +83,17 @@ export function heartbeatIntervals(
       intervals.push({ start: t, end: t });
     }
   }
-  const last = intervals[intervals.length - 1];
-  if (last && now.getTime() - last.end <= gapMs) {
-    last.end = Math.max(last.end, now.getTime());
-  }
+  const nowMs = now.getTime();
+  intervals.forEach((interval, index) => {
+    const isLast = index === intervals.length - 1;
+    if (isLast && nowMs - interval.end <= gapMs) {
+      // Still live: the run extends to now.
+      interval.end = Math.max(interval.end, nowMs);
+    } else {
+      // Closed run: credit one heartbeat interval after the last heartbeat (never past now).
+      interval.end = Math.min(interval.end + tailMs, nowMs);
+    }
+  });
   return intervals.map((interval) => ({ start: new Date(interval.start), end: new Date(interval.end) }));
 }
 

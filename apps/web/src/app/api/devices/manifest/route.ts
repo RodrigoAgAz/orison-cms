@@ -5,7 +5,7 @@ import { deviceManifestResponseSchema } from "@orison/shared";
 import { requireDevice } from "@/lib/device-auth";
 import { getFleetControlState } from "@/lib/fleet-control";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
-import { getPublishedLoopRoutingSnapshot, resolveExpectedLoopForGroup } from "@/lib/loop-routing";
+import { getLoopRoutingSnapshot, resolveDeviceLoop } from "@/lib/loop-routing";
 import { enforceDeviceRateLimit } from "@/lib/rate-limit";
 
 export async function GET(request: NextRequest) {
@@ -22,11 +22,11 @@ export async function GET(request: NextRequest) {
 
     const [device, routing, fleetControl] = await Promise.all([
       requireDevice(request, serialNumber),
-      getPublishedLoopRoutingSnapshot(),
+      getLoopRoutingSnapshot(),
       getFleetControlState(),
     ]);
 
-    const loop = resolveExpectedLoopForGroup(device.groupId, routing);
+    const { loop } = resolveDeviceLoop(device, routing);
 
     if (!loop?.manifestUrl) {
       throw new ApiError("No published loop available", 404);

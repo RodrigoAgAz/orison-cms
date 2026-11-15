@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
-import { prisma, type Asset, type Loop, type Slot, type SlotContent } from "@orison/db";
+import { prisma, type Asset, type Loop, type Prisma, type Slot, type SlotContent } from "@orison/db";
 import {
   advertisementDurationMs,
   directLoopUploadMaxBytes,
@@ -455,12 +455,48 @@ async function normalizeImageToClip(
   ]);
 }
 
-async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string) {
+const LOOP_FRAME_FILTER =
+  "scale=1280:800:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1," +
+  "pad=1280:800:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p";
+// HDR (iPhone HLG / PQ) -> SDR BT.709 before scaling; requires ffmpeg built with libzimg.
+const HDR_TONEMAP_FILTER =
+  "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0," +
+  "zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
+
+let zscaleAvailable: Promise<boolean> | null = null;
+function hasZscaleFilter() {
+  zscaleAvailable ??= execFileAsync("ffmpeg", ["-hide_banner", "-filters"])
+    .then(({ stdout }) => /\bzscale\b/.test(stdout) && /\btonemap\b/.test(stdout))
+    .catch(() => false);
+  return zscaleAvailable;
+}
+
+function isHdrTransfer(transfer: string | null | undefined) {
+  return transfer === "smpte2084" || transfer === "arib-std-b67";
+}
+
+/**
+ * Normalise any input (mp4/mov/m4v, H.264/HEVC, 8/10-bit, portrait, rotated) to the standard loop
+ * format: 1280x800 H.264 High 4.1 yuv420p, 30fps, AAC 44.1kHz, faststart. The picture is fitted
+ * inside 1280x800 and letter/pillarboxed (never stretched). ffmpeg applies display rotation
+ * (autorotate) before the filter chain, so portrait/rotated phone footage is fitted upright.
+ */
+async function transcodeCompiledLoopVideo(
+  inputPath: string,
+  outputPath: string,
+  metadata?: Awaited<ReturnType<typeof extractMetadata>>,
+) {
+  const tonemap = isHdrTransfer(metadata?.colorTransfer) && (await hasZscaleFilter());
+  const filter = tonemap ? `${HDR_TONEMAP_FILTER},${LOOP_FRAME_FILTER}` : LOOP_FRAME_FILTER;
   await runFfmpeg([
     "-i",
     inputPath,
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0?",
     "-vf",
-    "scale=1280:800:force_original_aspect_ratio=decrease,pad=1280:800:(ow-iw)/2:(oh-ih)/2:black,fps=30",
+    filter,
     "-c:v",
     "libx264",
     "-preset",
@@ -471,12 +507,22 @@ async function transcodeCompiledLoopVideo(inputPath: string, outputPath: string)
     "high",
     "-level",
     "4.1",
+    "-pix_fmt",
+    "yuv420p",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+    "-colorspace",
+    "bt709",
     "-c:a",
     "aac",
     "-b:a",
     "128k",
     "-ar",
     "44100",
+    "-map_metadata",
+    "-1",
     "-movflags",
     "+faststart",
     outputPath,
@@ -514,7 +560,10 @@ function isDirectLoopAlreadyStandard(metadata: Awaited<ReturnType<typeof extract
     metadata.width === 1280 &&
     metadata.height === 800 &&
     metadata.videoCodec === "h264" &&
-    metadata.audioCodec === "aac"
+    metadata.audioCodec === "aac" &&
+    (metadata.pixFmt ?? "yuv420p") === "yuv420p" &&
+    !metadata.rotation &&
+    !isHdrTransfer(metadata.colorTransfer)
   );
 }
 
@@ -657,6 +706,9 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
         compiledVideoKey,
         compiledVideoUrl,
         checksum,
+        durationMs: loopDurationMs,
+        // The compiled video changed; the poster is regenerated lazily.
+        posterKey: null,
       },
     });
 
@@ -684,77 +736,123 @@ export async function publishLoop(loopId: string, publishedByUserId: string) {
   }
 }
 
-export async function publishDirectLoopUpload({
-  name,
-  originalFilename,
-  tempFilePath,
-  publishedByUserId,
-}: DirectLoopUploadOptions) {
+export const directLoopUploadExtensions = [".mp4", ".mov", ".m4v"] as const;
+
+/** Human-readable reason, safe to show to phone users. */
+export class LoopUploadError extends Error {}
+
+type PreparedLoopVideo = {
+  outputPath: string;
+  durationMs: number;
+  fileSizeBytes: number;
+};
+
+/**
+ * Validate an uploaded file and produce the standard compiled loop video inside `workDir`.
+ * Throws LoopUploadError with a user-facing message for bad input.
+ */
+async function prepareLoopVideo(tempFilePath: string, workDir: string): Promise<PreparedLoopVideo> {
   if (!(await commandExists("ffmpeg")) || !(await commandExists("ffprobe"))) {
     throw new Error("ffmpeg and ffprobe are required to publish direct loop uploads");
   }
 
   const uploadedFileStats = await stat(tempFilePath);
+  if (uploadedFileStats.size === 0) {
+    throw new LoopUploadError("The uploaded file is empty");
+  }
   if (uploadedFileStats.size > directLoopUploadMaxBytes) {
-    throw new Error("Direct loop uploads are limited to 500MB");
+    throw new LoopUploadError("Direct loop uploads are limited to 500MB");
   }
 
-  const sourceMetadata = await extractMetadata(tempFilePath);
+  let sourceMetadata: Awaited<ReturnType<typeof extractMetadata>>;
+  try {
+    sourceMetadata = await extractMetadata(tempFilePath);
+  } catch {
+    throw new LoopUploadError("This file could not be read as a video. Upload an MP4 or MOV file.");
+  }
+  if (!sourceMetadata.hasVideo) {
+    throw new LoopUploadError("This file does not contain a video track");
+  }
   if (!sourceMetadata.durationMs) {
-    throw new Error("Unable to determine uploaded loop duration");
+    throw new LoopUploadError("Unable to determine uploaded loop duration");
   }
-
   if (sourceMetadata.durationMs > directLoopUploadMaxDurationMs) {
-    throw new Error("Direct loop uploads must be 14 minutes or shorter");
+    throw new LoopUploadError("Direct loop uploads must be 14 minutes or shorter");
   }
 
-  const [safetyVideo] = await Promise.all([loadSafetyVideoManifestData()]);
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
-  const outputPath = path.join(tempDir, "loop.mp4");
-  let compiledSourcePath = outputPath;
-  let loop: Loop | null = null;
-  let manifestKey: string | null = null;
-  let compiledVideoKey: string | null = null;
-
+  const outputPath = path.join(workDir, "loop.mp4");
   try {
     if (isDirectLoopAlreadyStandard(sourceMetadata)) {
       await remuxCompiledLoopVideo(tempFilePath, outputPath);
     } else {
-      await transcodeCompiledLoopVideo(tempFilePath, outputPath);
+      await transcodeCompiledLoopVideo(tempFilePath, outputPath, sourceMetadata);
     }
+  } catch (error) {
+    console.error("loop transcode failed", error);
+    throw new LoopUploadError("The video could not be converted. Try exporting it again as MP4 or MOV.");
+  }
 
-    const outputMetadata = await extractMetadata(compiledSourcePath);
-    const durationMs = outputMetadata.durationMs ?? sourceMetadata.durationMs;
-    if (!durationMs) {
-      throw new Error("Unable to determine transcoded loop duration");
-    }
+  const outputMetadata = await extractMetadata(outputPath);
+  const durationMs = outputMetadata.durationMs ?? sourceMetadata.durationMs;
+  if (!durationMs) {
+    throw new LoopUploadError("Unable to determine transcoded loop duration");
+  }
+  if (durationMs > directLoopUploadMaxDurationMs) {
+    throw new LoopUploadError("Direct loop uploads must be 14 minutes or shorter");
+  }
 
-    if (durationMs > directLoopUploadMaxDurationMs) {
-      throw new Error("Direct loop uploads must be 14 minutes or shorter");
-    }
+  const outputStats = await stat(outputPath);
+  return { outputPath, durationMs, fileSizeBytes: outputStats.size };
+}
 
-    const outputStats = await stat(compiledSourcePath);
-    const publishedAt = new Date();
+/** Extract a JPEG still (640px wide) from a compiled loop video. */
+export async function generatePosterImage(videoPath: string, outputPath: string, durationMs?: number | null) {
+  const seekSeconds = durationMs && durationMs < 2000 ? (durationMs / 2000).toFixed(2) : "1";
+  await runFfmpeg([
+    "-ss",
+    seekSeconds,
+    "-i",
+    videoPath,
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=640:-2",
+    "-q:v",
+    "4",
+    outputPath,
+  ]);
+}
 
-    loop = await prisma.loop.create({
-      data: {
-        name,
-        status: "DRAFT",
-      },
-    });
+/**
+ * Upload the compiled video, manifest and poster for an existing Loop row and mark it PUBLISHED.
+ * Cleans up uploaded objects if anything fails.
+ */
+async function publishPreparedLoopVideo(options: {
+  loop: Loop;
+  prepared: PreparedLoopVideo;
+  workDir: string;
+  publishedByUserId: string;
+  activity: { message: string; metadata: Record<string, unknown> };
+}) {
+  const { loop, prepared, workDir, publishedByUserId } = options;
+  const safetyVideo = await loadSafetyVideoManifestData();
+  const stamp = `${Date.now()}-${randomUUID()}`;
+  const manifestKey = `manifests/${loop.id}/${stamp}.json`;
+  const compiledVideoKey = `loops/${loop.id}/${stamp}.mp4`;
+  const posterKey = `loops/${loop.id}/${stamp}-poster.jpg`;
+  const posterPath = path.join(workDir, "poster.jpg");
+  const publishedAt = new Date();
 
-    manifestKey = `manifests/${loop.id}/${Date.now()}-${randomUUID()}.json`;
-    compiledVideoKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}.mp4`;
-
+  try {
     const compiledVideoUrl = getPublicUrl(compiledVideoKey);
-    const compiledVideoChecksum = await checksumFilePath(compiledSourcePath);
+    const compiledVideoChecksum = await checksumFilePath(prepared.outputPath);
     const manifest = {
       version: "1.0",
       loopId: loop.id,
       loopName: loop.name,
       targetGroupId: loop.targetGroupId ?? null,
       publishedAt: publishedAt.toISOString(),
-      totalDurationMs: durationMs,
+      totalDurationMs: prepared.durationMs,
       safetyVideo:
         safetyVideo && safetyVideo.durationMs > 0
           ? {
@@ -765,26 +863,29 @@ export async function publishDirectLoopUpload({
             }
           : undefined,
       slots: [],
-      totalDownloadSizeBytes: outputStats.size + (safetyVideo?.fileSizeBytes ?? 0),
+      totalDownloadSizeBytes: prepared.fileSizeBytes + (safetyVideo?.fileSizeBytes ?? 0),
       compiledVideoUrl,
       compiledVideoChecksum,
     };
     const checksum = checksumJson(manifest);
-    const manifestWithChecksum = {
-      ...manifest,
-      checksum,
-    };
+    const manifestWithChecksum = { ...manifest, checksum };
 
     await putObject({
       key: manifestKey,
       body: Buffer.from(JSON.stringify(manifestWithChecksum, null, 2)),
       contentType: "application/json",
     });
-    await putObjectFromFile({
-      key: compiledVideoKey,
-      filePath: compiledSourcePath,
-      contentType: "video/mp4",
-    });
+    await putObjectFromFile({ key: compiledVideoKey, filePath: prepared.outputPath, contentType: "video/mp4" });
+
+    let storedPosterKey: string | null = null;
+    try {
+      await generatePosterImage(prepared.outputPath, posterPath, prepared.durationMs);
+      await putObjectFromFile({ key: posterKey, filePath: posterPath, contentType: "image/jpeg" });
+      storedPosterKey = posterKey;
+    } catch (error) {
+      // Poster is generated lazily later if this fails.
+      console.warn(`poster generation failed for loop ${loop.id}`, error);
+    }
 
     await prisma.loop.update({
       where: { id: loop.id },
@@ -792,24 +893,26 @@ export async function publishDirectLoopUpload({
         status: "PUBLISHED",
         publishedAt,
         publishedBy: publishedByUserId,
+        publishError: null,
         manifestKey,
         manifestUrl: getPublicUrl(manifestKey),
         compiledVideoKey,
         compiledVideoUrl,
         checksum,
+        durationMs: prepared.durationMs,
+        posterKey: storedPosterKey,
       },
     });
 
-    await logActivity("LOOP_PUBLISHED", `Loop ${loop.name} published from direct upload`, {
+    await logActivity("LOOP_PUBLISHED", options.activity.message, {
       loopId: loop.id,
       publishedByUserId,
       checksum,
       compiledVideoKey,
-      originalFilename,
-      mode: "DIRECT_UPLOAD",
-      fileSizeBytes: outputStats.size,
-      durationMs,
-    });
+      fileSizeBytes: prepared.fileSizeBytes,
+      durationMs: prepared.durationMs,
+      ...options.activity.metadata,
+    } as Prisma.InputJsonObject);
 
     return {
       loopId: loop.id,
@@ -817,20 +920,184 @@ export async function publishDirectLoopUpload({
       compiledVideoUrl,
       checksum,
       compiledVideoChecksum,
-      fileSizeBytes: outputStats.size,
+      fileSizeBytes: prepared.fileSizeBytes,
     };
   } catch (error) {
-    if (manifestKey) {
-      await deleteObject(manifestKey).catch(() => undefined);
-    }
-    if (compiledVideoKey) {
-      await deleteObject(compiledVideoKey).catch(() => undefined);
-    }
+    await deleteObject(manifestKey).catch(() => undefined);
+    await deleteObject(compiledVideoKey).catch(() => undefined);
+    await deleteObject(posterKey).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Desktop direct upload: synchronous, .mp4, creates the loop and makes it live fleet-wide
+ * (autoLive defaults to true) once published. Behaviour unchanged from before the refactor.
+ */
+export async function publishDirectLoopUpload({
+  name,
+  originalFilename,
+  tempFilePath,
+  publishedByUserId,
+}: DirectLoopUploadOptions) {
+  const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
+  let loop: Loop | null = null;
+
+  try {
+    const prepared = await prepareLoopVideo(tempFilePath, workDir);
+    loop = await prisma.loop.create({ data: { name, status: "DRAFT" } });
+    return await publishPreparedLoopVideo({
+      loop,
+      prepared,
+      workDir,
+      publishedByUserId,
+      activity: {
+        message: `Loop ${loop.name} published from direct upload`,
+        metadata: { originalFilename, mode: "DIRECT_UPLOAD" },
+      },
+    });
+  } catch (error) {
     if (loop) {
       await prisma.loop.delete({ where: { id: loop.id } }).catch(() => undefined);
     }
     throw error;
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+/** Phone uploads still PUBLISHING after this long are treated as failed (e.g. server restart). */
+export const STALE_PUBLISHING_MS = 30 * 60 * 1000;
+export const STALE_PUBLISHING_MESSAGE = "Processing was interrupted. Please upload the video again.";
+
+/** Create the Loop row for a phone upload (PUBLISHING, autoLive false) before processing. */
+export async function createPendingUploadLoop(options: {
+  name: string;
+  pendingTarget: Prisma.InputJsonValue | null;
+}) {
+  return prisma.loop.create({
+    data: {
+      name: options.name,
+      status: "PUBLISHING",
+      autoLive: false,
+      pendingTarget: options.pendingTarget ?? undefined,
+    },
+  });
+}
+
+/**
+ * Run the upload pipeline for a pre-created Loop row. Never throws: failures are written to
+ * `publishError` (status DRAFT). The temp directory is always removed. `onPublished` runs after
+ * a successful publish (used to apply the requested assignment target).
+ */
+export async function processUploadedLoop(options: {
+  loopId: string;
+  originalFilename: string;
+  tempFilePath: string;
+  tempDir: string;
+  publishedByUserId: string;
+  onPublished?: (loop: Loop) => Promise<void>;
+}) {
+  const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-mobile-loop-")).catch(() => null);
+  try {
+    if (!workDir) {
+      throw new Error("Could not create a working directory");
+    }
+    const loop = await prisma.loop.findUnique({ where: { id: options.loopId } });
+    if (!loop) {
+      return;
+    }
+    const prepared = await prepareLoopVideo(options.tempFilePath, workDir);
+    await publishPreparedLoopVideo({
+      loop,
+      prepared,
+      workDir,
+      publishedByUserId: options.publishedByUserId,
+      activity: {
+        message: `Loop ${loop.name} uploaded from the mobile app`,
+        metadata: { originalFilename: options.originalFilename, mode: "MOBILE_UPLOAD" },
+      },
+    });
+    if (options.onPublished) {
+      const published = await prisma.loop.findUniqueOrThrow({ where: { id: loop.id } });
+      try {
+        await options.onPublished(published);
+      } catch (error) {
+        console.error(`post-publish step failed for loop ${loop.id}`, error);
+        await prisma.loop
+          .update({
+            where: { id: loop.id },
+            data: {
+              publishError: `Uploaded, but could not be put live: ${
+                error instanceof Error ? error.message : "unknown error"
+              }`,
+            },
+          })
+          .catch(() => undefined);
+      }
+    }
+  } catch (error) {
+    const message =
+      error instanceof LoopUploadError
+        ? error.message
+        : "Processing failed unexpectedly. Please try again or use a different file.";
+    if (!(error instanceof LoopUploadError)) {
+      console.error(`loop upload ${options.loopId} failed`, error);
+    }
+    await prisma.loop
+      .update({ where: { id: options.loopId }, data: { status: "DRAFT", publishError: message } })
+      .catch((updateError) => console.error("could not record upload failure", updateError));
+    await logActivity("LOOP_UPLOAD_FAILED", `Upload of loop ${options.loopId} failed: ${message}`, {
+      loopId: options.loopId,
+      originalFilename: options.originalFilename,
+    }).catch(() => undefined);
+  } finally {
+    if (workDir) {
+      await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    await rm(options.tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/** Fire-and-forget wrapper (long-lived Node server). */
+export function startUploadedLoopProcessing(options: Parameters<typeof processUploadedLoop>[0]) {
+  void processUploadedLoop(options).catch((error) => console.error("unhandled upload pipeline error", error));
+}
+
+/**
+ * Lazily create (and cache in storage) a poster JPEG for a loop with a compiled video.
+ * Returns the storage key, or null if the loop has no video.
+ */
+export async function ensureLoopPoster(loopId: string): Promise<string | null> {
+  const loop = await prisma.loop.findUnique({
+    where: { id: loopId },
+    select: { id: true, posterKey: true, compiledVideoKey: true, durationMs: true },
+  });
+  if (!loop?.compiledVideoKey) {
+    return null;
+  }
+  if (loop.posterKey) {
+    return loop.posterKey;
+  }
+
+  const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-poster-"));
+  try {
+    const videoPath = path.join(workDir, "loop.mp4");
+    const posterPath = path.join(workDir, "poster.jpg");
+    await downloadObjectToFile(loop.compiledVideoKey, videoPath);
+    let durationMs = loop.durationMs;
+    if (!durationMs) {
+      durationMs = (await extractMetadata(videoPath)).durationMs ?? null;
+    }
+    await generatePosterImage(videoPath, posterPath, durationMs);
+    const posterKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}-poster.jpg`;
+    await putObjectFromFile({ key: posterKey, filePath: posterPath, contentType: "image/jpeg" });
+    await prisma.loop.update({
+      where: { id: loop.id },
+      data: { posterKey, ...(loop.durationMs ? {} : durationMs ? { durationMs } : {}) },
+    });
+    return posterKey;
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
   }
 }

@@ -5,7 +5,14 @@ import { defaultFillerTemplate, type AssetCategory } from "@orison/shared/src/co
 
 import { getCmsSettings } from "./cms-settings";
 import { getFleetControlState } from "./fleet-control";
-import { getPublishedLoopRoutingSnapshot, resolveExpectedLoopForGroup } from "./loop-routing";
+import { offlineThresholdMs, resolveDesktopDeviceStatus } from "./device-status";
+import {
+  getLoopRoutingSnapshot,
+  resolveDeviceLoop,
+  resolveFleetLoop,
+  resolveGroupLevel,
+  resolveGroupLoop,
+} from "./loop-routing";
 import { getPublicUrl } from "./storage";
 
 function formatQueryFailure(scope: string, error: unknown) {
@@ -70,6 +77,7 @@ type AssetLibraryItem = Prisma.AssetGetPayload<{
   };
 }>;
 
+/** Desktop device status (inactive | offline | outdated | online); see lib/device-status.ts. */
 export function resolveDeviceStatus(
   device: {
     isActive: boolean;
@@ -77,20 +85,9 @@ export function resolveDeviceStatus(
     currentLoopId: string | null;
   },
   expectedLoopId: string | null,
+  thresholdMs: number,
 ) {
-  if (!device.isActive) {
-    return "inactive";
-  }
-
-  if (!device.lastHeartbeatAt || device.lastHeartbeatAt < new Date(Date.now() - 60 * 60 * 1000)) {
-    return "offline";
-  }
-
-  if (expectedLoopId && device.currentLoopId !== expectedLoopId) {
-    return "outdated";
-  }
-
-  return "online";
+  return resolveDesktopDeviceStatus(device, expectedLoopId, thresholdMs);
 }
 
 function normalizePlayerStatus(status: string | null | undefined) {
@@ -117,7 +114,7 @@ export async function getDashboardData() {
     const rollingStart = subDays(now, 29);
     const [routing, fleetControl, settings, devices, groups, activity, publishingLoops, playbackLogs] =
       await Promise.all([
-        getPublishedLoopRoutingSnapshot(),
+        getLoopRoutingSnapshot(),
         getFleetControlState(),
         getCmsSettings(),
         prisma.device.findMany({
@@ -125,6 +122,7 @@ export async function getDashboardData() {
           select: {
             id: true,
             serialNumber: true,
+            overrideLoopId: true,
             cabLicenseNumber: true,
             isActive: true,
             isDisabled: true,
@@ -214,8 +212,10 @@ export async function getDashboardData() {
         }
       : null;
 
+    const thresholdMs = offlineThresholdMs(settings.heartbeatIntervalSeconds);
+    const fleetWideLoop = resolveFleetLoop(routing);
     const devicesWithExpectations = devices.map((device) => {
-      const expectedLoop = resolveExpectedLoopForGroup(device.groupId, routing);
+      const expectedLoop = resolveDeviceLoop(device, routing).loop;
       const latestHeartbeat = device.heartbeats[0] ?? null;
       const playerStatus = normalizePlayerStatus(latestHeartbeat?.playerStatus);
 
@@ -224,7 +224,7 @@ export async function getDashboardData() {
         latestHeartbeat,
         expectedLoopId: expectedLoop?.id ?? null,
         expectedLoopName: expectedLoop?.name ?? null,
-        status: resolveDeviceStatus(device, expectedLoop?.id ?? null),
+        status: resolveDeviceStatus(device, expectedLoop?.id ?? null, thresholdMs),
         playerStatus,
       };
     });
@@ -291,7 +291,7 @@ export async function getDashboardData() {
       disabledCount: devicesWithExpectations.filter((device) => device.isDisabled).length,
       journeyCount: statusCounts.journey,
       silentCount: statusCounts.silent,
-      targetLoop: routing.fleetWideLoop,
+      targetLoop: fleetWideLoop,
       href: "/devices",
     };
 
@@ -308,25 +308,25 @@ export async function getDashboardData() {
         disabledCount: members.filter((device) => device.isDisabled).length,
         journeyCount: members.filter((device) => device.playerStatus === "journey").length,
         silentCount: members.filter((device) => device.playerStatus === "silent").length,
-        targetLoop: routing.groupLoops.get(group.id) ?? routing.fleetWideLoop,
+        targetLoop: resolveGroupLoop(group.id, routing).loop,
         href: `/devices?group=${group.id}`,
       };
     });
 
     const activeProgrammes = [
-      ...(routing.fleetWideLoop
+      ...(fleetWideLoop
         ? [
             {
-              id: routing.fleetWideLoop.id,
-              name: routing.fleetWideLoop.name,
+              id: fleetWideLoop.id,
+              name: fleetWideLoop.name,
               audience: "All devices",
-              href: `/loops/${routing.fleetWideLoop.id}`,
-              publishedAt: routing.fleetWideLoop.publishedAt,
+              href: `/loops/${fleetWideLoop.id}`,
+              publishedAt: fleetWideLoop.publishedAt,
             },
           ]
         : []),
       ...groups.flatMap((group) => {
-        const groupLoop = routing.groupLoops.get(group.id);
+        const groupLoop = resolveGroupLevel(group.id, routing).loop;
         if (!groupLoop) {
           return [];
         }
@@ -451,7 +451,7 @@ export async function getDashboardData() {
     return {
       devices: devicesWithExpectations,
       publishedLoop: routing.latestPublishedLoop,
-      fleetWideLoop: routing.fleetWideLoop,
+      fleetWideLoop,
       safetyVideo,
       fleetControl,
       activity,
@@ -863,8 +863,8 @@ export async function getDevicesData({
 } = {}) {
   try {
     const filterGroupId = groupId && groupId !== "ALL" ? groupId : null;
-    const [routing, groups, devices, total, fleetControl] = await Promise.all([
-      getPublishedLoopRoutingSnapshot(),
+    const [routing, groups, devices, total, fleetControl, settings] = await Promise.all([
+      getLoopRoutingSnapshot(),
       prisma.deviceGroup.findMany({
         orderBy: { name: "asc" },
         select: {
@@ -900,13 +900,15 @@ export async function getDevicesData({
         where: filterGroupId ? { groupId: filterGroupId } : undefined,
       }),
       getFleetControlState(),
+      getCmsSettings(),
     ]);
 
     return {
       devices: devices.map((device) => ({
         ...device,
-        expectedLoopId: resolveExpectedLoopForGroup(device.groupId, routing)?.id ?? null,
+        expectedLoopId: resolveDeviceLoop(device, routing).loop?.id ?? null,
       })),
+      offlineThresholdMs: offlineThresholdMs(settings.heartbeatIntervalSeconds),
       groups,
       total,
       page,
@@ -925,6 +927,7 @@ export async function getDevicesData({
       pageSize,
       selectedGroupId: groupId ?? "ALL",
       publishedLoopId: null,
+      offlineThresholdMs: offlineThresholdMs(null),
       fleetControl: {
         disabled: false,
         reason: null,
@@ -941,6 +944,8 @@ export async function getAnalyticsData() {
     const todayStart = startOfDay(today);
     const weekStart = startOfWeek(today, { weekStartsOn: 1 });
     const monthStart = startOfMonth(today);
+    const analyticsSettings = await getCmsSettings();
+    const onlineSince = new Date(Date.now() - offlineThresholdMs(analyticsSettings.heartbeatIntervalSeconds));
     const [dailyLogs, deviceCount, onlineDevices, deviceLocations] = await Promise.all([
       prisma.playbackLog.findMany({
         where: {
@@ -965,7 +970,7 @@ export async function getAnalyticsData() {
         where: {
           isActive: true,
           lastHeartbeatAt: {
-            gte: new Date(Date.now() - 60 * 60 * 1000),
+            gte: onlineSince,
           },
         },
       }),

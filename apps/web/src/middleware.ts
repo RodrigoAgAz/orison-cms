@@ -67,6 +67,12 @@ export async function middleware(request: NextRequest) {
   return NextResponse.redirect(url);
 }
 
+// Large raw-body upload routes are excluded: when middleware runs, Next 14 clones (buffers) the
+// whole request body in memory before the handler starts, so a 500MB upload costs >500MB of RAM
+// and the route cannot reject it early. Those routes authenticate the session themselves.
 export const config = {
-  matcher: ["/((?!.*\\..*).*)", "/api/:path*"],
+  matcher: [
+    "/((?!api/m/upload|api/loops/direct-upload|.*\\..*).*)",
+    "/api/((?!m/upload|loops/direct-upload).*)",
+  ],
 };

@@ -21,6 +21,12 @@ export const env = {
   awsSecretAccessKey: optionalEnv("AWS_SECRET_ACCESS_KEY"),
   deviceSharedToken: requiredEnv("DEVICE_SHARED_TOKEN", "replace-with-device-shared-secret"),
   inlineMediaJobs: requiredEnv("INLINE_MEDIA_JOBS", "true") === "true",
+  // Cell tower geolocation (heartbeats without a GPS fix).
+  openCellIdApiKey: optionalEnv("OPENCELLID_API_KEY"),
+  cellLookupDisablePublic: requiredEnv("CELL_LOOKUP_DISABLE_PUBLIC", "false") === "true",
+  cellLookupBeaconDbUrl: requiredEnv("CELL_LOOKUP_BEACONDB_URL", "https://api.beacondb.net/v1/geolocate"),
+  cellLookupTimeoutMs: Number.parseInt(requiredEnv("CELL_LOOKUP_TIMEOUT_MS", "3000"), 10) || 3000,
+  cellLookupUserAgent: requiredEnv("CELL_LOOKUP_USER_AGENT", "cab-screen-cms/1.0 (cell tower lookup)"),
 };
 
 export const hasS3Config = Boolean(
