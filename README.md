@@ -107,14 +107,15 @@ previous image's `prisma db push` would refuse to drop them, so that container w
 (`--accept-data-loss`) would also make the old routing play the newest library upload on every cab. If
 something is wrong after deploying, fix forward.
 
-Before deploying, run this against the production database:
+Deploying does not change what any existing cab is served. On data that predates explicit assignments
+the resolver picks loops exactly as the previous one did, including published loops with no
+`publishedAt` (still treated as newest) and published loops with no `manifestUrl` (their cabs are still
+served nothing and keep what they have). `apps/web/test/routing.test.ts` checks this against the previous
+algorithm. To see whether you have any such loops, which is worth cleaning up either way:
 
 ```sql
-SELECT id FROM "Loop" WHERE status='PUBLISHED' AND ("publishedAt" IS NULL OR "manifestUrl" IS NULL);
+SELECT id, name FROM "Loop" WHERE status='PUBLISHED' AND ("publishedAt" IS NULL OR "manifestUrl" IS NULL);
 ```
-
-Any rows it returns route differently under the new resolver (a published loop without `publishedAt`
-loses every "newest wins" comparison; one without `manifestUrl` is never served). Look at them first.
 
 New environment variables (all optional):
 

@@ -27,6 +27,7 @@ const routableLoopSelect = {
   version: true,
   checksum: true,
   publishedAt: true,
+  updatedAt: true,
 } satisfies Prisma.LoopSelect;
 
 export type RoutedLoop = Prisma.LoopGetPayload<{ select: typeof routableLoopSelect }>;
@@ -81,6 +82,9 @@ export function resolveGroupLoop(groupId: string, snapshot: LoopRoutingSnapshot)
   const level = resolveGroupLevel(groupId, snapshot);
   if (level.loop) {
     return { loop: level.loop, followsFleet: false };
+  }
+  if (level.blocked) {
+    return { loop: null, followsFleet: false };
   }
   return { loop: resolveFleetLoop(snapshot), followsFleet: true };
 }
