@@ -2795,10 +2795,6 @@ body.m-body.m-noscroll {
   margin: 6vh 0 24px;
 }
 
-.m-login-brand .m-brandmark {
-  filter: drop-shadow(0 8px 22px rgba(232, 183, 62, 0.18));
-}
-
 .m-login-brand h1 {
   font-size: 28px;
   font-weight: 780;

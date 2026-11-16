@@ -220,8 +220,10 @@ function renderCoverage(src, box, width, height, { markHeight, cx = width / 2, c
 // ---------------------------------------------------------------------------------------------
 // Colours (the phone app's palette, src/app/m/mobile.css)
 
-const navyTop = [22, 33, 56];
-const navyBottom = [10, 16, 28];
+// A touch lighter than the app's page background, so the icon's edge still shows on a dark
+// wallpaper (checked on light and dark wallpapers at Home Screen size).
+const navyTop = [32, 47, 78];
+const navyBottom = [14, 22, 38];
 const gold = [232, 183, 62]; // --m-gold
 const goldHi = [243, 201, 90]; // --m-gold-hi
 const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);

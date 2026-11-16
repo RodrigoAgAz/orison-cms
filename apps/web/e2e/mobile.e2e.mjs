@@ -942,10 +942,11 @@ async function openSuite(browser) {
 
   await check("sign out: back to using the app without signing in", async () => {
     await goto(page, "/m/account");
-    await page.getByTestId("sign-out").waitFor();
+    await page.locator('[data-testid="account-card"][data-signed-in="true"]').waitFor();
+    await page.waitForLoadState("networkidle");
     await page.getByTestId("sign-out").click();
-    await page.waitForURL(/\/m\/account$/, { waitUntil: "domcontentloaded" });
     await page.locator('[data-testid="account-card"][data-signed-in="false"]').waitFor();
+    assert(new URL(page.url()).pathname === "/m/account", `stays in the app (${page.url()})`);
     await goto(page, "/m");
     await page.getByTestId("cab-list").waitFor();
     assert(!page.url().includes("/login"), "no sign-in screen");
@@ -1041,6 +1042,9 @@ async function uploadCeilingSuite(browser, base) {
         if (request.method() === "POST" && request.url().includes("/api/m/upload")) posted = true;
       });
       await goto(page, "/m/upload", base);
+      // A fresh dev server may reload a page it has just compiled; let that settle first.
+      await page.waitForLoadState("networkidle");
+      await page.waitForTimeout(1000);
       await page.getByTestId("upload-file").setInputFiles(file);
       await page.getByTestId("upload-name").fill(`E2E ceiling UI ${RUN_ID}`);
       await page.getByTestId("upload-submit").click();
@@ -1081,6 +1085,8 @@ async function signInRequiredSuite(browser, base) {
     await check("sign-in required: /m/videos redirects to sign-in and back", async () => {
       await goto(page, "/m/videos", base);
       await page.waitForURL(/\/m\/login\?next=%2Fm%2Fvideos/);
+      await page.waitForLoadState("networkidle");
+      await page.waitForTimeout(1000);
       await page.locator('[data-testid="login-submit"]:not([disabled])').waitFor();
       assert((await page.getByTestId("login-skip").count()) === 0, "no way round it");
       assert((await page.locator(".m-login-brand p").textContent()).includes("Sign in to see and change what plays"), "old wording");
@@ -1121,7 +1127,8 @@ async function signInRequiredSuite(browser, base) {
 
     await check("sign-in required: sign out goes to the sign-in screen; a phone at the root is sent to sign in", async () => {
       await goto(page, "/m/account", base);
-      await page.waitForFunction(() => (document.querySelector('[data-testid="account-name"]')?.textContent ?? "").trim().length > 1);
+      await page.locator('[data-testid="account-card"][data-signed-in="true"]').waitFor();
+      await page.waitForLoadState("networkidle");
       await page.getByTestId("sign-out").click();
       await page.waitForURL(/\/m\/login/, { waitUntil: "domcontentloaded" });
       await goto(page, "/m", base);

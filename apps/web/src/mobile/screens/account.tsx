@@ -5,7 +5,7 @@ import { useState } from "react";
 
 import { useSessionUser } from "../components/shell";
 import { ChevronIcon, DesktopIcon, LockIcon, PersonIcon, SignOutIcon, TeamIcon } from "../components/icons";
-import { href, Screen, Section, Spinner, TopBar } from "../components/ui";
+import { href, LoadingScreen, Screen, Section, Spinner, TopBar } from "../components/ui";
 import { clearAll } from "../lib/store";
 
 export function roleName(role: string) {
@@ -61,7 +61,17 @@ export function AccountScreen() {
     </li>
   );
 
-  if (user && !user.signedIn) {
+  if (!user) {
+    // Still finding out who this is (signed in or not): show neither version yet.
+    return (
+      <Screen>
+        <TopBar title="Account" large />
+        <LoadingScreen label="Loading your account" />
+      </Screen>
+    );
+  }
+
+  if (!user.signedIn) {
     return (
       <Screen>
         <TopBar title="Account" large />
@@ -102,14 +112,14 @@ export function AccountScreen() {
   return (
     <Screen>
       <TopBar title="Account" large />
-      <div className="m-card m-me" data-testid="account-card" data-signed-in={user ? "true" : undefined}>
+      <div className="m-card m-me" data-testid="account-card" data-signed-in="true">
         <span className="m-avatar" aria-hidden="true">
-          {user ? initials(user.name) : ""}
+          {initials(user.name)}
         </span>
         <div>
-          <strong data-testid="account-name">{user?.name ?? " "}</strong>
-          <span className="m-muted">{user?.email ?? " "}</span>
-          {user ? <span className={`m-role m-role-${user.role.toLowerCase()}`}>{roleName(user.role)}</span> : null}
+          <strong data-testid="account-name">{user.name}</strong>
+          <span className="m-muted">{user.email ?? " "}</span>
+          <span className={`m-role m-role-${user.role.toLowerCase()}`}>{roleName(user.role)}</span>
         </div>
       </div>
 
@@ -126,7 +136,7 @@ export function AccountScreen() {
               <ChevronIcon size={18} className="m-listrow-chev" />
             </Link>
           </li>
-          {user?.role === "ADMIN" ? (
+          {user.role === "ADMIN" ? (
             <li>
               <Link href={href("/m/account/team")} className="m-listrow" data-testid="account-team">
                 <span className="m-listrow-icon">
@@ -150,8 +160,8 @@ export function AccountScreen() {
         </button>
       </Section>
       <p className="m-footnote">
-        {user && !user.signInRequired
-          ? "You don’t need to be signed in to use the app; sign out to carry on without it. Times are shown in London time."
+        {!user.signInRequired
+          ? "Signing in is only needed to manage the team. Times are shown in London time."
           : "Orison Screens. Times are shown in London time."}
       </p>
     </Screen>
