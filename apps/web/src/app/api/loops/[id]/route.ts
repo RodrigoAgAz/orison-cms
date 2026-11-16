@@ -2,6 +2,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@orison/db";
 import { updateLoopSchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse, ApiError, parseJsonBody } from "@/lib/http";
 
 type Props = {
@@ -12,6 +13,7 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const loop = await prisma.loop.findUnique({
       where: { id: params.id },
       include: {
@@ -41,6 +43,7 @@ export async function GET(_: Request, { params }: Props) {
 
 export async function PUT(request: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, updateLoopSchema);
     const loop = await prisma.loop.update({
       where: { id: params.id },
@@ -58,6 +61,7 @@ export async function PUT(request: Request, { params }: Props) {
 
 export async function DELETE(_: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const loop = await prisma.loop.findUnique({
       where: { id: params.id },
     });

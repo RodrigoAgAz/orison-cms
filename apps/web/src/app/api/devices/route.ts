@@ -1,6 +1,8 @@
 import { prisma } from "@orison/db";
 import { deviceRegistrationSchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
+import { publicDevice } from "@/lib/device-public";
 import { logActivity } from "@/lib/activity";
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
 
@@ -11,6 +13,7 @@ function parsePageParam(value: string | null, fallback: number) {
 
 export async function GET(request: Request) {
   try {
+    await requireApiUser();
     const url = new URL(request.url);
     const page = parsePageParam(url.searchParams.get("page"), 1);
     const pageSize = parsePageParam(url.searchParams.get("pageSize"), 25);
@@ -29,7 +32,7 @@ export async function GET(request: Request) {
       prisma.device.count(),
     ]);
 
-    return apiResponse({ items: devices, page, pageSize, total });
+    return apiResponse({ items: devices.map(publicDevice), page, pageSize, total });
   } catch (error) {
     return apiError(error);
   }
@@ -37,6 +40,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, deviceRegistrationSchema);
     const device = await prisma.device.upsert({
       where: { serialNumber: body.serialNumber },
@@ -61,7 +65,7 @@ export async function POST(request: Request) {
       serialNumber: device.serialNumber,
     });
 
-    return apiResponse(device, { status: 201 });
+    return apiResponse(publicDevice(device), { status: 201 });
   } catch (error) {
     return apiError(error);
   }

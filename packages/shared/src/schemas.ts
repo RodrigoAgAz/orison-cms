@@ -91,7 +91,13 @@ export const heartbeatSchema = z.object({
   cpuTemp: z.number().min(0).optional().nullable(),
   uptimeSeconds: z.number().int().min(0).optional().nullable(),
   memoryUsedPercent: z.number().min(0).max(100).optional().nullable(),
-  playerStatus: z.enum(["playing", "silent", "disabled", "idle", "fallback", "error"]).optional().nullable(),
+  // The firmware reports "unknown" until the player has written its first state file. An
+  // unrecognised value must never reject the whole heartbeat, or the cab looks offline.
+  playerStatus: z
+    .enum(["playing", "silent", "disabled", "idle", "fallback", "error", "unknown"])
+    .catch("unknown")
+    .optional()
+    .nullable(),
   networkType: z.enum(["4g", "ethernet", "wifi", "unknown"]).optional().nullable(),
   signalStrength: z.number().int().optional().nullable(),
   location: jsonObjectSchema.nullable().optional(),

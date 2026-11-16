@@ -1,5 +1,6 @@
 node_modules
 .next
+.next-*
 dist
 build
 .turbo
@@ -16,3 +17,4 @@ __pycache__
 *.pyc
 .DS_Store
 packages/db/generated
+*.tsbuildinfo

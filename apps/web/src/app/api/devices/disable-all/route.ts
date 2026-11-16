@@ -2,6 +2,7 @@ import { revalidatePath } from "next/cache";
 
 import { z } from "zod";
 
+import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
 import { setFleetControlState } from "@/lib/fleet-control";
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
@@ -12,6 +13,7 @@ const disableAllSchema = z.object({
 
 export async function PUT(request: Request) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, disableAllSchema);
 
     await setFleetControlState({

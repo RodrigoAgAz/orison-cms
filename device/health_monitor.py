@@ -31,7 +31,11 @@ from common import (
     rewrite_jsonl,
     setup_logger,
 )
+from modem import GpsReader, build_gps_location, parse_qeng_serving_cell
+from sync_signal import SyncRequester, decide_sync_reasons
 
+
+FIRMWARE_VERSION = "1.1.0"  # keep in sync with device/VERSION
 
 AT_PORT_CANDIDATES = [
     Path("/dev/ttyUSB2"),
@@ -47,6 +51,13 @@ class HealthMonitor:
         self.logger = setup_logger("orison-health", "health.log")
         self.session = requests.Session()
         self.last_log_upload_at = 0.0
+        self.at_port: Path | None = None
+        self.sync_requester = SyncRequester()
+        self.gps = GpsReader(
+            at=self.gps_at,
+            enabled=self.config.gps_enabled,
+            logger=self.logger,
+        )
 
     def run(self) -> None:
         ensure_directories()
@@ -95,6 +106,30 @@ class HealthMonitor:
         )
         response.raise_for_status()
         self.logger.info("heartbeat sent")
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        self.request_sync_if_needed(body)
+
+    def request_sync_if_needed(self, body: object) -> bool:
+        """Compare the server's expectations with local state; ask sync_agent to sync now if they differ."""
+        manifest = read_json(current_manifest_path(), {}) or {}
+        player_state = read_json(PLAYER_STATE_PATH, {}) or {}
+        local_disabled = player_state.get("disabled")
+        reasons = decide_sync_reasons(
+            body,
+            manifest.get("loopId"),
+            manifest.get("checksum"),
+            local_disabled if isinstance(local_disabled, bool) else None,
+        )
+        if not reasons:
+            return False
+        expected = {k: body.get(k) for k in ("expectedLoopId", "expectedChecksum", "disabled")}
+        written = self.sync_requester.maybe_request(reasons, expected)
+        if written:
+            self.logger.info("requested immediate sync: %s", ",".join(reasons))
+        return written
 
     def upload_logs(self) -> None:
         items = read_jsonl(PLAYBACK_LOG_PATH)
@@ -140,7 +175,7 @@ class HealthMonitor:
         version_path = BASE_DIR / "VERSION"
         if version_path.exists():
             return version_path.read_text(encoding="utf-8").strip()
-        return "1.0.0"
+        return FIRMWARE_VERSION
 
     def write_runtime_location(self, location: dict | None) -> None:
         if location is None:
@@ -162,22 +197,43 @@ class HealthMonitor:
         if platform.system() == "Darwin":
             return None
 
-        return self.location_via_serial() or self.location_via_nmcli()
+        cell = self.location_via_serial()
+        fix = self.gps.read() if self.at_port is not None else None
+        if fix:
+            return build_gps_location(fix, cell)
+        return cell or self.location_via_nmcli()
 
     def location_via_serial(self) -> dict | None:
-        for port in AT_PORT_CANDIDATES:
+        candidates = list(AT_PORT_CANDIDATES)
+        if self.at_port in candidates:
+            candidates.remove(self.at_port)
+            candidates.insert(0, self.at_port)
+
+        for port in candidates:
             if not port.exists():
                 continue
 
             response = self.run_at_command(port, 'AT+QENG="servingcell"')
+            if "OK" in response or "+QENG" in response:
+                self.at_port = port  # this is the AT port (also used for GNSS), even if SEARCHing
             parsed = self.parse_qeng_serving_cell(response)
             if parsed:
                 return parsed
+            if self.at_port == port:
+                break
 
         return None
 
-    def run_at_command(self, port: Path, command: str) -> str:
-        fd = os.open(str(port), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    def gps_at(self, command: str, timeout_s: float) -> str:
+        if self.at_port is None:
+            return ""
+        return self.run_at_command(self.at_port, command, timeout_s)
+
+    def run_at_command(self, port: Path, command: str, timeout_s: float = 1.5) -> str:
+        try:
+            fd = os.open(str(port), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError:
+            return ""
         try:
             attrs = termios.tcgetattr(fd)
             attrs[0] = 0
@@ -189,25 +245,28 @@ class HealthMonitor:
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
             os.write(fd, b"\r")
-            time.sleep(0.1)
+            time.sleep(0.05)
             try:
                 os.read(fd, 4096)
             except BlockingIOError:
                 pass
 
             os.write(fd, f"{command}\r".encode("utf-8"))
-            time.sleep(0.35)
 
             chunks: list[bytes] = []
-            deadline = time.monotonic() + 1.5
+            deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
                 try:
                     chunk = os.read(fd, 4096)
                     if not chunk:
                         break
                     chunks.append(chunk)
+                    tail = b"".join(chunks)
+                    # Final result code reached: stop waiting instead of burning the full timeout.
+                    if re.search(rb"(^|\r\n)(OK|ERROR|\+CME ERROR:[^\r\n]*)\r\n", tail):
+                        break
                 except BlockingIOError:
-                    time.sleep(0.05)
+                    time.sleep(0.03)
 
             return b"".join(chunks).decode("utf-8", errors="ignore")
         except OSError:
@@ -216,37 +275,7 @@ class HealthMonitor:
             os.close(fd)
 
     def parse_qeng_serving_cell(self, response: str) -> dict | None:
-        for raw_line in response.splitlines():
-            line = raw_line.strip()
-            if not line.startswith("+QENG:") or "servingcell" not in line:
-                continue
-
-            parts = [part.strip().strip('"') for part in re.findall(r'"[^"]*"|[^,]+', line)]
-            if len(parts) < 8:
-                continue
-
-            numeric_tokens = [token for token in parts if re.fullmatch(r"-?\d+", token)]
-            if len(numeric_tokens) < 4:
-                continue
-
-            signal_strength = None
-            for token in reversed(numeric_tokens):
-                value = int(token)
-                if -150 <= value <= 0:
-                    signal_strength = value
-                    break
-
-            return {
-                "method": "cell_tower",
-                "mcc": numeric_tokens[0],
-                "mnc": numeric_tokens[1],
-                "lac": numeric_tokens[2],
-                "cellId": numeric_tokens[3],
-                "signalStrength": signal_strength,
-                "raw": line,
-            }
-
-        return None
+        return parse_qeng_serving_cell(response)
 
     def location_via_nmcli(self) -> dict | None:
         if not shutil.which("nmcli"):

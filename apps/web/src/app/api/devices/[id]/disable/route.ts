@@ -4,6 +4,8 @@ import { z } from "zod";
 
 import { prisma } from "@orison/db";
 
+import { requireApiUser } from "@/lib/auth";
+import { publicDevice } from "@/lib/device-public";
 import { logActivity } from "@/lib/activity";
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
 
@@ -19,6 +21,7 @@ type Props = {
 
 export async function PUT(request: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, disableSchema);
     const device = await prisma.device.update({
       where: { id: params.id },
@@ -37,8 +40,11 @@ export async function PUT(request: Request, { params }: Props) {
     revalidatePath("/");
     revalidatePath("/devices");
 
-    return apiResponse(device);
+    return apiResponse(publicDevice(device));
   } catch (error) {
     return apiError(error);
   }
 }
+
+/** Mobile app (CONTRACT.md) uses POST; same behaviour as PUT. */
+export const POST = PUT;

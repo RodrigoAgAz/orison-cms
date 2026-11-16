@@ -1,10 +1,12 @@
 import { prisma } from "@orison/db";
 import { subDays } from "date-fns";
 
+import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse } from "@/lib/http";
 
 export async function GET() {
   try {
+    await requireApiUser();
     const since = subDays(new Date(), 30);
     const [slotCounts, adCounts] = await Promise.all([
       prisma.playbackLog.groupBy({

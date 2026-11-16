@@ -3,6 +3,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@orison/db";
 import { deviceGroupInputSchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
 import { apiError, apiResponse, ApiError, parseJsonBody } from "@/lib/http";
 
@@ -14,6 +15,7 @@ type Props = {
 
 export async function PUT(request: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, deviceGroupInputSchema);
     const group = await prisma.deviceGroup.update({
       where: { id: params.id },
@@ -39,6 +41,7 @@ export async function PUT(request: Request, { params }: Props) {
 
 export async function DELETE(_: Request, { params }: Props) {
   try {
+    await requireApiUser();
     const group = await prisma.deviceGroup.findUnique({
       where: { id: params.id },
       include: {

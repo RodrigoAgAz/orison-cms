@@ -3,11 +3,13 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@orison/db";
 import { deviceGroupInputSchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
 
 export async function GET() {
   try {
+    await requireApiUser();
     const groups = await prisma.deviceGroup.findMany({
       orderBy: { name: "asc" },
       include: {
@@ -28,6 +30,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, deviceGroupInputSchema);
     const group = await prisma.deviceGroup.create({
       data: {

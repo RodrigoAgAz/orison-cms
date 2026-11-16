@@ -40,7 +40,7 @@ export default async function DevicesPage({ searchParams }: Props) {
           ...device,
           lastSyncAt: device.lastSyncAt?.toISOString() ?? null,
           lastHeartbeatAt: device.lastHeartbeatAt?.toISOString() ?? null,
-          status: resolveDeviceStatus(device, device.expectedLoopId),
+          status: resolveDeviceStatus(device, device.expectedLoopId, result.offlineThresholdMs),
           heartbeats: device.heartbeats.map((heartbeat) => ({
             ...heartbeat,
             receivedAt: heartbeat.receivedAt.toISOString(),

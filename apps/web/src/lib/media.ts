@@ -18,6 +18,11 @@ type MediaMetadata = {
   height?: number | null;
   videoCodec?: string | null;
   audioCodec?: string | null;
+  pixFmt?: string | null;
+  colorTransfer?: string | null;
+  /** Display rotation in degrees from the display matrix / rotate tag (0 when none). */
+  rotation?: number;
+  hasVideo?: boolean;
 };
 
 export async function commandExists(command: string) {
@@ -30,15 +35,22 @@ export async function commandExists(command: string) {
 }
 
 async function ffprobe(filePath: string) {
-  const { stdout } = await execFileAsync("ffprobe", [
-    "-v",
-    "error",
-    "-print_format",
-    "json",
-    "-show_streams",
-    "-show_format",
-    filePath,
-  ]);
+  const isUrl = /^https?:\/\//.test(filePath);
+  const { stdout } = await execFileAsync(
+    "ffprobe",
+    [
+      // A signed object-storage URL: fail on a stalled connection instead of hanging.
+      ...(isUrl ? ["-rw_timeout", "30000000"] : []),
+      "-v",
+      "error",
+      "-print_format",
+      "json",
+      "-show_streams",
+      "-show_format",
+      filePath,
+    ],
+    { timeout: 2 * 60 * 1000, maxBuffer: 16 * 1024 * 1024 },
+  );
 
   return JSON.parse(stdout) as {
     streams?: Array<{
@@ -46,11 +58,22 @@ async function ffprobe(filePath: string) {
       codec_name?: string;
       width?: number;
       height?: number;
+      pix_fmt?: string;
+      color_transfer?: string;
+      tags?: Record<string, string>;
+      side_data_list?: Array<{ rotation?: number | string }>;
     }>;
     format?: {
       duration?: string;
     };
   };
+}
+
+function readRotation(stream: { tags?: Record<string, string>; side_data_list?: Array<{ rotation?: number | string }> } | undefined) {
+  const fromSideData = stream?.side_data_list?.find((entry) => entry.rotation !== undefined)?.rotation;
+  const raw = fromSideData ?? stream?.tags?.rotate;
+  const value = typeof raw === "number" ? raw : Number.parseFloat(raw ?? "0");
+  return Number.isFinite(value) ? Math.round(value) % 360 : 0;
 }
 
 export async function extractMetadata(
@@ -72,6 +95,10 @@ export async function extractMetadata(
     height: videoStream?.height,
     videoCodec: videoStream?.codec_name,
     audioCodec: audioStream?.codec_name,
+    pixFmt: videoStream?.pix_fmt ?? null,
+    colorTransfer: videoStream?.color_transfer ?? null,
+    rotation: readRotation(videoStream),
+    hasVideo: Boolean(videoStream),
   };
 }
 

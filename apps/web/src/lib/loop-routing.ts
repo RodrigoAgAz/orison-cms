@@ -1,68 +1,98 @@
-import { prisma } from "@orison/db";
+import { prisma, type Prisma } from "@orison/db";
 
-type PublishedLoopRecord = {
-  id: string;
-  name: string;
-  targetGroupId: string | null;
-  manifestUrl: string | null;
-  compiledVideoUrl: string | null;
-  version: number;
-  checksum: string | null;
-  publishedAt: Date | null;
-};
+import {
+  buildRoutingSnapshot,
+  resolveDeviceLoop,
+  resolveFleetLoop,
+  resolveGroupLevel,
+  type FleetAssignment,
+  type RoutingSnapshot,
+} from "./routing-core";
 
-export type PublishedLoopRoutingSnapshot = {
-  latestPublishedLoop: PublishedLoopRecord | null;
-  fleetWideLoop: PublishedLoopRecord | null;
-  groupLoops: Map<string, PublishedLoopRecord>;
-};
+export { resolveDeviceLoop, resolveFleetLoop, resolveGroupLevel, isServableLoop } from "./routing-core";
+export type { ExpectedSource, Resolution } from "./routing-core";
 
-export async function getPublishedLoopRoutingSnapshot(): Promise<PublishedLoopRoutingSnapshot> {
-  const publishedLoops = await prisma.loop.findMany({
-    where: { status: "PUBLISHED" },
-    orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
-    select: {
-      id: true,
-      name: true,
-      targetGroupId: true,
-      manifestUrl: true,
-      compiledVideoUrl: true,
-      version: true,
-      checksum: true,
-      publishedAt: true,
-    },
-  });
+export const FLEET_LOOP_ASSIGNMENT_KEY = "fleet-loop-assignment";
 
-  let fleetWideLoop: PublishedLoopRecord | null = null;
-  const groupLoops = new Map<string, PublishedLoopRecord>();
+const routableLoopSelect = {
+  id: true,
+  name: true,
+  status: true,
+  targetGroupId: true,
+  autoLive: true,
+  manifestUrl: true,
+  compiledVideoUrl: true,
+  compiledVideoKey: true,
+  posterKey: true,
+  version: true,
+  checksum: true,
+  publishedAt: true,
+  updatedAt: true,
+} satisfies Prisma.LoopSelect;
 
-  for (const loop of publishedLoops) {
-    if (loop.targetGroupId) {
-      if (!groupLoops.has(loop.targetGroupId)) {
-        groupLoops.set(loop.targetGroupId, loop);
-      }
-      continue;
-    }
+export type RoutedLoop = Prisma.LoopGetPayload<{ select: typeof routableLoopSelect }>;
+export type LoopRoutingSnapshot = RoutingSnapshot<RoutedLoop>;
 
-    if (!fleetWideLoop) {
-      fleetWideLoop = loop;
-    }
+function parseFleetAssignment(value: unknown): FleetAssignment | null {
+  if (!value || typeof value !== "object") {
+    return null;
   }
-
+  const record = value as Record<string, unknown>;
+  if (typeof record.loopId !== "string" || typeof record.assignedAt !== "string") {
+    return null;
+  }
+  const assignedAt = new Date(record.assignedAt);
+  if (Number.isNaN(assignedAt.getTime())) {
+    return null;
+  }
   return {
-    latestPublishedLoop: publishedLoops[0] ?? null,
-    fleetWideLoop,
-    groupLoops,
+    loopId: record.loopId,
+    assignedAt,
+    assignedBy: typeof record.assignedBy === "string" ? record.assignedBy : null,
   };
 }
 
-export function resolveExpectedLoopForGroup(
-  groupId: string | null | undefined,
-  snapshot: PublishedLoopRoutingSnapshot,
-) {
-  if (groupId) {
-    return snapshot.groupLoops.get(groupId) ?? snapshot.fleetWideLoop;
-  }
+export async function getFleetAssignment() {
+  const row = await prisma.systemSetting.findUnique({ where: { key: FLEET_LOOP_ASSIGNMENT_KEY } });
+  return parseFleetAssignment(row?.value);
+}
 
-  return snapshot.fleetWideLoop;
+export async function setFleetAssignment(loopId: string, assignedBy: string | null, at = new Date()) {
+  const value = { loopId, assignedAt: at.toISOString(), assignedBy };
+  await prisma.systemSetting.upsert({
+    where: { key: FLEET_LOOP_ASSIGNMENT_KEY },
+    update: { value },
+    create: { key: FLEET_LOOP_ASSIGNMENT_KEY, value },
+  });
+}
+
+/** Loads everything the resolver needs in three queries. */
+export async function getLoopRoutingSnapshot(): Promise<LoopRoutingSnapshot> {
+  const [loops, groups, fleetAssignment] = await Promise.all([
+    prisma.loop.findMany({ where: { status: "PUBLISHED" }, select: routableLoopSelect }),
+    prisma.deviceGroup.findMany({ select: { id: true, assignedLoopId: true, assignmentAt: true } }),
+    getFleetAssignment(),
+  ]);
+
+  return buildRoutingSnapshot({ loops, groups, fleetAssignment });
+}
+
+/** Effective loop for a group's members (no cab override), plus whether it comes from the fleet. */
+export function resolveGroupLoop(groupId: string, snapshot: LoopRoutingSnapshot) {
+  const level = resolveGroupLevel(groupId, snapshot);
+  if (level.loop) {
+    return { loop: level.loop, followsFleet: false };
+  }
+  if (level.blocked) {
+    return { loop: null, followsFleet: false };
+  }
+  return { loop: resolveFleetLoop(snapshot), followsFleet: true };
+}
+
+export async function resolveExpectedLoopForDevice(device: {
+  overrideLoopId: string | null;
+  groupId: string | null;
+}) {
+  const snapshot = await getLoopRoutingSnapshot();
+  return resolveDeviceLoop(device, snapshot);
 }

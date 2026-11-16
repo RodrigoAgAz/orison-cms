@@ -16,6 +16,9 @@
     "typecheck": "npm run typecheck --workspace @orison/shared && npm run typecheck --workspace @orison/db && npm run typecheck --workspace @orison/web && npm run typecheck --workspace @orison/worker",
     "db:generate": "npm run prisma:generate --workspace @orison/db",
     "db:push": "npm run prisma:push --workspace @orison/db",
-    "db:seed": "npm run prisma:seed --workspace @orison/db"
+    "db:seed": "npm run prisma:seed --workspace @orison/db",
+    "test": "node --import tsx --test apps/web/test/*.test.ts",
+    "demo:seed": "node --import tsx scripts/demo/seed.ts",
+    "demo:heartbeat": "node --import tsx scripts/demo/heartbeat.ts"
   }
 }

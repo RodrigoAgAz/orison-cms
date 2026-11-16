@@ -2,6 +2,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@orison/db";
 import { createLoopSchema } from "@orison/shared";
 
+import { requireApiUser } from "@/lib/auth";
 import { createLoopDraft } from "@/lib/loops";
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
 
@@ -12,6 +13,7 @@ function parsePageParam(value: string | null, fallback: number) {
 
 export async function GET(request: Request) {
   try {
+    await requireApiUser();
     const url = new URL(request.url);
     const page = parsePageParam(url.searchParams.get("page"), 1);
     const pageSize = parsePageParam(url.searchParams.get("pageSize"), 25);
@@ -39,6 +41,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    await requireApiUser();
     const body = await parseJsonBody(request, createLoopSchema);
     const loop = await createLoopDraft(body.name);
     revalidatePath("/");

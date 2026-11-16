@@ -19,6 +19,15 @@ export default async function RootLayout({
 }>) {
   const pathname = headers().get("x-orison-pathname") ?? "";
   const isDevicePreview = pathname.startsWith("/device-preview");
+  // The phone app at /m brings its own shell, stylesheet and metadata (src/app/m/layout.tsx).
+  const isMobileApp = pathname === "/m" || pathname.startsWith("/m/");
+  if (isMobileApp) {
+    return (
+      <html lang="en-GB">
+        <body className="m-body">{children}</body>
+      </html>
+    );
+  }
   const user = await getSessionUser();
 
   return (

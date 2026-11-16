@@ -16,6 +16,9 @@
     "screenResolution": "1280x800",
     "fallbackContentPath": "/opt/orison/content/fallback/orison_fallback.mp4"
   },
+  "location": {
+    "gpsEnabled": true
+  },
   "health": {
     "heartbeatIntervalSeconds": 300,
     "logUploadIntervalSeconds": 3600,

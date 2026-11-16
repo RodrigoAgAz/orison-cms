@@ -99,6 +99,57 @@ Provisioning flow:
 4. Place fallback media at `/opt/orison/content/fallback/orison_fallback.mp4`.
 5. Enable and start the systemd services.
 
+## Deploying and rolling back
+
+This release (phone app at `/m`, per-cab content, cab locations, firmware 1.1.0) is **roll-forward only**.
+It adds columns, a table and enum values that the container applies with `prisma db push` on start. The
+previous image's `prisma db push` would refuse to drop them, so that container would not start; forcing it
+(`--accept-data-loss`) would also make the old routing play the newest library upload on every cab. If
+something is wrong after deploying, fix forward.
+
+Deploying does not change what any existing cab is served. On data that predates explicit assignments
+the resolver picks loops exactly as the previous one did, including published loops with no
+`publishedAt` (still treated as newest) and published loops with no `manifestUrl` (their cabs are still
+served nothing and keep what they have). `apps/web/test/routing.test.ts` checks this against the previous
+algorithm. To see whether you have any such loops, which is worth cleaning up either way:
+
+```sql
+SELECT id, name FROM "Loop" WHERE status='PUBLISHED' AND ("publishedAt" IS NULL OR "manifestUrl" IS NULL);
+```
+
+New environment variables (all optional):
+
+- `REQUEST_TIMEOUT_SECONDS` (default `1800`): how long a request body may take to arrive, for phone
+  uploads over mobile data. Set by `apps/web/scripts/server-timeouts.cjs`, which `npm run start` (the
+  Docker `CMD`) preloads. The proxy in front of the app must allow at least as long, or it cuts the
+  upload off first.
+- `OPENCELLID_API_KEY`, `CELL_LOOKUP_DISABLE_PUBLIC`, `CELL_LOOKUP_BEACONDB_URL`, `CELL_LOOKUP_TIMEOUT_MS`,
+  `CELL_LOOKUP_USER_AGENT`: cell-tower lookup for cabs without a GPS fix (see `.env.example`).
+
+Behaviour changes to expect:
+
+- The desktop site now shows a cab as offline after 3 missed heartbeats (15 minutes with the default
+  5-minute heartbeat, never less than 10 minutes) instead of after an hour.
+- Cabs on firmware before 1.1.0 (every cab in the field at deploy time) only pick up changes every
+  30 minutes; the phone app says so. After the firmware update they change within one heartbeat.
+- Signing in now lasts 30 days. Changing a password, an admin password reset, a role change or deleting
+  a user signs that person out everywhere (the person changing their own password stays signed in on
+  that device).
+
+Firmware rollout (cab Raspberry Pis, `device/`):
+
+1. Test on one cab first. Package `device/` as a tarball, then on that Pi run
+   `./update.sh <tarball URL>` (stops the services, copies the files including `VERSION`, starts them).
+2. Fit the GNSS antenna to the modem's GNSS port. Without it the cab still works and reports an
+   approximate position from the mobile mast. GPS is on unless `location.gpsEnabled` is `false` in
+   `/opt/orison/config.json`; older config files without that section are fine.
+3. Check that cab in the phone app: software version `1.1.0` under Technical details, a GPS position,
+   and that a change of video reaches it within about 5 minutes. Then update the rest.
+
+Installing the phone app on an iPhone: open the site in **Safari** (phones are sent to `/m`), sign in, tap
+**Share**, then **Add to Home Screen**. It then opens full screen like an app. Each person signs in with
+their own account; admins add teammates under Account > Team.
+
 ## Operational Notes
 
 - The pilot uses a single compiled loop file for simpler device playback.

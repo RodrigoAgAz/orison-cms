@@ -13,6 +13,9 @@ model User {
   passwordHash String
   name         String
   role         Role     @default(EDITOR)
+  // Carried in the session token; bumping it signs the user out everywhere (password change,
+  // admin reset, role change). See lib/auth.ts.
+  sessionVersion Int    @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
@@ -28,6 +31,11 @@ model DeviceGroup {
   description String?
   devices     Device[]
   loops       Loop[]
+  // Explicit loop assignment for this group (mobile app). assignmentAt set with
+  // assignedLoopId null means "follow the fleet". See lib/loop-routing.ts.
+  assignedLoopId String?
+  assignmentAt   DateTime?
+  assignedBy     String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
@@ -85,6 +93,15 @@ model Loop {
   manifestKey      String?
   compiledVideoUrl String?
   compiledVideoKey String?
+  // false for phone uploads: they only go live through an explicit assignment.
+  autoLive         Boolean     @default(true)
+  durationMs       Int?
+  posterKey        String?
+  // Assignment target requested at upload time, applied once processing succeeds.
+  pendingTarget    Json?
+  // When the upload with pendingTarget was requested; null once the target has been applied or
+  // skipped (a newer change to the same target wins). Non-null on a PUBLISHED loop = still applying.
+  pendingTargetAt  DateTime?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 }
@@ -151,6 +168,16 @@ model Device {
   storageFreeMb    Int?
   notes            String?
   apiTokenHash     String?
+  // Per-cab loop override (sticky until cleared).
+  overrideLoopId   String?
+  overrideAt       DateTime?
+  overrideBy       String?
+  // Best-known position, resolved from heartbeats (gps fix or cell tower lookup).
+  locationLat      Float?
+  locationLng      Float?
+  locationAccuracyM Float?
+  locationSource   String?
+  locationAt       DateTime?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   playbackLogs     PlaybackLog[]
@@ -226,10 +253,41 @@ enum ActivityEventType {
   DEVICE_DISABLED
   DEVICE_ENABLED
   SYNC_FAILED
+  LOOP_ASSIGNED
+  LOOP_ARCHIVED
+  LOOP_UPLOAD_FAILED
+  LOOP_UPLOAD_DISCARDED
+  LOOP_ASSIGNMENT_SKIPPED
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  USER_PASSWORD_CHANGED
 }
 
 model SystemSetting {
   key       String   @id
   value     Json
   updatedAt DateTime @updatedAt
+}
+
+// Cache of cell tower -> coordinates lookups (positive and negative).
+model CellTowerLocation {
+  id          String    @id @default(cuid())
+  radio       String
+  mcc         Int
+  mnc         Int
+  lac         Int
+  cellId      Int
+  found       Boolean
+  lat         Float?
+  lng         Float?
+  accuracyM   Float?
+  provider    String?
+  // For misses/errors: do not query providers again before this time.
+  retryAfter  DateTime?
+  lookedUpAt  DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([radio, mcc, mnc, lac, cellId])
 }

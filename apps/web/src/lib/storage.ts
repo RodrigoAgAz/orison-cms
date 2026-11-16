@@ -12,6 +12,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import { env, hasS3Config } from "./env";
+import { writeBodyToFile } from "./stream-to-file";
 
 const localStorageRoot = path.join(process.cwd(), "tmp", "storage");
 const isProduction = process.env.NODE_ENV === "production";
@@ -201,6 +202,7 @@ async function responseBodyToBuffer(body: Readable) {
   return Buffer.concat(chunks);
 }
 
+/** Whole object in memory. Only for small objects (posters, manifests); use downloadObjectToFile otherwise. */
 export async function readObject(key: string) {
   requireObjectStorage();
 
@@ -222,10 +224,53 @@ export async function readObject(key: string) {
   return readFile(localPathForKey(key));
 }
 
+/**
+ * Copy an object to a local file. Streams from S3 straight to disk (never buffers the object:
+ * compiled loops are 100-300MB and this process also serves cab heartbeats).
+ */
 export async function downloadObjectToFile(key: string, filePath: string) {
   requireObjectStorage();
-  const buffer = await readObject(key);
+  if (s3Client && env.s3Bucket) {
+    const response = await s3Client.send(new GetObjectCommand({ Bucket: env.s3Bucket, Key: key }));
+    if (!response.Body) {
+      throw new Error(`Missing body while reading ${key}`);
+    }
+    return writeBodyToFile(response.Body, filePath);
+  }
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, buffer);
+  await copyFile(localPathForKey(key), filePath);
   return filePath;
+}
+
+/**
+ * A URL ffmpeg/ffprobe can read the object from directly (with HTTP range requests), so a still
+ * can be taken from a large video without downloading it. Local storage: the file path.
+ */
+export async function getObjectReadLocation(key: string, expiresIn = 15 * 60) {
+  requireObjectStorage();
+  if (s3Client && env.s3Bucket) {
+    return { kind: "url" as const, location: await getSignedAssetUrl(key, expiresIn) };
+  }
+  return { kind: "file" as const, location: localPathForKey(key) };
+}
+
+/**
+ * Local-disk storage only: absolute path and stats for a key, or null if it does not exist.
+ * Used to stream files (with HTTP Range support) instead of buffering them.
+ */
+export async function statLocalObject(key: string) {
+  requireObjectStorage();
+  if (hasRemoteObjectStorage()) {
+    return null;
+  }
+  const filePath = localPathForKey(key);
+  if (!filePath.startsWith(localStorageRoot + path.sep)) {
+    return null;
+  }
+  try {
+    const stats = await stat(filePath);
+    return stats.isFile() ? { filePath, size: stats.size, mtime: stats.mtime } : null;
+  } catch {
+    return null;
+  }
 }
