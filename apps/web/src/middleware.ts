@@ -1,6 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
 
+import { isPhoneAppApiRoute, isPhoneAppPage, phoneAppRequiresSignIn, PHONE_APP_REQUIRE_SIGN_IN_ENV } from "./lib/phone-access";
+
 const publicPrefixes = [
   "/login",
   "/m/login",
@@ -31,15 +33,26 @@ async function hasValidSession(request: NextRequest) {
   }
 }
 
+// Nothing on this site is meant for search engines (see also src/app/robots.ts). The phone app and
+// its API can be opened without signing in, so every response that passes through here says so.
+const robotsHeader = "noindex, nofollow, noarchive, nosnippet";
+
+function noIndex<T extends NextResponse>(response: T) {
+  response.headers.set("X-Robots-Tag", robotsHeader);
+  return response;
+}
+
 function continueWithPathname(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-orison-pathname", request.nextUrl.pathname);
 
-  return NextResponse.next({
-    request: {
-      headers: requestHeaders,
-    },
-  });
+  return noIndex(
+    NextResponse.next({
+      request: {
+        headers: requestHeaders,
+      },
+    }),
+  );
 }
 
 // Phones get the mobile app (/m) at the site root; tablets and desktops keep the desktop app.
@@ -47,9 +60,7 @@ const phoneUserAgent = /iPhone|iPod|Android.+Mobile|Windows Phone|Mobile.+Firefo
 // Set by the "Use the desktop site" link in the mobile app (/?view=desktop).
 const viewCookieName = "orison_view";
 
-function isMobilePath(pathname: string) {
-  return pathname === "/m" || pathname.startsWith("/m/");
-}
+const isMobilePath = isPhoneAppPage;
 
 function mobileEntryRedirect(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
@@ -91,7 +102,7 @@ export async function middleware(request: NextRequest) {
 
   const entryRedirect = mobileEntryRedirect(request);
   if (entryRedirect) {
-    return entryRedirect;
+    return noIndex(entryRedirect);
   }
 
   if (publicPrefixes.some((prefix) => pathname.startsWith(prefix))) {
@@ -103,8 +114,17 @@ export async function middleware(request: NextRequest) {
     return continueWithPathname(request);
   }
 
+  // Open phone app (the default; PHONE_APP_REQUIRE_SIGN_IN=true turns it off at runtime): its pages
+  // and the API routes it uses need no session. The routes themselves record the caller as the
+  // shared "not signed in" identity and still refuse anything that needs a real user.
+  if (!phoneAppRequiresSignIn(process.env[PHONE_APP_REQUIRE_SIGN_IN_ENV])) {
+    if (isMobilePath(pathname) || isPhoneAppApiRoute(request.method, pathname)) {
+      return continueWithPathname(request);
+    }
+  }
+
   if (pathname.startsWith("/api/")) {
-    return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
+    return noIndex(NextResponse.json({ error: "Unauthenticated" }, { status: 401 }));
   }
 
   const url = request.nextUrl.clone();
@@ -114,11 +134,11 @@ export async function middleware(request: NextRequest) {
     url.pathname = "/m/login";
     url.search = "";
     url.searchParams.set("next", next);
-    return NextResponse.redirect(url);
+    return noIndex(NextResponse.redirect(url));
   }
   url.pathname = "/login";
   url.searchParams.set("next", pathname);
-  return NextResponse.redirect(url);
+  return noIndex(NextResponse.redirect(url));
 }
 
 // Large raw-body upload routes are excluded: when middleware runs, Next 14 clones (buffers) the

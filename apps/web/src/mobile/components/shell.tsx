@@ -26,7 +26,8 @@ export function useSessionUser() {
 }
 
 export function MobileShell({ children }: { children: React.ReactNode }) {
-  // Renews the 30-day session on every app start (sliding expiry) and tells us who is signed in.
+  // Renews the 30-day session on every app start (sliding expiry) and tells us who is signed in
+  // (or, with nobody signed in, the shared identity the open phone app acts as).
   const me = useResource<SessionUser>("/api/auth/me", { refreshMs: 0 });
   return (
     <SessionContext.Provider value={me.data}>

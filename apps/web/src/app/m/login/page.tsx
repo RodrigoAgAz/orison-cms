@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
-import { getSessionUser } from "@/lib/auth";
+import { getSessionUser, phoneAppSignInRequired } from "@/lib/auth";
 import { LoginScreen } from "@/mobile/screens/login";
 
 export const metadata: Metadata = { title: "Sign in" };
@@ -21,5 +21,5 @@ export default async function MobileLoginPage({ searchParams }: { searchParams: 
   if (await getSessionUser()) {
     redirect(next as never);
   }
-  return <LoginScreen next={next} />;
+  return <LoginScreen next={next} signInRequired={phoneAppSignInRequired()} />;
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireApiUser } from "@/lib/auth";
+import { requirePhoneAppActor } from "@/lib/auth";
 import { apiError, ApiError } from "@/lib/http";
 import { ensureLoopPoster } from "@/lib/loops";
 import { getStorageRouteRedirectUrl, readObject } from "@/lib/storage";
@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 /** JPEG still of a loop, generated lazily from the compiled video and cached in storage. */
 export async function GET(request: Request, { params }: { params: { id: string } }) {
   try {
-    await requireApiUser();
+    await requirePhoneAppActor();
     const posterKey = await ensureLoopPoster(params.id);
     if (!posterKey) {
       throw new ApiError("This loop has no video yet", 404);

@@ -1,11 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
-import { Notice, Screen, Spinner, TopBar } from "../components/ui";
+import { LockIcon } from "../components/icons";
+import { useSessionUser } from "../components/shell";
+import { EmptyState, href, Notice, Screen, Spinner, TopBar } from "../components/ui";
 import { api } from "../lib/api";
+import { signInHref } from "./account";
 
 export function PasswordScreen() {
+  const me = useSessionUser();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
@@ -37,6 +42,25 @@ export function PasswordScreen() {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (me && !me.signedIn) {
+    return (
+      <Screen>
+        <TopBar title="Change password" back={{ fallback: "/m/account", label: "Account" }} />
+        <EmptyState
+          icon={<LockIcon size={28} />}
+          title="Sign in first"
+          action={
+            <Link href={href(signInHref("/m/account/password"))} className="m-btn m-btn-primary">
+              Sign in
+            </Link>
+          }
+        >
+          You&rsquo;re not signed in, so there is no password to change here.
+        </EmptyState>
+      </Screen>
+    );
   }
 
   return (

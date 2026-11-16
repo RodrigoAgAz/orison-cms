@@ -5,7 +5,11 @@ import { useEffect, useState } from "react";
 import { BrandMark } from "../components/icons";
 import { Notice, Spinner } from "../components/ui";
 
-export function LoginScreen({ next }: { next: string }) {
+/**
+ * `signInRequired`: PHONE_APP_REQUIRE_SIGN_IN is set, so the whole phone app needs sign-in.
+ * Otherwise (the default) signing in is only for managing the team and changing a password.
+ */
+export function LoginScreen({ next, signInRequired }: { next: string; signInRequired: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The button stays disabled until the page is interactive, so a quick tap can't submit the
@@ -44,9 +48,13 @@ export function LoginScreen({ next }: { next: string }) {
     <div className="m-app m-login">
       <main className="m-login-main">
         <div className="m-login-brand">
-          <BrandMark size={64} />
+          <BrandMark size={84} />
           <h1>Orison Screens</h1>
-          <p>Sign in to see and change what plays in your cabs.</p>
+          <p>
+            {signInRequired
+              ? "Sign in to see and change what plays in your cabs."
+              : "Sign in to manage the team or change your password. You don’t need to sign in to use the app."}
+          </p>
         </div>
         <form className="m-form m-card" onSubmit={onSubmit} method="post" action="/m/login">
           <label className="m-field">
@@ -79,7 +87,13 @@ export function LoginScreen({ next }: { next: string }) {
         <p className="m-login-foot">
           Forgotten your password? Ask an admin on your team to reset it.
           <br />
-          <a href="/?view=desktop">Use the desktop site</a>
+          {signInRequired ? (
+            <a href="/?view=desktop">Use the desktop site</a>
+          ) : (
+            <a href="/m" data-testid="login-skip">
+              Back to the app without signing in
+            </a>
+          )}
         </p>
       </main>
     </div>

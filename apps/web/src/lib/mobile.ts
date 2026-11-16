@@ -160,12 +160,31 @@ export function buildLiveOnIndex(
   return { fleetLoopId, groupsByLoop, cabCountByLoop };
 }
 
+/** Shown instead of a desktop publish error, whose text can carry internal detail (paths, tools). */
+export const DESKTOP_PUBLISH_ERROR_MESSAGE =
+  "The last publish of this loop on the desktop site failed. Open it on the desktop site for details.";
+
+/**
+ * Processing state as the phone API returns it. Errors of phone uploads are written for the phone
+ * (fixed, user-facing messages); a loop built on the desktop site (autoLive) can carry the raw text
+ * of a failed publish, which is not shown to the phone app (it is open to anyone by default).
+ */
+export function phoneLoopProcessing(processing: LoopProcessing, loop: { autoLive: boolean }): LoopProcessing {
+  if (processing.error && loop.autoLive) {
+    return { ...processing, error: DESKTOP_PUBLISH_ERROR_MESSAGE };
+  }
+  return processing;
+}
+
 export function toLoopSummary(loop: LoopRow, liveOn: LiveOnIndex, now = new Date()): LoopSummary {
   return {
     id: loop.id,
     name: loop.name,
     status: loop.status,
-    processing: loopProcessing(loop, now, { state: uploadJobState(loop.id), ahead: uploadsAhead(loop.id) }),
+    processing: phoneLoopProcessing(
+      loopProcessing(loop, now, { state: uploadJobState(loop.id), ahead: uploadsAhead(loop.id) }),
+      loop,
+    ),
     durationMs: loop.durationMs ?? (loop._count.slots > 0 && loop.compiledVideoKey ? 600_000 : null),
     posterUrl: posterUrlFor(loop),
     videoUrl: videoUrlFor(loop),
@@ -645,16 +664,23 @@ export async function getCabDetail(deviceId: string) {
 // ---------------------------------------------------------------------------------------------
 // Overview
 
-export async function getMobileOverview(user: { id: string; name: string; email: string; role: string }) {
+/**
+ * `user` is the phone app's actor: a signed-in user, or the shared "not signed in" identity
+ * (anonymous). The anonymous caller gets no email and no activity feed (it names team members and
+ * what they did; the phone app does not show it).
+ */
+export async function getMobileOverview(user: { id: string; name: string; email: string | null; role: string; anonymous?: boolean }) {
   const snapshot = await getLoopRoutingSnapshot();
   const [{ cabs, context, settings }, groups, recentActivity, fleetLoopRow] = await Promise.all([
     listCabSummaries(snapshot),
     prisma.deviceGroup.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
-    prisma.activityEvent.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 10,
-      select: { id: true, type: true, message: true, createdAt: true },
-    }),
+    user.anonymous
+      ? Promise.resolve([])
+      : prisma.activityEvent.findMany({
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: { id: true, type: true, message: true, createdAt: true },
+        }),
     (async () => {
       const fleetLoop = resolveFleetLoop(snapshot);
       return fleetLoop ? prisma.loop.findUnique({ where: { id: fleetLoop.id }, select: loopSummarySelect }) : null;
@@ -680,7 +706,7 @@ export async function getMobileOverview(user: { id: string; name: string; email:
 
   return {
     generatedAt: context.now.toISOString(),
-    user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    user: { id: user.id, name: user.name, email: user.email, role: user.role, signedIn: !user.anonymous },
     counts,
     fleetLoop: fleetLoopRow ? toLoopSummary(fleetLoopRow, liveOn, context.now) : null,
     fleetPaused: context.fleetDisabled,
