@@ -843,6 +843,9 @@ async function openSuite(browser) {
     await goto(page, "/m/account");
     await page.getByTestId("account-password").click();
     await page.locator('input[name="current"]').waitFor();
+    // The dev server may reload a page it has just compiled; let that settle before typing.
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(500);
     const temp = `Tmp-${RUN_ID}-pw`;
     await page.fill('input[name="current"]', PASSWORD);
     await page.fill('input[name="next"]', temp);
