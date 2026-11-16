@@ -1,15 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 
 import { useSessionUser } from "../components/shell";
 import { ChevronIcon, TeamIcon } from "../components/icons";
-import { EmptyState, ErrorState, LoadingScreen, Notice, Screen, Sheet, Spinner, TopBar } from "../components/ui";
+import { EmptyState, ErrorState, href, LoadingScreen, Notice, Screen, Sheet, Spinner, TopBar } from "../components/ui";
 import { api } from "../lib/api";
 import { longDate } from "../lib/format";
 import { invalidate, useResource } from "../lib/store";
 import type { Role, TeamMember } from "../lib/types";
-import { initials, roleName } from "./account";
+import { initials, roleName, signInHref } from "./account";
 
 const KEY = "/api/users";
 
@@ -36,7 +37,8 @@ function RolePicker({ value, onChange }: { value: Role; onChange: (role: Role) =
 
 export function TeamScreen() {
   const me = useSessionUser();
-  const team = useResource<{ items: TeamMember[] }>(KEY, { refreshMs: 0 });
+  // Only a signed-in admin asks for the team (the API refuses everyone else).
+  const team = useResource<{ items: TeamMember[] }>(me?.signedIn && me.role === "ADMIN" ? KEY : null, { refreshMs: 0 });
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<TeamMember | null>(null);
 
@@ -45,7 +47,7 @@ export function TeamScreen() {
       title="Team"
       back={{ fallback: "/m/account", label: "Account" }}
       right={
-        me?.role === "ADMIN" ? (
+        me?.signedIn && me.role === "ADMIN" ? (
           <button type="button" className="m-btn m-btn-secondary m-btn-small" onClick={() => setAdding(true)} data-testid="team-add">
             Add person
           </button>
@@ -53,6 +55,25 @@ export function TeamScreen() {
       }
     />
   );
+
+  if (me && !me.signedIn) {
+    return (
+      <Screen>
+        {top}
+        <EmptyState
+          icon={<TeamIcon size={28} />}
+          title="Sign in to manage the team"
+          action={
+            <Link href={href(signInHref("/m/account/team"))} className="m-btn m-btn-primary" data-testid="team-sign-in">
+              Sign in
+            </Link>
+          }
+        >
+          Adding people, changing roles and resetting passwords needs an admin to sign in. Everything else works without signing in.
+        </EmptyState>
+      </Screen>
+    );
+  }
 
   if (me && me.role !== "ADMIN") {
     return (

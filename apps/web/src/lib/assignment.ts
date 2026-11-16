@@ -51,7 +51,7 @@ export async function describeTarget(target: AssignTarget) {
  */
 export async function assignLoop(
   input: { loopId: string | null; target: AssignTarget },
-  user: { id: string; name: string },
+  user: { id: string; name: string; anonymous?: boolean; ip?: string | null; forwardedFor?: string | null },
 ) {
   const { target, loopId } = input;
   if (target.type === "fleet" && !loopId) {
@@ -128,6 +128,8 @@ export async function assignLoop(
     loopName,
     target,
     userId: user.id,
+    userName: user.name,
+    ...(user.anonymous ? { anonymous: true, ip: user.ip ?? null, forwardedFor: user.forwardedFor ?? null } : {}),
     affectedCabs,
   });
 

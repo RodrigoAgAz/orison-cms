@@ -228,6 +228,8 @@ body.m-body.m-noscroll {
 .m-brandmark {
   display: block;
   flex: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .m-fresh {
@@ -2633,6 +2635,11 @@ body.m-body.m-noscroll {
   font-size: 20px;
 }
 
+.m-avatar-shared {
+  background: var(--m-surface-3);
+  color: var(--m-text-2);
+}
+
 .m-avatar-sm {
   width: 38px;
   height: 38px;
@@ -2789,8 +2796,7 @@ body.m-body.m-noscroll {
 }
 
 .m-login-brand .m-brandmark {
-  border-radius: 18px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(232, 183, 62, 0.25);
+  filter: drop-shadow(0 8px 22px rgba(232, 183, 62, 0.18));
 }
 
 .m-login-brand h1 {

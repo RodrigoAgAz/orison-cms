@@ -125,6 +125,33 @@ New environment variables (all optional):
   upload off first.
 - `OPENCELLID_API_KEY`, `CELL_LOOKUP_DISABLE_PUBLIC`, `CELL_LOOKUP_BEACONDB_URL`, `CELL_LOOKUP_TIMEOUT_MS`,
   `CELL_LOOKUP_USER_AGENT`: cell-tower lookup for cabs without a GPS fix (see `.env.example`).
+- `PHONE_APP_REQUIRE_SIGN_IN` (default unset = **open**): see "Phone app access" below. Set it to `true` to
+  require sign-in for the phone app again.
+- `PHONE_APP_ANON_UPLOADS_PER_HOUR` (default `20`): most video uploads the open phone app accepts from
+  people who are not signed in, in any rolling hour, all of them together. Signed-in users are not limited.
+
+### Phone app access (no sign-in)
+
+By the owner's decision the phone app at `/m` (and the Home Screen app) opens straight onto the cabs with
+no sign-in. **The site is on a public address: anyone who finds `/m` can see every cab, its driver name and
+position, and change what plays (all cabs, a group, one cab), upload and remove videos, and pause or resume
+a cab.** Search engines are told not to index it (`/robots.txt` disallows everything, pages carry
+`noindex`, responses carry `X-Robots-Tag`), but that only keeps it out of search results.
+
+- Open without signing in: the `/m` pages, every `/api/m/*` route, `GET /api/auth/me` (answers with the
+  shared identity below), and `POST /api/devices/:id/disable` and `/enable` (the phone's pause/resume).
+- Still signed-in only: team management (`/api/users`, Account > Team), changing a password, the whole
+  desktop site and every other API route (including fleet-wide pause, settings, device registration and
+  edits, the loop builder, assets, analytics, groups, and the desktop's `PUT` pause/resume). The device
+  endpoints (`heartbeat`, `manifest`, `playback-log`) are unchanged.
+- Actions taken without signing in are recorded in the activity log as **"Phone app (not signed in)"**
+  (user id `anonymous:phone-app`, not a database row), with the request's IP (`ip`, and the full
+  `forwardedFor` chain) in the event metadata. Anyone who signs in under Account is recorded by name.
+- Uploads from people who are not signed in are capped (`PHONE_APP_ANON_UPLOADS_PER_HOUR`, counted in
+  memory per server process, so a restart starts a fresh hour).
+- **To turn sign-in back on**, set `PHONE_APP_REQUIRE_SIGN_IN=true` in Railway and redeploy/restart. The
+  phone app then behaves exactly as before (sign-in screen, everyone signs in with their own account).
+  Unset it (or set `false`) to open it again. No code change or rebuild either way.
 
 Behaviour changes to expect:
 
@@ -146,9 +173,13 @@ Firmware rollout (cab Raspberry Pis, `device/`):
 3. Check that cab in the phone app: software version `1.1.0` under Technical details, a GPS position,
    and that a change of video reaches it within about 5 minutes. Then update the rest.
 
-Installing the phone app on an iPhone: open the site in **Safari** (phones are sent to `/m`), sign in, tap
-**Share**, then **Add to Home Screen**. It then opens full screen like an app. Each person signs in with
-their own account; admins add teammates under Account > Team.
+Installing the phone app on an iPhone: open the site in **Safari** (phones are sent to `/m`), tap
+**Share**, then **Add to Home Screen**. It then opens full screen like an app, straight onto the cabs (no
+sign-in unless `PHONE_APP_REQUIRE_SIGN_IN` is set). Admins sign in under Account to manage the team.
+
+The app's icons and the windmill in its header are generated from the company logo
+(`apps/web/assets/orison-logo.png`) by `node apps/web/scripts/generate-mobile-icons.mjs`, which writes
+`apps/web/public/m-app/*.png` (committed; nothing runs at build time).
 
 ## Operational Notes
 

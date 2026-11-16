@@ -1,5 +1,7 @@
-// Fetch wrapper for the mobile app. Errors carry the server's human message; a 401 anywhere
-// sends the user back to sign in and returns them to the same screen afterwards.
+// Fetch wrapper for the mobile app. Errors carry the server's human message. A 401 sends the user
+// to sign in and returns them to the same screen afterwards. With the phone app open (the server
+// default) the app's own routes never answer 401; only the team and password screens need a
+// signed-in user, and they check `useSessionUser().signedIn` before calling the API.
 
 export class ApiFailure extends Error {
   constructor(

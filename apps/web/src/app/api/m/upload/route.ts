@@ -4,9 +4,11 @@ import path from "node:path";
 import { createLoopSchema, directLoopUploadMaxBytes, directLoopUploadMaxDurationMs } from "@orison/shared";
 
 import { assignTargetSchema, describeTarget, type AssignTarget } from "@/lib/assignment";
-import { requireApiUser } from "@/lib/auth";
+import { requirePhoneAppActor, type PhoneActor } from "@/lib/auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
+import { processSingleton } from "@/lib/job-limits";
 import { createPendingUploadLoop, directLoopUploadExtensions, startUploadedLoopProcessing } from "@/lib/loops";
+import { anonymousUploadLimitFrom, createRollingLimit, uploadLimitMessage } from "@/lib/phone-access";
 import { looksLikeIsoMediaFile, streamRequestBodyToTempFile } from "@/lib/upload-stream";
 
 export const runtime = "nodejs";
@@ -33,6 +35,29 @@ function parseTarget(raw: string | null): AssignTarget | null {
   return result.data;
 }
 
+// Uploads made without signing in (open phone app): at most PHONE_APP_ANON_UPLOADS_PER_HOUR in any
+// rolling hour, across all such callers, so a stranger cannot fill storage or keep the server
+// transcoding. Counted when the server starts receiving a file. Signed-in users are not limited.
+// In memory: the app runs as one Node process; a restart starts a fresh hour.
+const anonymousUploads = processSingleton("anonymous-upload-limit", () =>
+  createRollingLimit({
+    limit: anonymousUploadLimitFrom(process.env.PHONE_APP_ANON_UPLOADS_PER_HOUR),
+    windowMs: 60 * 60 * 1000,
+  }),
+);
+
+function enforceAnonymousUploadLimit(actor: PhoneActor, mode: "check" | "take") {
+  if (!actor.anonymous) {
+    return;
+  }
+  const result = mode === "take" ? anonymousUploads.take() : anonymousUploads.check();
+  if (!result.allowed) {
+    throw new ApiError(uploadLimitMessage(result.limit, result.retryAfterMs), 429, {
+      retryAfterSeconds: Math.ceil(result.retryAfterMs / 1000),
+    });
+  }
+}
+
 type UploadParams = { name: string; filename: string; target: AssignTarget | null };
 
 /** Validate the query string (name, filename, target); throws ApiError with a user-facing message. */
@@ -55,13 +80,14 @@ async function parseUploadParams(url: URL): Promise<UploadParams> {
 
 /**
  * Check an upload before (or after a failed) send: same checks as POST up to receiving the body
- * (signed in, name, file type, target exists), without a body. `{ ok: true }` or the error POST
+ * (allowed to upload, name, file type, target exists), without a body. `{ ok: true }` or the error POST
  * would give. The phone uses it to tell "the server refused this upload" from a dropped connection.
  */
 export async function GET(request: Request) {
   try {
-    await requireApiUser();
+    const actor = await requirePhoneAppActor();
     await parseUploadParams(new URL(request.url));
+    enforceAnonymousUploadLimit(actor, "check");
     return apiResponse({ ok: true });
   } catch (error) {
     return apiError(error);
@@ -77,8 +103,9 @@ export async function POST(request: Request) {
   const requestedAt = new Date();
   let tempDir: string | null = null;
   try {
-    const user = await requireApiUser();
+    const actor = await requirePhoneAppActor();
     const { name, filename, target } = await parseUploadParams(new URL(request.url));
+    enforceAnonymousUploadLimit(actor, "take");
 
     const upload = await streamRequestBodyToTempFile(request, {
       filename,
@@ -104,7 +131,13 @@ export async function POST(request: Request) {
       originalFilename: filename,
       tempFilePath: upload.tempFilePath,
       tempDir: ownedTempDir,
-      publishedBy: { id: user.id, name: user.name },
+      publishedBy: {
+        id: actor.id,
+        name: actor.name,
+        anonymous: actor.anonymous,
+        ip: actor.ip,
+        forwardedFor: actor.forwardedFor,
+      },
     });
 
     return apiResponse({ loopId: loop.id }, { status: 202 });

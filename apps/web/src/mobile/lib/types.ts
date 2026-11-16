@@ -74,7 +74,19 @@ export type CabDetail = CabSummary & {
 
 export type Role = "ADMIN" | "EDITOR";
 
-export type SessionUser = { id: string; name: string; email: string; role: Role };
+/**
+ * GET /api/auth/me. When nobody is signed in and the phone app is open (the default), this is the
+ * shared identity actions are recorded under: `signedIn: false`, no email, role EDITOR.
+ */
+export type SessionUser = {
+  id: string;
+  name: string;
+  email: string | null;
+  role: Role;
+  signedIn: boolean;
+  /** PHONE_APP_REQUIRE_SIGN_IN is set on the server: the phone app needs sign-in. */
+  signInRequired: boolean;
+};
 
 export type GroupSummary = {
   id: string;
@@ -87,7 +99,7 @@ export type GroupSummary = {
 
 export type Overview = {
   generatedAt: string;
-  user: SessionUser;
+  user: { id: string; name: string; email: string | null; role: Role; signedIn: boolean };
   counts: { total: number; online: number; updating: number; offline: number; paused: number };
   fleetLoop: LoopSummary | null;
   fleetPaused: boolean;

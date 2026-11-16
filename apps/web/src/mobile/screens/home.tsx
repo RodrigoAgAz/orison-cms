@@ -47,7 +47,7 @@ export function HomeScreen() {
     <header className="m-topbar m-home-head">
       <div className="m-topbar-row">
         <div className="m-home-brand">
-          <BrandMark size={30} />
+          <BrandMark size={34} />
           <span>Orison</span>
         </div>
         <Freshness updatedAt={overview.updatedAt} loading={overview.loading} onRefresh={() => void overview.refresh()} />

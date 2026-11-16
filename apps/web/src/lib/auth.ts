@@ -1,5 +1,5 @@
 import { compare, hash } from "bcryptjs";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { jwtVerify, SignJWT } from "jose";
 
@@ -7,6 +7,7 @@ import { prisma, type Role, type User } from "@orison/db";
 
 import { env } from "./env";
 import { ApiError } from "./http";
+import { phoneAppRequiresSignIn, PHONE_APP_REQUIRE_SIGN_IN_ENV, requestAddress, SHARED_PHONE_ACTOR } from "./phone-access";
 import { sessionVersionMatches } from "./session-version";
 
 export const SESSION_LIFETIME_SECONDS = 60 * 60 * 24 * 30;
@@ -178,4 +179,46 @@ export async function requireApiAdmin() {
     throw new ApiError("Only admins can manage the team", 403);
   }
   return user;
+}
+
+/** Whether the phone app requires sign-in (PHONE_APP_REQUIRE_SIGN_IN). Read per call, at runtime. */
+export function phoneAppSignInRequired() {
+  return phoneAppRequiresSignIn(process.env[PHONE_APP_REQUIRE_SIGN_IN_ENV]);
+}
+
+/**
+ * Who is acting in the phone app. A signed-in user is that user. Otherwise, while the phone app is
+ * open (the default), the shared identity SHARED_PHONE_ACTOR with the caller's address; with
+ * PHONE_APP_REQUIRE_SIGN_IN=true, ApiError(401) exactly like requireApiUser.
+ *
+ * `id` and `name` are always set, so code that records "who did this" keeps working; the shared
+ * identity's id is not a user row and is never looked up.
+ */
+export type PhoneActor = {
+  id: string;
+  name: string;
+  email: string | null;
+  role: Role;
+  anonymous: boolean;
+  ip: string | null;
+  forwardedFor: string | null;
+};
+
+export async function requirePhoneAppActor(): Promise<PhoneActor> {
+  const user = await getSessionUser();
+  if (user) {
+    return { id: user.id, name: user.name, email: user.email, role: user.role, anonymous: false, ip: null, forwardedFor: null };
+  }
+  if (phoneAppSignInRequired()) {
+    throw new ApiError("Unauthenticated", 401);
+  }
+  const address = requestAddress(headers());
+  return { ...SHARED_PHONE_ACTOR, email: null, anonymous: true, ...address };
+}
+
+/** Activity-log metadata naming the actor (and, for the shared identity, the request address). */
+export function actorMetadata(actor: Pick<PhoneActor, "id" | "name" | "anonymous" | "ip" | "forwardedFor">) {
+  return actor.anonymous
+    ? { userId: actor.id, userName: actor.name, anonymous: true, ip: actor.ip, forwardedFor: actor.forwardedFor }
+    : { userId: actor.id, userName: actor.name };
 }

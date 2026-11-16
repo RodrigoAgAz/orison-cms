@@ -209,13 +209,23 @@ export const LayersIcon = (p: IconProps) => (
   </Svg>
 );
 
+// The windmill from the Orison logo, recoloured gold for the dark UI. Generated from
+// apps/web/assets/orison-logo.png by scripts/generate-mobile-icons.mjs at 288px high (sharp up
+// to 96 CSS px on 3x screens). `size` is its height in CSS px.
+const WINDMILL_ASPECT = 215 / 288;
+
 export function BrandMark({ size = 30 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true" className="m-brandmark">
-      <rect width="100" height="100" rx="24" fill="#111b30" />
-      <circle cx="50" cy="50" r="30" fill="none" stroke="#e0b340" strokeWidth="9" />
-      <path d="M32.5 55 A17.5 17.5 0 0 1 67.5 55 Z" fill="#e0b340" transform="translate(0 -1.5)" />
-      <rect x="23" y="56.7" width="54" height="3.6" rx="1" fill="#e0b340" />
-    </svg>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src="/m-app/windmill-gold.png"
+      width={Math.round(size * WINDMILL_ASPECT)}
+      height={size}
+      alt=""
+      aria-hidden="true"
+      className="m-brandmark"
+      draggable={false}
+      decoding="async"
+    />
   );
 }

@@ -18,6 +18,8 @@ export const metadata: Metadata = {
     apple: [{ url: "/m-app/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
   },
   other: { "mobile-web-app-capable": "yes" },
+  // Open to anyone with the address by default (no sign-in), so keep it out of search engines.
+  robots: { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false, noimageindex: true } },
 };
 
 export const viewport: Viewport = {

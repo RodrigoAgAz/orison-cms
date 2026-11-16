@@ -1021,7 +1021,9 @@ export async function createPendingUploadLoop(options: {
   });
 }
 
-type UploadUser = { id: string; name: string };
+// The phone app's actor: a signed-in user, or the shared "not signed in" identity with the
+// request address (lib/auth.ts requirePhoneAppActor).
+type UploadUser = { id: string; name: string; anonymous?: boolean; ip?: string | null; forwardedFor?: string | null };
 
 /**
  * Apply the target chosen at upload time, unless someone changed that target after the upload was
@@ -1103,8 +1105,16 @@ export async function processUploadedLoop(options: {
       publishedByUserId: options.publishedBy.id,
       requireStatus: "PUBLISHING",
       activity: {
-        message: `Loop ${loop.name} uploaded from the mobile app`,
-        metadata: { originalFilename: options.originalFilename, mode: "MOBILE_UPLOAD" },
+        message: `Loop ${loop.name} uploaded from the mobile app by ${options.publishedBy.name}`,
+        metadata: {
+          originalFilename: options.originalFilename,
+          mode: "MOBILE_UPLOAD",
+          userId: options.publishedBy.id,
+          userName: options.publishedBy.name,
+          ...(options.publishedBy.anonymous
+            ? { anonymous: true, ip: options.publishedBy.ip ?? null, forwardedFor: options.publishedBy.forwardedFor ?? null }
+            : {}),
+        },
       },
     });
     const next = afterConditionalPublish({
