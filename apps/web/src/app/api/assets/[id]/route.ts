@@ -2,7 +2,8 @@ import { prisma } from "@orison/db";
 
 import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
-import { deleteObject } from "@/lib/storage";
+import { removeAssetFromLibrary } from "@/lib/asset-removal";
+import { toApiError } from "@/lib/loop-api";
 
 type Props = {
   params: {
@@ -17,30 +18,17 @@ export async function GET(_: Request, { params }: Props) {
       where: { id: params.id },
       select: {
         id: true,
+        filename: true,
+        status: true,
+        errorMessage: true,
+        durationMs: true,
+        width: true,
+        height: true,
         s3Key: true,
         thumbnailKey: true,
-        slotPlacements: {
-          select: {
-            slot: {
-              select: {
-                loop: {
-                  select: {
-                    status: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-        staticSlots: {
-          select: {
-            loop: {
-              select: {
-                status: true,
-              },
-            },
-          },
-        },
+        hiddenAt: true,
+        slotPlacements: { select: { slot: { select: { loop: { select: { id: true, name: true, status: true } } } } } },
+        staticSlots: { select: { loop: { select: { id: true, name: true, status: true } } } },
       },
     });
 
@@ -50,58 +38,19 @@ export async function GET(_: Request, { params }: Props) {
 
     return apiResponse(asset);
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }
 
+/**
+ * Remove an asset from the library. Deleted (row and files) when nothing uses it; otherwise
+ * hidden from the library and kept for the loops that use it. The answer says which.
+ */
 export async function DELETE(_: Request, { params }: Props) {
   try {
     await requireApiUser();
-    const asset = await prisma.asset.findUnique({
-      where: { id: params.id },
-      include: {
-        slotPlacements: {
-          include: {
-            slot: {
-              include: {
-                loop: true,
-              },
-            },
-          },
-        },
-        staticSlots: {
-          include: {
-            loop: true,
-          },
-        },
-      },
-    });
-
-    if (!asset) {
-      throw new ApiError("Asset not found", 404);
-    }
-
-    const usedInPublishedLoop =
-      asset.slotPlacements.some((placement) =>
-        ["PUBLISHED", "PUBLISHING"].includes(placement.slot.loop.status),
-      ) ||
-      asset.staticSlots.some((slot) => ["PUBLISHED", "PUBLISHING"].includes(slot.loop.status));
-
-    if (usedInPublishedLoop) {
-      throw new ApiError("Cannot delete an asset used by a published or publishing loop", 409);
-    }
-
-    await prisma.asset.delete({
-      where: { id: asset.id },
-    });
-
-    await deleteObject(asset.s3Key).catch(() => undefined);
-    if (asset.thumbnailKey) {
-      await deleteObject(asset.thumbnailKey).catch(() => undefined);
-    }
-
-    return apiResponse({ ok: true });
+    return apiResponse(await removeAssetFromLibrary(params.id));
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }

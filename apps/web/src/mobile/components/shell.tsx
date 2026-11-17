@@ -4,8 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, useContext } from "react";
 
+import { useEffect, useState } from "react";
+
 import { useResource } from "../lib/store";
-import type { SessionUser } from "../lib/types";
+import type { Overview, SessionUser } from "../lib/types";
 import { UploadProvider, useUpload } from "../lib/upload";
 import { CabsIcon, CheckIcon, CloseIcon, MapIcon, PersonIcon, UploadIcon, VideosIcon, AlertIcon } from "./icons";
 import { NavDepthProvider } from "./nav-depth";
@@ -44,12 +46,43 @@ export function MobileShell({ children }: { children: React.ReactNode }) {
   );
 }
 
+const MAP_TAB_KEY = "orison.mobile.mapTab";
+
+/**
+ * The Map tab is shown only once some cab has reported a position: a fleet whose equipment never
+ * reports one (today's production cab) would get a tab that can never show anything. It reads the
+ * overview other screens load (never fetching it itself) and remembers the answer for next time.
+ */
+function useMapTab() {
+  const overview = useResource<Overview>("/api/m/overview", { passive: true });
+  const [remembered, setRemembered] = useState(false);
+  useEffect(() => {
+    try {
+      setRemembered(localStorage.getItem(MAP_TAB_KEY) === "1");
+    } catch {
+      // storage unavailable
+    }
+  }, []);
+  const known = overview.data ? overview.data.cabs.some((cab) => cab.location) : null;
+  useEffect(() => {
+    if (known === null) return;
+    try {
+      localStorage.setItem(MAP_TAB_KEY, known ? "1" : "0");
+    } catch {
+      // storage unavailable
+    }
+  }, [known]);
+  return known ?? remembered;
+}
+
 function TabBar() {
   const pathname = usePathname();
   const { job } = useUpload();
+  const showMap = useMapTab();
+  const visible = tabs.filter((tab) => tab.to !== "/m/map" || showMap || pathname.startsWith("/m/map"));
   return (
-    <nav className="m-tabbar" aria-label="Main">
-      {tabs.map((tab) => {
+    <nav className="m-tabbar" aria-label="Main" data-tabs={visible.length}>
+      {visible.map((tab) => {
         const active = tab.match(pathname);
         const Icon = tab.icon;
         const busy = tab.to === "/m/upload" && (job?.phase === "uploading" || job?.phase === "processing");

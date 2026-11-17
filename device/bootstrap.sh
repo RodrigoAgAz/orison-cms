@@ -1,56 +1,51 @@
 #!/bin/bash
+# First-time setup of a cab: writes /opt/orison/config.json (only if it does not exist yet),
+# then installs packages, the service user, the code and the systemd services (install.sh).
+# Works on Debian/Ubuntu (x86) and Raspberry Pi OS. Safe to re-run.
+#
+# Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> [API_BASE_URL]
 set -euo pipefail
 
 SERIAL="${1:-}"
 TOKEN="${2:-}"
-BASE_DIR="/opt/orison"
+API_BASE_URL="${3:-https://cms.orisonscreens.com/api}"
+BASE_DIR="${ORISON_BASE_DIR:-/opt/orison}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -z "$SERIAL" || -z "$TOKEN" ]]; then
-  echo "Usage: ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN>"
+  echo "Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> [API_BASE_URL]"
   exit 1
 fi
+if [[ $EUID -ne 0 ]]; then
+  exec sudo -E bash "$0" "$@"
+fi
 
-sudo useradd -r -s /usr/sbin/nologin orison || true
-sudo mkdir -p "$BASE_DIR"/{content/{current,previous,staging,fallback},logs,runtime,systemd}
-sudo chown -R orison:orison "$BASE_DIR"
+ORISON_NO_RESTART=1 bash "$SCRIPT_DIR/install.sh"
 
-sudo tee "$BASE_DIR/config.json" >/dev/null <<EOF
-{
-  "device": {
-    "serialNumber": "${SERIAL}",
-    "apiBaseUrl": "https://cms.orisonscreens.com/api",
-    "apiToken": "${TOKEN}",
-    "cdnBaseUrl": "https://cdn.orisonscreens.com"
-  },
-  "sync": {
-    "checkIntervalSeconds": 1800,
-    "maxDownloadRetries": 3,
-    "downloadTimeoutSeconds": 300,
-    "maxBandwidthBytesPerSec": 2000000
-  },
-  "playback": {
-    "loopContinuously": true,
-    "screenResolution": "1280x800",
-    "fallbackContentPath": "/opt/orison/content/fallback/orison_fallback.mp4"
-  },
-  "location": {
-    "gpsEnabled": true
-  },
-  "health": {
-    "heartbeatIntervalSeconds": 300,
-    "logUploadIntervalSeconds": 3600,
-    "maxLogRetentionDays": 30
-  }
+if [[ -f "$BASE_DIR/config.json" ]]; then
+  echo "[orison-bootstrap] keeping the existing $BASE_DIR/config.json (serial $(python3 -c 'import json;import sys;print(json.load(open(sys.argv[1]))["device"]["serialNumber"])' "$BASE_DIR/config.json" 2>/dev/null || echo '?'))"
+else
+  SERIAL="$SERIAL" TOKEN="$TOKEN" API_BASE_URL="$API_BASE_URL" python3 - "$BASE_DIR/config.json" <<'PY'
+import json, os, sys
+config = {
+    "device": {
+        "serialNumber": os.environ["SERIAL"],
+        "apiBaseUrl": os.environ["API_BASE_URL"],
+        "apiToken": os.environ["TOKEN"],
+    },
+    "playback": {"trigger": "auto"},
 }
-EOF
+tmp = sys.argv[1] + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+    handle.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, sys.argv[1])
+PY
+  chown "${ORISON_SERVICE_USER:-orison}:${ORISON_SERVICE_USER:-orison}" "$BASE_DIR/config.json"
+  echo "[orison-bootstrap] wrote $BASE_DIR/config.json for $SERIAL"
+fi
 
-sudo chmod 600 "$BASE_DIR/config.json"
-sudo python3 -m pip install requests psutil --break-system-packages
-
-sudo cp "$SCRIPT_DIR"/*.py "$SCRIPT_DIR"/VERSION "$BASE_DIR/"
-sudo cp "$SCRIPT_DIR"/systemd/*.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable orison-sync.service orison-player.service orison-health.service
-
-echo "Bootstrap complete. Copy fallback media to $BASE_DIR/content/fallback/orison_fallback.mp4 and reboot."
+systemctl restart --no-block orison-sync.service orison-player.service orison-health.service
+echo "[orison-bootstrap] done. Optional: put a fallback video at $BASE_DIR/content/fallback/orison_fallback.mp4."
+echo "[orison-bootstrap] check with: systemctl status 'orison-*'  and  journalctl -u orison-player -f"

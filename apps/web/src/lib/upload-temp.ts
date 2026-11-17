@@ -10,6 +10,8 @@ export const UPLOAD_TEMP_PREFIXES = [
   "orison-direct-loop-",
   "orison-loop-",
   "orison-poster-",
+  // Desktop asset uploads (streamed body) and their processing.
+  "orison-asset-",
 ] as const;
 
 /**

@@ -1,7 +1,10 @@
-import { updateSlotSchema } from "@orison/shared";
+import { z } from "zod";
+
+import { slotContentInputSchema } from "@orison/shared";
 
 import { requireApiUser } from "@/lib/auth";
-import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
+import { apiError, apiResponse } from "@/lib/http";
+import { parseBody, toApiError } from "@/lib/loop-api";
 import { updateSlotContents } from "@/lib/loops";
 
 type Props = {
@@ -11,18 +14,25 @@ type Props = {
   };
 };
 
+const body = z.object({
+  contents: z.array(slotContentInputSchema),
+  staticCreativeId: z.string().min(1).nullable().optional(),
+  expectedUpdatedAt: z.string().datetime().nullable().optional(),
+});
+
 export async function PUT(request: Request, { params }: Props) {
   try {
     await requireApiUser();
-    const body = await parseJsonBody(request, updateSlotSchema);
+    const parsed = await parseBody(request, body);
     const loop = await updateSlotContents(
       params.id,
       Number.parseInt(params.position, 10),
-      body.contents,
-      body.staticCreativeId,
+      parsed.contents,
+      parsed.staticCreativeId,
+      parsed.expectedUpdatedAt,
     );
     return apiResponse({ loop });
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }

@@ -16,27 +16,43 @@ import {
   StatusShape,
   TopBar,
 } from "../components/ui";
-import { api } from "../lib/api";
+import { api, ApiFailure } from "../lib/api";
 import { quoted, videoLength } from "../lib/format";
 import {
   cabCount,
+  changeIsInPlace,
+  changesWords,
   decodeTarget,
   encodeTarget,
   impactOf,
   isSwitchedOn,
   lagPhrase,
+  placeWords,
   targetName,
   type Impact,
 } from "../lib/status";
-import { invalidate, useResource } from "../lib/store";
+import { fetchResource, invalidate, useResource } from "../lib/store";
 import type { AssignTarget, CabSummary, LoopRef, LoopSummary, Overview } from "../lib/types";
 
 type Choice = string | "inherit" | null;
-type Result = { target: AssignTarget; loop: LoopRef | null; cabIds: string[]; affected: number; inherit: boolean };
+type Result = {
+  target: AssignTarget;
+  loop: LoopRef | null;
+  cabIds: string[];
+  affected: number;
+  inherit: boolean;
+  /** Cabs that already showed the video before the change (their screens don't change). */
+  alreadyIds: string[];
+  /** We never got the server's answer; the change was confirmed by reading the cabs back. */
+  confirmedAfterSilence?: boolean;
+};
 
 function targetPhrase(overview: Overview, target: AssignTarget) {
   if (target.type === "fleet") return "all cabs";
-  if (target.type === "group") return `${targetName(overview, target)}`;
+  if (target.type === "group") {
+    const name = overview.groups.find((group) => group.id === target.groupId)?.name;
+    return name ? `the ${name} group` : "this group";
+  }
   return targetName(overview, target);
 }
 
@@ -48,6 +64,8 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
   const [result, setResult] = useState<Result | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The change got no answer: it may or may not have been applied. */
+  const [unsure, setUnsure] = useState<{ checking: boolean; message: string } | null>(null);
   const [cabPicker, setCabPicker] = useState(false);
 
   const data = overview.data;
@@ -133,7 +151,7 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
                   <span className="m-option-text">
                     <strong>{loop.name}</strong>
                     <span className="m-muted">
-                      {[videoLength(loop.durationMs), loop.id === currentId ? "playing there now" : loop.liveOn.cabCount ? `on ${cabCount(loop.liveOn.cabCount)}` : "not playing anywhere"]
+                      {[videoLength(loop.durationMs), loop.id === currentId ? (target?.type === "group" && group?.cabCount === 0 ? "chosen there now" : "playing there now") : placeWords(loop.liveOn)?.text ?? "not playing anywhere"]
                         .filter(Boolean)
                         .join(" · ")}
                     </span>
@@ -172,7 +190,7 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
               <span className="m-option-text">
                 <strong>All cabs</strong>
                 <span className="m-muted">
-                  Changes {cabCount(fleetImpact.cabs.length)}
+                  {changesWords(fleetImpact, "No cabs yet")}
                   {fleetImpact.keepOwn.groups.length || fleetImpact.keepOwn.cabs.length ? " · some keep their own video" : ""}
                 </span>
               </span>
@@ -195,7 +213,7 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
                   </span>
                   <span className="m-option-text">
                     <strong>{item.name} group</strong>
-                    <span className="m-muted">Changes {cabCount(impact.cabs.length)}</span>
+                    <span className="m-muted">{changesWords(impact, "No cabs in this group yet")}</span>
                   </span>
                   <ChevronIcon size={18} className="m-listrow-chev" />
                 </button>
@@ -259,19 +277,60 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
     question = `Play ${resultName} in ${cab?.label ?? "this cab"}?`;
     explain = `This cab gets its own video. It stays on it until you change it or send it back to ${cab?.group ? `${cab.group.name}’s` : "the all-cabs"} video.`;
   } else if (target.type === "group") {
-    question = `Play ${resultName} on ${targetName(data, target)}?`;
+    question =
+      group?.cabCount === 0
+        ? `Choose ${resultName} for the ${group.name} group?`
+        : `Play ${resultName} on ${targetName(data, target)}?`;
   } else {
     question = `Play ${resultName} on all cabs?`;
+  }
+
+  const sentLoopId = inherit ? null : effectiveChoice;
+  const alreadyIds = impact.alreadyPlaying.map((item) => item.id);
+
+  /** Read the cabs back after a change that got no answer, and say what actually happened. */
+  async function checkUnsure() {
+    if (!target) return;
+    setUnsure((current) => (current ? { ...current, checking: true } : current));
+    try {
+      await fetchResource("/api/m/overview", { force: true });
+      const fresh = await api<Overview>("/api/m/overview");
+      if (changeIsInPlace(fresh, target, sentLoopId)) {
+        const decided = impactOf(fresh, target, inherit ? null : impact.resultLoop);
+        setUnsure(null);
+        setResult({
+          target,
+          loop: impact.resultLoop,
+          cabIds: decided.cabs.map((item) => item.id),
+          affected: decided.cabs.length,
+          inherit,
+          alreadyIds,
+          confirmedAfterSilence: true,
+        });
+        void invalidate("/api/m/");
+        window.scrollTo({ top: 0 });
+        return;
+      }
+      setUnsure(null);
+      setError("It didn’t go through: the cabs are still set as before. Nothing changed, so you can try again.");
+    } catch {
+      setUnsure({
+        checking: false,
+        message:
+          "We still can’t reach the server to check. The change may have gone through. When you have a signal, tap “Check again”, or look at what the cabs are set to play on the Cabs screen before trying again.",
+      });
+    }
   }
 
   async function confirm() {
     if (!target) return;
     setBusy(true);
     setError(null);
+    setUnsure(null);
     try {
       const response = await api<{ ok: true; affectedCabs: number; affectedCabIds?: string[] }>("/api/m/assign", {
         method: "POST",
-        json: { loopId: inherit ? null : effectiveChoice, target },
+        json: { loopId: sentLoopId, target },
       });
       // The server's answer, not the phone's prediction: someone may have changed things meanwhile.
       setResult({
@@ -280,22 +339,30 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
         cabIds: response.affectedCabIds ?? [],
         affected: response.affectedCabs,
         inherit,
+        alreadyIds,
       });
       void invalidate("/api/m/");
       window.scrollTo({ top: 0 });
     } catch (failure) {
+      if (failure instanceof ApiFailure && failure.uncertain) {
+        setUnsure({ checking: true, message: failure.message });
+        setBusy(false);
+        await checkUnsure();
+        return;
+      }
       setError(failure instanceof Error ? failure.message : "That didn’t work. Please try again.");
     } finally {
       setBusy(false);
     }
   }
 
-  const n = impact.cabs.length;
+  const n = impact.changing.length;
+  const placeName = target.type === "fleet" ? "all cabs" : target.type === "group" ? `${group?.name ?? "the group"}` : cab?.label ?? "this cab";
   const confirmLabel =
     n === 0
-      ? target.type === "fleet"
-        ? "Yes, set it for all cabs"
-        : "Yes, make the change"
+      ? target.type === "cab"
+        ? "Yes, make the change"
+        : `Yes, set it for ${placeName}`
       : inherit
         ? `Yes, switch ${cabCount(n)}`
         : `Yes, play it on ${cabCount(n)}`;
@@ -329,11 +396,28 @@ export function ChangeScreen({ initialLoop, initialTarget }: { initialLoop: stri
         </div>
       </div>
       {error ? <Notice tone="danger">{error}</Notice> : null}
+      {unsure ? (
+        <Notice tone="warn" title="Not sure it went through" testId="change-unsure">
+          {unsure.checking ? "We didn’t hear back from the server. Checking whether the change was made…" : unsure.message}
+        </Notice>
+      ) : null}
       <div className="m-stickyactions">
-        <button type="button" className="m-btn m-btn-primary m-btn-block m-btn-big" onClick={() => void confirm()} disabled={busy} data-testid="confirm-change">
-          {busy ? <Spinner /> : null}
-          {busy ? "Sending to the cabs…" : confirmLabel}
-        </button>
+        {unsure && !unsure.checking ? (
+          <button type="button" className="m-btn m-btn-primary m-btn-block m-btn-big" onClick={() => void checkUnsure()} data-testid="change-check-again">
+            Check again
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="m-btn m-btn-primary m-btn-block m-btn-big"
+            onClick={() => void confirm()}
+            disabled={busy || Boolean(unsure)}
+            data-testid="confirm-change"
+          >
+            {busy || unsure ? <Spinner /> : null}
+            {unsure ? "Checking…" : busy ? "Sending to the cabs…" : confirmLabel}
+          </button>
+        )}
       </div>
     </Screen>
   );
@@ -356,8 +440,8 @@ function ChosenVideo({ loop, onChange }: { loop: LoopSummary | null; onChange: (
 }
 
 function ImpactFacts({ impact, target, overview }: { impact: Impact; target: AssignTarget; overview: Overview }) {
-  const n = impact.cabs.length;
-  const changing = impact.cabs.filter((item) => !impact.alreadyPlaying.includes(item));
+  const changing = impact.changing;
+  const n = changing.length;
   const onCabs = changing.filter(isSwitchedOn);
   const on = onCabs.length;
   const lag = lagPhrase(onCabs, overview.changeLagMinutes);
@@ -366,7 +450,21 @@ function ImpactFacts({ impact, target, overview }: { impact: Impact; target: Ass
   return (
     <div className="m-facts" data-testid="impact">
       <p className="m-facts-head" data-testid="impact-count">
-        {n === 0 ? "No cabs change right now." : `This changes ${cabCount(n)}.`}
+        {impact.cabs.length === 0
+          ? target.type === "group"
+            ? "There are no cabs in this group yet, so no screen changes."
+            : target.type === "fleet"
+              ? overview.cabs.length === 0
+                ? "There are no cabs yet, so no screen changes."
+                : "No cab follows the video for all cabs right now, so no screen changes."
+              : "No screen changes."
+          : n === 0
+            ? impact.alreadyPlaying.length === impact.cabs.length
+              ? impact.cabs.length === 1
+                ? "No change: it’s already playing this video."
+                : "No change: they’re all already playing this video."
+              : "No change: already set to play this video."
+            : `This changes ${cabCount(n)}.`}
       </p>
       <ul>
         {on > 0 ? (
@@ -390,7 +488,14 @@ function ImpactFacts({ impact, target, overview }: { impact: Impact; target: Ass
             </span>
           </li>
         ) : null}
-        {impact.alreadyPlaying.length > 0 ? (
+        {n > 0 && impact.alreadyHeading.length > 0 ? (
+          <li>
+            <CheckIcon size={14} /> <span>
+              <b>{impact.alreadyHeading.length} already set to play it</b>, so no change there.
+            </span>
+          </li>
+        ) : null}
+        {n > 0 && impact.alreadyPlaying.length > 0 ? (
           <li>
             <CheckIcon size={14} /> <span>
               <b>{impact.alreadyPlaying.length} already playing it</b>, so no change there.
@@ -408,8 +513,15 @@ function ImpactFacts({ impact, target, overview }: { impact: Impact; target: Ass
           .
         </p>
       ) : null}
-      {n === 0 && target.type === "fleet" ? (
-        <p className="m-facts-keep">Every cab is following its group&rsquo;s or its own video. This becomes the video for any cab that follows all cabs later.</p>
+      {impact.cabs.length === 0 && target.type === "fleet" ? (
+        <p className="m-facts-keep">
+          {overview.cabs.length === 0
+            ? "It becomes the video every new cab plays when it’s first switched on."
+            : "Every cab is following its group’s or its own video. This becomes the video for any cab that follows all cabs later."}
+        </p>
+      ) : null}
+      {impact.cabs.length === 0 && target.type === "group" ? (
+        <p className="m-facts-keep">Cabs added to this group later play it.</p>
       ) : null}
       {overview.fleetPaused ? <p className="m-facts-keep">All screens are paused at the moment, so nothing plays until they&rsquo;re resumed.</p> : null}
     </div>
@@ -424,6 +536,8 @@ function Done({ result, overview }: { result: Result; overview: Overview }) {
   const resultId = result.loop?.id;
   const changed = cabs.filter((item) => resultId && item.playing?.id === resultId);
   const name = result.loop ? quoted(result.loop.name) : "The new video";
+  const switching = cabs.filter((item) => !result.alreadyIds.includes(item.id)).length;
+  const already = cabs.length - switching;
   const pendingOnCabs = cabs.filter((item) => isSwitchedOn(item) && !changed.includes(item));
   const pendingOn = pendingOnCabs.length;
   const lag = lagPhrase(pendingOnCabs, overview.changeLagMinutes);
@@ -438,9 +552,24 @@ function Done({ result, overview }: { result: Result; overview: Overview }) {
         <h2>Done</h2>
         <p data-testid="done-summary">
           {result.affected === 0
-            ? `${name} is now set for ${targetPhrase(overview, result.target)}. No cabs needed to change.`
-            : `${name} is going out to ${cabCount(result.affected)}.`}
+            ? `${name} is now set for ${targetPhrase(overview, result.target)}. ${
+                result.target.type === "group"
+                  ? "There are no cabs in this group yet; cabs added to it later play it."
+                  : result.target.type === "fleet" && overview.cabs.length === 0
+                    ? "There are no cabs yet; new cabs play it."
+                    : "No screen needed to change."
+              }`
+            : switching === 0
+              ? `${name} is now set for ${targetPhrase(overview, result.target)}. ${
+                  already === 1 ? "The cab was already playing it" : "Every cab there was already playing it"
+                }, so no screen changes.`
+              : `${name} is going out to ${cabCount(switching)}${already > 0 ? ` (${already} already had it)` : ""}.`}
         </p>
+        {result.confirmedAfterSilence ? (
+          <p className="m-muted" data-testid="done-confirmed">
+            The server didn&rsquo;t answer at first, so we checked: the change is in place.
+          </p>
+        ) : null}
       </div>
 
       {cabs.length > 0 ? (

@@ -229,6 +229,12 @@ export function oldestVisibleUpdate(): number | null {
   return oldest;
 }
 
+/** The cached entry for `key` (tests and diagnostics). */
+export function readResource(key: string) {
+  const entry = entries.get(key);
+  return entry ? { data: entry.data, error: entry.error, updatedAt: entry.updatedAt, loading: Boolean(entry.inflight) } : undefined;
+}
+
 export function clearAll() {
   entries.clear();
 }

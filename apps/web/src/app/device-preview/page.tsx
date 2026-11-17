@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 
 import { DevicePreviewPlayer } from "@/components/device-preview-player";
-import { getCurrentPublishedLoop } from "@/lib/queries";
+import { getCurrentPublishedLoop } from "@/lib/fleet-data";
 
 export const dynamic = "force-dynamic";
 

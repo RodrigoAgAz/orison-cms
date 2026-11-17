@@ -203,7 +203,9 @@ def setup_logger(name: str, filename: str) -> logging.Logger:
     ensure_directories()
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 

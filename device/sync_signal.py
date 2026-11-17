@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""On-demand sync signalling between orison-health and orison-sync (separate processes).
+"""On-demand signalling between orison-health and orison-sync (separate processes).
 
 health_monitor drops RUNTIME_DIR/sync_request.json; sync_agent consumes (deletes) it.
+sync_agent drops RUNTIME_DIR/heartbeat_request.json after activating content; health_monitor
+consumes it and sends a full heartbeat straight away.
 """
 
 from __future__ import annotations
@@ -15,7 +17,9 @@ from typing import Any, Callable
 from common import RUNTIME_DIR, atomic_write_json, utc_now_iso
 
 SYNC_REQUEST_PATH = RUNTIME_DIR / "sync_request.json"
+HEARTBEAT_REQUEST_PATH = RUNTIME_DIR / "heartbeat_request.json"
 MIN_REQUEST_INTERVAL_SECONDS = 120.0
+_UNSET = object()
 
 
 def _text(value: Any) -> str | None:
@@ -27,8 +31,13 @@ def decide_sync_reasons(
     local_loop_id: str | None,
     local_checksum: str | None,
     local_disabled: bool | None,
+    local_safety_checksum: object = _UNSET,
 ) -> list[str]:
-    """Which server expectations disagree with the device? Missing fields mean "no opinion"."""
+    """Which server expectations disagree with the device? Missing fields mean "no opinion".
+
+    `expectedSafetyChecksum` is different: the key being absent means no opinion (old server),
+    while null means the cab should have no safety message at all.
+    """
     if not isinstance(response, dict):
         return []
     reasons: list[str] = []
@@ -41,6 +50,11 @@ def decide_sync_reasons(
     expected_disabled = response.get("disabled")
     if isinstance(expected_disabled, bool) and isinstance(local_disabled, bool) and expected_disabled != local_disabled:
         reasons.append("disabled")
+    if local_safety_checksum is not _UNSET and "expectedSafetyChecksum" in response:
+        expected_safety = response.get("expectedSafetyChecksum")
+        if expected_safety is None or isinstance(expected_safety, str):
+            if (expected_safety or None) != (local_safety_checksum or None):
+                reasons.append("safety")
     return reasons
 
 
@@ -89,3 +103,15 @@ def consume_sync_request(path: Path = SYNC_REQUEST_PATH) -> dict | None:
     except OSError:
         return None
     return data if isinstance(data, dict) else {}
+
+
+def request_heartbeat(reason: str, path: Path = HEARTBEAT_REQUEST_PATH) -> None:
+    """Ask the health monitor for an immediate full heartbeat (e.g. right after a loop switch)."""
+    try:
+        atomic_write_json(path, {"requestedAt": utc_now_iso(), "reason": reason}, durable=False)
+    except OSError:
+        pass
+
+
+def consume_heartbeat_request(path: Path = HEARTBEAT_REQUEST_PATH) -> dict | None:
+    return consume_sync_request(path)

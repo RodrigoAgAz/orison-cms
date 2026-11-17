@@ -1,10 +1,10 @@
-import { revalidatePath } from "next/cache";
-import { prisma } from "@orison/db";
-import { createLoopSchema } from "@orison/shared";
+import { z } from "zod";
 
 import { requireApiUser } from "@/lib/auth";
 import { createLoopDraft } from "@/lib/loops";
-import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
+import { apiError, apiResponse } from "@/lib/http";
+import { parseBody, toApiError } from "@/lib/loop-api";
+import { getLoopListData } from "@/lib/loop-queries";
 
 function parsePageParam(value: string | null, fallback: number) {
   const parsed = Number(value);
@@ -15,39 +15,23 @@ export async function GET(request: Request) {
   try {
     await requireApiUser();
     const url = new URL(request.url);
-    const page = parsePageParam(url.searchParams.get("page"), 1);
-    const pageSize = parsePageParam(url.searchParams.get("pageSize"), 25);
-    const [loops, total] = await Promise.all([
-      prisma.loop.findMany({
-        orderBy: { updatedAt: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        include: {
-          slots: {
-            include: {
-              contents: true,
-            },
-          },
-        },
-      }),
-      prisma.loop.count(),
-    ]);
-
-    return apiResponse({ items: loops, page, pageSize, total });
+    const data = await getLoopListData({
+      page: parsePageParam(url.searchParams.get("page"), 1),
+      pageSize: Math.min(parsePageParam(url.searchParams.get("pageSize"), 25), 100),
+    });
+    return apiResponse({ items: data.items, page: data.page, pageSize: data.pageSize, total: data.total });
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }
 
 export async function POST(request: Request) {
   try {
     await requireApiUser();
-    const body = await parseJsonBody(request, createLoopSchema);
+    const body = await parseBody(request, z.object({ name: z.string().trim().min(2).max(120) }));
     const loop = await createLoopDraft(body.name);
-    revalidatePath("/");
-    revalidatePath("/loops");
     return apiResponse(loop, { status: 201 });
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }

@@ -1931,6 +1931,21 @@ body.m-body.m-noscroll {
   vertical-align: 1px;
 }
 
+/* Set for a place with no cabs in it: chosen, but not on any screen. Hollow, not green. */
+.m-setdot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-radius: 50%;
+  border: 1.5px solid var(--m-text-2);
+  vertical-align: 1px;
+}
+
+.m-videorow-status.is-set {
+  color: var(--m-text-2);
+}
+
 .m-videohead {
   margin-top: 16px;
 }
@@ -2931,4 +2946,51 @@ body.m-body.m-noscroll {
 .m-cabhead-fresh .m-fresh {
   min-height: 30px;
   padding: 0 10px;
+}
+
+/* The box's built-in standby video (not in the library). */
+.m-poster-builtin {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  background: linear-gradient(135deg, #0d1626, #1a2438);
+  color: var(--m-text-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.m-details-age {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.m-details-note {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+/* No cab reports a position: the Map tab is left out. */
+.m-tabbar[data-tabs="4"] {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.m-map-emptylist {
+  margin: 0 16px;
+}
+
+.m-upload-another {
+  margin: 28px 16px 0;
+  font-size: 20px;
+}
+
+.m-poster-builtin img {
+  width: auto !important;
+  height: 44px !important;
+  object-fit: contain !important;
+}
+
+.m-hero[hidden],
+.m-chips[hidden] {
+  display: none;
 }

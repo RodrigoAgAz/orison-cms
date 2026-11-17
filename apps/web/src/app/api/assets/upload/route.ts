@@ -1,81 +1,119 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { prisma, type Prisma } from "@orison/db";
-import { uploadAssetFormSchema } from "@orison/shared";
+import { assetCategorySchema, directLoopUploadMaxBytes } from "@orison/shared";
 
-import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
-import { env } from "@/lib/env";
+import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
-import { processAssetUpload } from "@/lib/media";
-import { enqueueAssetProcessingJob } from "@/lib/queues";
-import { writeUploadedFileToTemp } from "@/lib/upload";
+import { mediaJobLimiter } from "@/lib/job-limits";
+import { toApiError } from "@/lib/loop-api";
+import { assetKeysFor, processAssetUpload } from "@/lib/media";
+import { sanitizeUploadFilename, streamRequestBodyToTempFile } from "@/lib/upload-stream";
 
-function assetKeys(assetId: string, filename: string) {
-  const extension = filename.split(".").pop()?.toLowerCase();
-  const isVideo = ["mp4", "mov", "webm"].includes(extension ?? "");
-  return {
-    s3Key: isVideo ? `assets/${assetId}/content.mp4` : `assets/${assetId}/content.jpg`,
-    thumbnailKey: isVideo ? `assets/${assetId}/thumbnail.jpg` : null,
-  };
+export const runtime = "nodejs";
+
+const videoExtensions = [".mp4", ".mov", ".m4v", ".webm"];
+const imageExtensions = [".jpg", ".jpeg", ".png", ".webp"];
+const maxBytes = directLoopUploadMaxBytes;
+
+function kindOf(filename: string) {
+  const extension = path.extname(filename).toLowerCase();
+  if (videoExtensions.includes(extension)) return "video" as const;
+  if (imageExtensions.includes(extension)) return "image" as const;
+  return null;
 }
 
+/**
+ * Upload an asset. The body is the file itself, streamed to disk (never held in memory):
+ *   POST /api/assets/upload?filename=ad.mov&category=ADVERTISEMENT&metadata={json}
+ * (multipart/form-data with fields file, category, metadata is still accepted for older clients).
+ * Answers 201 at once with the asset in PROCESSING; it is normalised in the background (one media
+ * job at a time) and becomes READY, or FAILED with a short reason the library shows.
+ */
 export async function POST(request: Request) {
+  let tempDir: string | null = null;
   try {
     await requireApiUser();
-    const formData = await request.formData();
-    const file = formData.get("file");
+    const url = new URL(request.url);
+    let filename: string;
+    let categoryValue: string | null;
+    let metadataValue: string | null;
+    let tempFilePath: string;
 
-    if (!(file instanceof File)) {
-      throw new ApiError("A file upload is required");
+    if ((request.headers.get("content-type") ?? "").startsWith("multipart/form-data")) {
+      const formData = await request.formData();
+      const file = formData.get("file");
+      if (!(file instanceof File)) throw new ApiError("Choose a file to upload.");
+      if (file.size > maxBytes) throw new ApiError(`Files are limited to ${Math.round(maxBytes / 1024 / 1024)} MB.`, 413);
+      filename = file.name;
+      categoryValue = formData.get("category") as string | null;
+      metadataValue = (formData.get("metadata") as string | null) || null;
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-asset-upload-"));
+      tempFilePath = path.join(tempDir, sanitizeUploadFilename(filename, "upload.bin"));
+      await writeFile(tempFilePath, Buffer.from(await file.arrayBuffer()));
+    } else {
+      filename = url.searchParams.get("filename")?.trim() || "";
+      categoryValue = url.searchParams.get("category");
+      metadataValue = url.searchParams.get("metadata");
+      if (!filename) throw new ApiError("The file name is missing.");
+      if (!kindOf(filename)) throw new ApiError("Upload an MP4, MOV, M4V or WebM video, or a JPG, PNG or WebP image.");
+      const upload = await streamRequestBodyToTempFile(request, {
+        filename,
+        maxBytes,
+        tooLargeMessage: `Files are limited to ${Math.round(maxBytes / 1024 / 1024)} MB.`,
+        missingMessage: "Choose a file to upload.",
+        prefix: "orison-asset-upload-",
+      });
+      tempDir = upload.tempDir;
+      tempFilePath = upload.tempFilePath;
     }
 
-    const form = uploadAssetFormSchema.safeParse({
-      category: formData.get("category"),
-      metadata: formData.get("metadata") || undefined,
-    });
-
-    if (!form.success) {
-      throw new ApiError("Invalid upload payload", 400, form.error.flatten());
+    const kind = kindOf(filename);
+    if (!kind) throw new ApiError("Upload an MP4, MOV, M4V or WebM video, or a JPG, PNG or WebP image.");
+    const category = assetCategorySchema.safeParse(categoryValue);
+    if (!category.success) throw new ApiError("Choose a category for the file.");
+    let metadata: Prisma.InputJsonValue | undefined;
+    if (metadataValue) {
+      try {
+        metadata = JSON.parse(metadataValue) as Prisma.InputJsonValue;
+      } catch {
+        throw new ApiError("The advertiser / campaign details could not be read.");
+      }
     }
 
-    const metadata = form.data.metadata
-      ? (JSON.parse(form.data.metadata) as Prisma.InputJsonValue)
-      : undefined;
-
-    const upload = await writeUploadedFileToTemp(file);
     const assetId = randomUUID().replace(/-/g, "");
-    const keys = assetKeys(assetId, file.name);
-
+    const keys = assetKeysFor(assetId, kind);
     const asset = await prisma.asset.create({
       data: {
         id: assetId,
-        filename: file.name,
+        filename,
         s3Key: keys.s3Key,
         thumbnailKey: keys.thumbnailKey,
-        mimeType: file.type || "application/octet-stream",
-        fileSize: upload.buffer.byteLength,
-        category: form.data.category,
+        mimeType: kind === "video" ? "video/mp4" : "image/jpeg",
+        fileSize: 0,
+        category: category.data,
         metadata,
         status: "PROCESSING",
       },
     });
+    await logActivity("ASSET_UPLOADED", `Asset ${filename} uploaded`, { assetId: asset.id, category: asset.category });
 
-    await logActivity("ASSET_UPLOADED", `Asset ${file.name} uploaded`, {
-      assetId: asset.id,
-      category: asset.category,
-    });
+    // Media jobs run in this process (one at a time); the temp folder is removed afterwards.
+    const ownedDir = tempDir;
+    tempDir = null;
+    void mediaJobLimiter()
+      .run(() => processAssetUpload(asset.id, tempFilePath))
+      .catch((error) => console.error(`asset ${asset.id} processing crashed`, error))
+      .finally(() => rm(ownedDir, { recursive: true, force: true }).catch(() => undefined));
 
-    if (env.inlineMediaJobs || !(await enqueueAssetProcessingJob({ assetId: asset.id, tempFilePath: upload.tempFilePath }))) {
-      await processAssetUpload(asset.id, upload.tempFilePath);
-    }
-
-    const latest = await prisma.asset.findUniqueOrThrow({
-      where: { id: asset.id },
-    });
-
-    return apiResponse(latest, { status: 201 });
+    return apiResponse(asset, { status: 201 });
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
+  } finally {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AlertIcon, CheckIcon, UploadIcon, VideosIcon } from "../components/icons";
 import { href, Notice, Screen, Section, Sheet, Spinner, TopBar } from "../components/ui";
-import { duration, fileSize, quoted } from "../lib/format";
+import { duration, fileSize, preparingWords, quoted } from "../lib/format";
 import { cabCount, decodeTarget, encodeTarget, impactOf, isSwitchedOn, lagPhrase, targetName } from "../lib/status";
 import { useResource } from "../lib/store";
 import type { AssignTarget, Overview } from "../lib/types";
@@ -31,17 +31,27 @@ function suggestedName(fileName: string) {
   return /^(IMG|MOV|VID|trim)\b/i.test(base) ? "" : base.slice(0, 120);
 }
 
-function onWifi() {
-  const connection = (navigator as Navigator & { connection?: { type?: string } }).connection;
-  return connection?.type === "wifi" || connection?.type === "ethernet";
+/**
+ * "wifi", "cellular" or "unknown". Safari (every iPhone) has no navigator.connection, so most of
+ * the time we simply don't know, and must not assume mobile data.
+ */
+export function connectionKind(nav: { connection?: { type?: string } } | undefined): "wifi" | "cellular" | "unknown" {
+  const type = nav?.connection?.type;
+  if (type === "wifi" || type === "ethernet") return "wifi";
+  if (type === "cellular") return "cellular";
+  return "unknown";
 }
 
 export function UploadScreen({ initialTarget }: { initialTarget: string | null }) {
   const { job } = useUpload();
+  // Once the bytes have arrived, preparing carries on at the server: another video can be uploaded.
+  const canUploadAnother = !job || job.phase === "processing";
   return (
     <Screen>
       <TopBar title="Upload a video" large={!job} />
-      {job ? <JobView job={job} /> : <UploadForm initialTarget={initialTarget} />}
+      {job ? <JobView job={job} /> : null}
+      {job && canUploadAnother ? <h2 className="m-upload-another" data-testid="upload-another-head">Upload another video</h2> : null}
+      {canUploadAnother ? <UploadForm initialTarget={job ? null : initialTarget} /> : null}
     </Screen>
   );
 }
@@ -103,12 +113,14 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
     [overview.data, destination, name],
   );
   const large = Boolean(file && file.size > LARGE_BYTES);
-  const wifi = typeof navigator !== "undefined" && onWifi();
+  const network = typeof navigator === "undefined" ? "unknown" : connectionKind(navigator as Navigator & { connection?: { type?: string } });
+  const wifi = network === "wifi";
+  const cellular = network === "cellular";
 
   function begin() {
     if (!file) return;
     setConfirmOpen(false);
-    start({ file, name: name.trim(), target, targetLabel: target && overview.data ? targetName(overview.data, target) : null });
+    start({ file, name: name.trim(), target, targetLabel: target && overview.data ? targetName(overview.data, target) : null, seconds });
   }
 
   function onSubmit(event: React.FormEvent) {
@@ -123,7 +135,8 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
       return;
     }
     setFormError(null);
-    if (target || (large && !wifi)) {
+    // Only ask about mobile data when the phone says it is on mobile data.
+    if (target || (large && cellular)) {
       setConfirmOpen(true);
       return;
     }
@@ -199,7 +212,7 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
             current={destination}
             onChange={setDestination}
             title="All cabs"
-            sub={overview.data ? `Changes ${cabCount(impactOf(overview.data, { type: "fleet" }, null).cabs.length)} once it’s ready` : "Once it’s ready"}
+            sub={overview.data ? onceReady(impactOf(overview.data, { type: "fleet" }, null).cabs.length, overview.data.cabs.length === 0 ? "There are no cabs yet" : "No cab follows all cabs right now") : "Once it’s ready"}
           />
           {(overview.data?.groups ?? []).map((group) => (
             <Radio
@@ -208,7 +221,7 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
               current={destination}
               onChange={setDestination}
               title={`${group.name} group`}
-              sub={`Changes ${cabCount(impactOf(overview.data!, { type: "group", groupId: group.id }, null).cabs.length)} once it’s ready`}
+              sub={onceReady(impactOf(overview.data!, { type: "group", groupId: group.id }, null).cabs.length, "No cabs in this group yet")}
             />
           ))}
           <label className={`m-radio ${destination.startsWith("cab:") ? "is-checked" : ""}`}>
@@ -234,8 +247,14 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
         </div>
       </Section>
 
-      {large && !wifi && file && !fileError ? (
-        <Notice tone="info" title="Wi-Fi recommended">
+      {large && !wifi && !cellular && file && !fileError ? (
+        <Notice tone="info" title="A large video" testId="upload-large-note">
+          It&rsquo;s {fileSize(file.size)}. If you&rsquo;re on mobile data rather than Wi-Fi, it uses that much of your allowance and can take a while. Keep
+          Orison open with the screen on until it reaches 100%.
+        </Notice>
+      ) : null}
+      {large && cellular && file && !fileError ? (
+        <Notice tone="info" title="Wi-Fi recommended" testId="upload-wifi-note">
           This video is {fileSize(file.size)}. On mobile data, uploading it uses about {fileSize(file.size)} of your allowance and can take
           a long time, because phones send much more slowly than they download. Keep Orison open with the screen on until it reaches 100%:
           if the phone locks or you switch app, the upload stops. An upload that takes more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes is
@@ -265,12 +284,23 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
               Cancel
             </button>
             <button type="button" className="m-btn m-btn-primary" onClick={begin} data-testid="upload-confirm-go">
-              {target && impact ? `Yes, upload for ${cabCount(impact.cabs.length)}` : "Upload anyway"}
+              {target && impact ? (impact.cabs.length > 0 ? `Yes, upload for ${cabCount(impact.cabs.length)}` : "Yes, upload it") : "Upload anyway"}
             </button>
           </>
         }
       >
-        {target && impact && overview.data ? (
+        {target && impact && overview.data && impact.cabs.length === 0 ? (
+          <p className="m-body-text" data-testid="upload-confirm-empty">
+            As soon as it&rsquo;s ready, {quoted(name.trim())} becomes the video for{" "}
+            <b>{target.type === "fleet" ? "all cabs" : targetName(overview.data, target)}</b>.{" "}
+            {target.type === "group"
+              ? "There are no cabs in this group yet, so no screen changes now; cabs added to it later play it."
+              : target.type === "fleet" && overview.data.cabs.length === 0
+                ? "There are no cabs yet; new cabs play it when they’re first switched on."
+                : "No cab follows it right now, so no screen changes now."}{" "}
+            If someone changes what plays there while this is uploading, their change is kept and this video just goes into Videos.
+          </p>
+        ) : target && impact && overview.data ? (
           <p className="m-body-text">
             As soon as it&rsquo;s ready, {quoted(name.trim())} will play on{" "}
             <b>{target.type === "fleet" ? "all cabs" : targetName(overview.data, target)}</b>, changing {cabCount(impact.cabs.length)}. Cabs that are on switch{" "}
@@ -279,7 +309,7 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
             Videos.
           </p>
         ) : null}
-        {large && !wifi && file ? (
+        {large && cellular && file ? (
           <Notice tone="info" title="Large video">
             It&rsquo;s {fileSize(file.size)}. If you&rsquo;re not on Wi-Fi this uses {fileSize(file.size)} of mobile data and can take a long time. Keep the
             app open with the screen on until the upload reaches 100%; an upload that takes more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes is stopped.
@@ -288,6 +318,10 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
       </Sheet>
     </form>
   );
+}
+
+function onceReady(count: number, emptyWords: string) {
+  return count === 0 ? `${emptyWords}; nothing changes on screens` : `Changes ${cabCount(count)} once it’s ready`;
 }
 
 function Radio({
@@ -398,9 +432,11 @@ function JobView({ job }: { job: UploadJob }) {
           <p className="m-body-text" data-testid="upload-processing-text">
             {waiting
               ? "Uploaded. Another video is being prepared first (one at a time); this one starts as soon as that’s done."
-              : "Uploaded. We’re now preparing it for the cab screens, which usually takes a minute or two."}
+              : `Uploaded. We’re now preparing it for the cab screens. ${preparingWords(job.seconds ? job.seconds * 1000 : job.loop?.durationMs)}`}
           </p>
-          <p className="m-muted">You can leave this screen or close the app. It carries on, and shows in Videos while it&rsquo;s being prepared.</p>
+          <p className="m-muted">
+            You can leave this screen, close the app or upload another video below. It carries on, and shows in Videos while it&rsquo;s being prepared.
+          </p>
         </div>
       ) : null}
 
@@ -416,6 +452,11 @@ function JobView({ job }: { job: UploadJob }) {
             <Notice tone="warn" title="It’s in Videos, but not on screens">
               {job.warning}
             </Notice>
+          ) : job.target && impact && impact.cabs.length === 0 ? (
+            <p className="m-body-text" data-testid="upload-ready-empty">
+              {quoted(job.name)} is now the video for {job.target.type === "fleet" ? "all cabs" : job.targetLabel}.{" "}
+              {job.target.type === "group" ? "There are no cabs in this group yet; cabs added to it later play it." : "No screen changes right now."}
+            </p>
           ) : job.target ? (
             <p className="m-body-text">
               {quoted(job.name)} is going out to {impact ? cabCount(impact.cabs.length) : job.targetLabel}. Cabs that are on switch{" "}

@@ -4,9 +4,11 @@ import { Readable } from "node:stream";
 
 import { NextResponse } from "next/server";
 
+import { env } from "@/lib/env";
 import { apiError, ApiError } from "@/lib/http";
 import { parseRangeHeader } from "@/lib/http-range";
-import { getStorageRouteRedirectUrl, statLocalObject } from "@/lib/storage";
+import { getStorageRouteRedirectUrl, readObject, statLocalObject } from "@/lib/storage";
+import { isManifestKey, rebaseStorageUrlsDeep, requestOrigin } from "@/lib/storage-urls";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +30,42 @@ type Props = {
   };
 };
 
+/**
+ * A published manifest file, with the URLs inside it that point at this app's storage route
+ * re-pointed at the origin of this request: they were written with the domain of the day the loop
+ * was published, and every cab (old firmware included) downloads what they say. Small file, so it
+ * is read whole, from local disk or object storage, rather than redirected to object storage.
+ */
+async function serveManifest(request: Request, key: string, includeBody: boolean) {
+  let raw: Buffer;
+  try {
+    raw = await readObject(key);
+  } catch (error) {
+    const code = (error as { code?: string; name?: string; $metadata?: { httpStatusCode?: number } } | null) ?? {};
+    if (code.code === "ENOENT" || code.name === "NoSuchKey" || code.$metadata?.httpStatusCode === 404) {
+      throw new ApiError("Not found", 404);
+    }
+    throw error;
+  }
+  let body = raw.toString("utf8");
+  try {
+    const rebased = rebaseStorageUrlsDeep(JSON.parse(body) as unknown, requestOrigin(request, env.appUrl));
+    body = JSON.stringify(rebased, null, 2);
+  } catch {
+    // Not JSON after all: serve it as stored.
+  }
+  const bytes = Buffer.from(body, "utf8");
+  return new NextResponse(includeBody ? bytes : null, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": String(bytes.length),
+      // Depends on the request's host, so no shared cache may keep it.
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 async function serve(request: Request, { params }: Props, includeBody: boolean) {
   try {
     if (params.path.length === 0 || params.path.some((segment) => segment === ".." || segment === ".")) {
@@ -35,6 +73,9 @@ async function serve(request: Request, { params }: Props, includeBody: boolean) 
     }
 
     const key = params.path.join("/");
+    if (isManifestKey(key)) {
+      return serveManifest(request, key, includeBody);
+    }
     const redirectUrl = await getStorageRouteRedirectUrl(key);
     if (redirectUrl) {
       return NextResponse.redirect(redirectUrl, 307);

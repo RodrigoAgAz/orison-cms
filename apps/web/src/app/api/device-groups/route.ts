@@ -5,7 +5,8 @@ import { deviceGroupInputSchema } from "@orison/shared";
 
 import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
-import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
+import { apiError, apiResponse } from "@/lib/http";
+import { parseBody, toApiError } from "@/lib/loop-api";
 
 export async function GET() {
   try {
@@ -24,14 +25,14 @@ export async function GET() {
 
     return apiResponse(groups);
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }
 
 export async function POST(request: Request) {
   try {
     await requireApiUser();
-    const body = await parseJsonBody(request, deviceGroupInputSchema);
+    const body = await parseBody(request, deviceGroupInputSchema);
     const group = await prisma.deviceGroup.create({
       data: {
         name: body.name,
@@ -39,7 +40,7 @@ export async function POST(request: Request) {
       },
     });
 
-    await logActivity("DEVICE_GROUP_CREATED", `Device group ${group.name} created`, {
+    await logActivity("DEVICE_GROUP_CREATED", `Group ${group.name} created`, {
       groupId: group.id,
       name: group.name,
     });
@@ -49,6 +50,6 @@ export async function POST(request: Request) {
 
     return apiResponse(group, { status: 201 });
   } catch (error) {
-    return apiError(error);
+    return apiError(toApiError(error));
   }
 }

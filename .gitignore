@@ -18,3 +18,6 @@ __pycache__
 .DS_Store
 packages/db/generated
 *.tsbuildinfo
+
+# written by device/demo.py when run from a checkout
+device/config.json

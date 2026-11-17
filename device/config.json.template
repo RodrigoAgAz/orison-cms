@@ -2,27 +2,35 @@
   "device": {
     "serialNumber": "ORISON-P1-001",
     "apiBaseUrl": "https://cms.orisonscreens.com/api",
-    "apiToken": "replace-with-real-token",
-    "cdnBaseUrl": "https://cdn.orisonscreens.com"
+    "apiToken": "replace-with-real-token"
   },
   "sync": {
     "checkIntervalSeconds": 1800,
     "maxDownloadRetries": 3,
     "downloadTimeoutSeconds": 300,
-    "maxBandwidthBytesPerSec": 2000000
+    "maxBandwidthBytesPerSec": 2000000,
+    "minFreeSpaceMb": 200,
+    "cacheMaxMb": 1024
   },
   "playback": {
-    "loopContinuously": true,
-    "screenResolution": "1280x800",
-    "fallbackContentPath": "/opt/orison/content/fallback/orison_fallback.mp4"
+    "trigger": "auto",
+    "alwaysSafetyEveryCycles": 1,
+    "fallbackContentPath": "/opt/orison/content/fallback/orison_fallback.mp4",
+    "display": {
+      "videoOutput": "auto",
+      "drmConnector": "auto",
+      "drmMode": "auto",
+      "keepAspect": true
+    }
   },
   "location": {
     "gpsEnabled": true
   },
+  "modem": {
+    "atPort": "auto"
+  },
   "health": {
     "heartbeatIntervalSeconds": 300,
-    "logUploadIntervalSeconds": 3600,
-    "maxLogRetentionDays": 30
+    "maxLogQueueMb": 50
   }
 }
-

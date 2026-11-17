@@ -19,7 +19,10 @@
 //   - open, with PHONE_APP_ANON_UPLOADS_PER_HOUR=3, to trigger the anonymous upload ceiling without
 //     using up the main server's allowance;
 //   - PHONE_APP_REQUIRE_SIGN_IN=true, where the old sign-in flow must work exactly as before.
-// E2E_SPAWN=0 skips those two (and says so).
+//   - a production-shaped fleet in a throwaway Postgres schema (port +2): one cab that is off, on
+//     old firmware, with no position and a percentage signal; an empty group; ten-minute videos;
+//     then the cab on its built-in video, then no cabs. The schema and its files are removed after.
+// E2E_SPAWN=0 skips those three (and says so). E2E_ONLY=production runs only the production pass.
 //
 // Each run uploads 3 videos without signing in on the main server (the ceiling there is 20 per
 // rolling hour by default), so up to about six runs an hour fit.
@@ -48,6 +51,8 @@ const RUN_ID = Date.now().toString(36);
 const RUN_STARTED = new Date();
 const SPAWN = process.env.E2E_SPAWN !== "0";
 const EXTRA_PORT = Number(process.env.E2E_EXTRA_PORT ?? 3101);
+// E2E_ONLY=production runs just the production-shaped suite (on its own extra server).
+const ONLY = process.env.E2E_ONLY ?? "";
 const SHARED_NAME = "Phone app (not signed in)";
 const SHARED_ID = "anonymous:phone-app";
 
@@ -293,14 +298,18 @@ async function main() {
 
   const browser = await chromium.launch();
   try {
-    if (mode === "open") {
+    if (ONLY === "production") {
+      await productionShapeSuite(browser);
+    } else if (mode === "open") {
       await openSuite(browser);
       if (SPAWN) {
+        await productionShapeSuite(browser);
         await withExtraServer(EXTRA_PORT, { PHONE_APP_ANON_UPLOADS_PER_HOUR: "3", PHONE_APP_REQUIRE_SIGN_IN: "false" }, (base) =>
           uploadCeilingSuite(browser, base),
         );
         await withExtraServer(EXTRA_PORT + 1, { PHONE_APP_REQUIRE_SIGN_IN: "true" }, (base) => signInRequiredSuite(browser, base));
       } else {
+        skip("production-shaped fleet (extra server)", "E2E_SPAWN=0");
         skip("anonymous upload ceiling (extra server)", "E2E_SPAWN=0");
         skip("PHONE_APP_REQUIRE_SIGN_IN=true restores sign-in (extra server)", "E2E_SPAWN=0");
       }
@@ -308,11 +317,413 @@ async function main() {
       await signInRequiredSuite(browser, BASE);
       skip("open phone app (no sign-in)", "the server at BASE_URL requires sign-in; run it without PHONE_APP_REQUIRE_SIGN_IN");
     }
-    await check("icon contact sheet (every generated icon at its real sizes)", () => iconContactSheet(browser));
+    if (!ONLY) await check("icon contact sheet (every generated icon at its real sizes)", () => iconContactSheet(browser));
   } finally {
     await browser.close().catch(() => undefined);
     await cleanup();
   }
+}
+
+// ================================================================ production-shaped fleet
+//
+// The phone app was built against the lively demo fleet. Production looks nothing like it: ONE cab
+// that is usually off, on firmware 1.0.0, whose box has no modem it can read (no position, and a
+// signal figure that is a percentage from NetworkManager); one group with no cabs; twelve videos,
+// eleven of them ten-minute rotations built in the desktop loop builder with long campaign names.
+// This suite builds exactly that in a throwaway Postgres schema, runs its own server on it, and
+// walks every screen in three shapes: the cab off, the cab just switched on playing its built-in
+// video, and no cabs at all. It also checks that a request that never answers can't freeze a screen
+// and that a change whose answer is lost is checked, not reported as failed.
+
+const PROD_LOOP_NAMES = [
+  "Say Now - Say What You See EP 1920x1080",
+  "DAZN 26 Oct rotation (ad in journey)",
+  "DAZN 2 Nov rotation (ad in journey)",
+  "DAZN 9 Nov rotation (ad before journey)",
+  "Explore 1920x1080",
+  "Explore London autumn half-term rotation 1920x1080",
+  "Uber Eats lunch slot test (ad in journey) 1920x1080",
+  "Rotation A, fillers only (no adverts) 1920x1080",
+  "Rotation B, Say Now x2 + DAZN x1 1920x1080",
+  "Rotation C, Explore + Uber Eats 1920x1080",
+  "Night rotation, quiet fillers 1920x1080",
+];
+const PROD_UPLOAD_NAME = "Phone test clip";
+const PROD_SERIAL = `PROD-SHAPE-${RUN_ID}`;
+
+function schemaUrl(name) {
+  const url = new URL(process.env.DATABASE_URL);
+  url.searchParams.set("schema", name);
+  return url.toString();
+}
+
+/** Build the production shape in a fresh schema. Returns handles for the checks and cleanup. */
+async function buildProductionShape(schema) {
+  const url = schemaUrl(schema);
+  await run(process.execPath, [path.join(repoRoot, "node_modules/prisma/build/index.js"), "db", "push", "--schema", "packages/db/prisma/schema.prisma", "--skip-generate", "--accept-data-loss"], {
+    cwd: repoRoot,
+    env: { ...process.env, DATABASE_URL: url },
+    timeout: 180_000,
+  });
+  const { PrismaClient } = require("@prisma/client");
+  const prisma = new PrismaClient({ datasourceUrl: url });
+  const storageDir = path.join(webDir, "tmp/storage", `e2e-prod-${RUN_ID}`);
+  mkdirSync(storageDir, { recursive: true });
+  const now = Date.now();
+  const colors = ["0x1d3557", "0x6a040f", "0x2d6a4f", "0x7f5539", "0x3a0ca3", "0x9d0208", "0x386641", "0x5f0f40", "0x0b525b", "0x6c584c", "0x22223b", "0x14213d"];
+  const loops = [];
+  for (const [index, name] of [...PROD_LOOP_NAMES, PROD_UPLOAD_NAME].entries()) {
+    const file = path.join(storageDir, `loop-${index}.mp4`);
+    // A short stand-in for each video (the app only reads the first seconds for the still).
+    await run("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", `color=c=${colors[index]}:s=640x360:r=25:d=3`, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", file]);
+    const upload = name === PROD_UPLOAD_NAME;
+    const loop = await prisma.loop.create({
+      data: {
+        name,
+        status: "PUBLISHED",
+        autoLive: !upload,
+        manifestUrl: `e2e-prod/${index}/manifest.json`,
+        checksum: `sha256:e2e${index}`,
+        compiledVideoKey: `e2e-prod-${RUN_ID}/loop-${index}.mp4`,
+        compiledVideoUrl: `/api/storage/e2e-prod-${RUN_ID}/loop-${index}.mp4`,
+        durationMs: upload ? 60_000 : 600_000,
+        publishedAt: new Date(now - (40 - index * 3) * 24 * 3600_000),
+        createdAt: new Date(now - (41 - index * 3) * 24 * 3600_000),
+        ...(upload ? {} : { slots: { create: Array.from({ length: 10 }, (_, position) => ({ position })) } }),
+      },
+    });
+    loops.push(loop);
+  }
+  const sayNow = loops[0];
+  await prisma.systemSetting.create({
+    data: { key: "fleet-loop-assignment", value: { loopId: sayNow.id, assignedAt: new Date(now - 3 * 24 * 3600_000).toISOString(), assignedBy: null } },
+  });
+  const group = await prisma.deviceGroup.create({ data: { name: "TCR" } });
+
+  // The real cab: on for an hour or so a few times a day, last on yesterday evening.
+  const lastOn = new Date(now - 20 * 3600_000);
+  const device = await prisma.device.create({
+    data: {
+      serialNumber: PROD_SERIAL,
+      cabLicenseNumber: "RodrigoCab",
+      firmwareVersion: "1.0.0",
+      currentLoopId: sayNow.id,
+      lastHeartbeatAt: lastOn,
+      storageFreeMb: 201_000,
+      createdAt: new Date(now - 237 * 24 * 3600_000),
+    },
+  });
+  const heartbeats = [];
+  for (const endAgoHours of [20, 27, 44, 51, 70]) {
+    const end = now - endAgoHours * 3600_000;
+    for (let t = end - 70 * 60_000; t <= end; t += 5 * 60_000) heartbeats.push(prodHeartbeat(device.id, new Date(t), sayNow.id));
+  }
+  await prisma.deviceHeartbeat.createMany({ data: heartbeats });
+  return { prisma, url, storageDir, loops, sayNow, group, device };
+}
+
+/** What firmware 1.0.0 on the x86 box sends: NetworkManager location, a percentage signal, idle player. */
+function prodHeartbeat(deviceId, receivedAt, currentLoopId, playerStatus = "idle") {
+  return {
+    deviceId,
+    receivedAt,
+    firmwareVersion: "1.0.0",
+    storageFreeMb: 201_000,
+    currentLoopId,
+    cpuTemp: 54,
+    uptimeSeconds: 3600,
+    memoryUsedPercent: 38,
+    playerStatus,
+    networkType: "4g",
+    signalStrength: 62,
+    locationData: { method: "network_manager", operator: "EE", signalStrength: 62, state: "100 (connected)", networkType: "gsm", resolved: null, servingCell: null },
+  };
+}
+
+async function mainText(page) {
+  return (await page.locator("main").innerText()).replace(/\s+/g, " ");
+}
+
+/** Copy that must never appear on a production-shaped screen. */
+function assertNoDemoAssumptions(text, where) {
+  assert(!/\b0 cabs\b/.test(text), `${where}: says "0 cabs": ${text.slice(0, 300)}`);
+  assert(!/on and playing/.test(text), `${where}: "on and playing"`);
+  assert(!/Unknown loop/.test(text), `${where}: "Unknown loop"`);
+  assert(!/passenger/i.test(text), `${where}: passenger wording for a cab with no passenger input`);
+  assert(!/dBm/.test(text), `${where}: dBm for a percentage signal`);
+}
+
+async function productionShapeSuite(browser) {
+  const schema = `e2e_prod_${RUN_ID}`;
+  let shape = null;
+  try {
+    await check("production shape: build it in its own schema (1 cab, empty group, 12 videos)", async () => {
+      shape = await buildProductionShape(schema);
+    });
+    await withExtraServer(EXTRA_PORT + 2, { DATABASE_URL: shape.url, PHONE_APP_REQUIRE_SIGN_IN: "false" }, async (base) => {
+      // Warm up the routes so a first compile isn't mistaken for a slow server.
+      for (const url of ["/m", "/m/map", "/m/videos", "/m/upload", "/m/change", `/m/videos/${shape.sayNow.id}`, `/m/cabs/${shape.device.id}`, "/api/m/overview", "/api/m/loops", `/api/m/loops/${shape.sayNow.id}`, `/api/m/cabs/${shape.device.id}`]) await fetch(`${base}${url}`).catch(() => undefined);
+      const context = await newPhoneContext(browser, devices["iPhone 14"], {}, base);
+      // An iPhone: Safari has no navigator.connection.
+      await context.addInitScript(() => {
+        try {
+          Object.defineProperty(Navigator.prototype, "connection", { get: () => undefined, configurable: true });
+        } catch {
+          // ignore
+        }
+      });
+      const page = await context.newPage();
+      page.setDefaultTimeout(45_000);
+      page.on("pageerror", (error) => console.log(`  [pageerror] ${error.message}`));
+      const go = (url) => goto(page, url, base);
+      const dazn = shape.loops[1];
+      try {
+        await productionScreens(page, go, base, shape, dazn);
+      } finally {
+        await context.close();
+      }
+    });
+  } finally {
+    if (shape) {
+      const ids = shape.loops.map((loop) => loop.id);
+      await shape.prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch((error) => console.log(`  could not drop ${schema}: ${error.message}`));
+      await shape.prisma.$disconnect().catch(() => undefined);
+      rmSync(shape.storageDir, { recursive: true, force: true });
+      for (const id of ids) rmSync(path.join(webDir, "tmp/storage/loops", id), { recursive: true, force: true });
+    }
+  }
+}
+
+async function productionScreens(page, go, base, shape, dazn) {
+  const { prisma, device, group, sayNow } = shape;
+
+  await check("production shape, cab off: home reads true (no 0 cabs, no 'on and playing', no passenger)", async () => {
+    await go("/m");
+    await page.getByTestId("cab-list").waitFor();
+    const text = await mainText(page);
+    assertNoDemoAssumptions(text, "home");
+    assert(text.includes("RodrigoCab"), "the cab is listed");
+    assert(text.includes("no cabs in it yet"), `empty group says so: ${text}`);
+    assert((await page.locator(".m-tabbar a").count()) === 4, "no Map tab when no cab can report a position");
+    await shot(page, "prod-home", { fullPage: true });
+  });
+
+  await check("production shape: the map explains, per cab, why there is nothing to show", async () => {
+    await go("/m/map");
+    await page.getByTestId("map-empty").waitFor();
+    const text = await mainText(page);
+    assert(/doesn’t report a position/.test(text), `map wording: ${text}`);
+    assert(!/All 0|0 of/.test(text), "no zero counts");
+    await shot(page, "prod-map-deeplink");
+  });
+
+  await check("production shape: cab screen (off, no position, percentage signal, figures dated)", async () => {
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    assert((await page.getByTestId("cab-location-text").count()) === 0, "no 'Where it is' promise for a cab that can't report one");
+    await page.locator('[data-testid="tech-details"] summary').click();
+    const tech = await page.getByTestId("tech-details").innerText();
+    assert(/Good \(62%\)/.test(tech), `signal as a percentage: ${tech}`);
+    assert(/as of/.test(tech) && (await page.getByTestId("tech-stale").count()) === 1, "says how old the figures are");
+    assert(/Not reported by this cab’s equipment/.test(tech), "position row");
+    const text = await mainText(page);
+    assertNoDemoAssumptions(text, "cab");
+    assert(/Last played/.test(text), "last played");
+    await shot(page, "prod-cab-off", { fullPage: true });
+  });
+
+  await check("production shape: videos list and a ten-minute video", async () => {
+    await go("/m/videos");
+    await page.getByTestId("video-list").waitFor();
+    assert((await page.getByTestId("video-row").count()) === 12, "twelve videos");
+    await page.waitForTimeout(1500); // stills
+    assertNoDemoAssumptions(await mainText(page), "videos");
+    await shot(page, "prod-videos", { fullPage: true });
+    await go(`/m/videos/${sayNow.id}`);
+    await page.getByTestId("video-live").waitFor();
+    assertNoDemoAssumptions(await mainText(page), "video");
+    await shot(page, "prod-video", { fullPage: true });
+  });
+
+  await check("production shape: choosing what the only cab already plays says no cab changes", async () => {
+    await go(`/m/change?target=fleet&loop=${sayNow.id}`);
+    await page.getByTestId("confirm-card").waitFor();
+    const count = await page.getByTestId("impact-count").textContent();
+    assert(/No change: it’s already playing this video/.test(count), `headline: ${count}`);
+    const button = await page.getByTestId("confirm-change").textContent();
+    assert(!/\d+ cab/.test(button), `button doesn't count a cab that won't change: ${button}`);
+    await shot(page, "prod-change-same", { fullPage: true });
+  });
+
+  await check("production shape: step two counts real changes and names the empty group", async () => {
+    await go(`/m/change?loop=${dazn.id}`);
+    await page.getByTestId("choose-target-list").waitFor();
+    const text = await page.getByTestId("choose-target-list").innerText();
+    assert(/Changes 1 cab/.test(text) && /No cabs in this group yet/.test(text), `subtitles: ${text}`);
+    await shot(page, "prod-change-where");
+    await page.locator(`[data-testid="target-group"][data-group-id="${group.id}"]`).click();
+    await page.getByTestId("confirm-card").waitFor();
+    const confirm = await mainText(page);
+    assert(/no cabs in this group yet/i.test(confirm) && !/\b0 cabs\b/.test(confirm), `confirm: ${confirm}`);
+    assert((await page.getByTestId("confirm-change").textContent()).includes("Yes, set it for TCR"), "button");
+    await shot(page, "prod-change-group-confirm", { fullPage: true });
+    await page.getByTestId("confirm-change").click();
+    await page.getByTestId("change-done").waitFor();
+    const done = await page.getByTestId("done-summary").textContent();
+    assert(/no cabs in this group yet/i.test(done) && !/\b0 cabs\b/.test(done), `done: ${done}`);
+    await shot(page, "prod-change-group-done");
+  });
+
+  await check("production shape: a video chosen only for the empty group is 'set', not live, and can be removed", async () => {
+    await go("/m/videos");
+    const row = page.locator(`[data-testid="video-row"][data-loop-id="${dazn.id}"]`);
+    await row.waitFor();
+    const rowText = await row.innerText();
+    assert(/Set for TCR · no cabs in that group yet/.test(rowText), `row: ${rowText}`);
+    assert((await row.locator(".m-livedot").count()) === 0, "no green live dot");
+    await go(`/m/change?target=group:${group.id}`);
+    await page.getByTestId("choose-video-list").waitFor();
+    const list = await page.getByTestId("choose-video-list").innerText();
+    assert(/chosen there now/.test(list), `change list agrees with Videos: ${list.slice(0, 400)}`);
+    await go(`/m/videos/${dazn.id}`);
+    await page.getByTestId("video-live").waitFor();
+    const live = await page.getByTestId("video-live").innerText();
+    assert(/Not on any screen yet/.test(live) && !/\b0 cabs\b/.test(live), `video screen: ${live}`);
+    await shot(page, "prod-video-set-empty-group", { fullPage: true });
+    await page.getByTestId("remove-video").click();
+    await page.getByTestId("remove-sheet").waitFor();
+    assert(/no cabs yet, so no screen shows it/.test(await page.getByTestId("remove-sheet").innerText()), "explains and offers a way out");
+    await shot(page, "prod-remove-empty-group");
+    await page.getByTestId("remove-free-confirm").click();
+    await page.waitForURL(/\/m\/videos$/);
+    const after = await prisma.loop.findUnique({ where: { id: dazn.id } });
+    assert(after.status === "ARCHIVED", "removed");
+    const tcr = await prisma.deviceGroup.findUnique({ where: { id: group.id } });
+    assert(tcr.assignedLoopId === null && tcr.assignmentAt, "TCR back on the video for all cabs");
+  });
+
+  await check("production shape, iPhone: a large video on unknown network gets no mobile-data prompt; empty-group upload says so", async () => {
+    const big = path.join(workDir, "big-iphone.mov");
+    writeFileSync(big, Buffer.alloc(0));
+    await run("truncate", ["-s", "60M", big]);
+    await go("/m/upload");
+    // The dev server may reload a page it has just compiled; let that settle before choosing a file.
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("upload-file").setInputFiles(big);
+    await page.getByTestId("upload-name").fill("Big iPhone video");
+    await page.waitForTimeout(1500);
+    await shot(page, "prod-upload-large-iphone", { fullPage: true });
+    assert((await page.getByTestId("upload-wifi-note").count()) === 0, "no 'Wi-Fi recommended' when the phone can't tell");
+    await page.getByTestId("upload-large-note").waitFor();
+    await page.locator(".m-radio", { hasText: "TCR group" }).click();
+    const sub = await page.locator(".m-radio", { hasText: "TCR group" }).innerText();
+    assert(/No cabs in this group yet/.test(sub), `radio: ${sub}`);
+    await page.getByTestId("upload-submit").click();
+    await page.getByTestId("upload-confirm").waitFor();
+    const sheet = await page.getByTestId("upload-confirm").innerText();
+    assert(/Yes, upload it/.test(sheet) && !/\b0 cabs\b/.test(sheet) && !/mobile data/.test(sheet), `sheet: ${sheet}`);
+    await shot(page, "prod-upload-confirm-empty-group");
+    await page.keyboard.press("Escape");
+  });
+
+  await check("production shape: while a video is prepared, another can be uploaded (also after a reload)", async () => {
+    const file = await makeVideo(path.join(workDir, "prep.mov"), 45, "1920x1080");
+    await go("/m/upload");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("upload-file").setInputFiles(file);
+    await page.getByTestId("upload-name").fill(`Prepared meanwhile ${RUN_ID}`);
+    await page.waitForTimeout(800);
+    await page.getByTestId("upload-submit").click();
+    await page.locator('[data-testid="upload-job"][data-phase="processing"]').waitFor({ timeout: 120_000 });
+    await page.getByTestId("upload-another-head").waitFor();
+    assert((await page.getByTestId("upload-file").count()) === 1, "the form is there too");
+    await shot(page, "prod-upload-processing-and-another", { fullPage: true });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByTestId("upload-another-head").waitFor();
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
+  });
+
+  await check("production shape: a cab just switched on, playing its built-in video", async () => {
+    const at = new Date(Date.now() - 60_000);
+    await prisma.deviceHeartbeat.create({ data: prodHeartbeat(device.id, at, "fallback") });
+    await prisma.device.update({ where: { id: device.id }, data: { lastHeartbeatAt: at, currentLoopId: "fallback" } });
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    const today = await page.getByTestId("on-today").textContent();
+    assert(today !== "Not yet", `on today: ${today}`);
+    await page.getByTestId("built-in-still").waitFor();
+    const text = await mainText(page);
+    assertNoDemoAssumptions(text, "cab on built-in");
+    assert(/built-in/i.test(text), "names the built-in video");
+    await shot(page, "prod-cab-on-built-in", { fullPage: true });
+    await go("/m");
+    await page.getByTestId("cab-list").waitFor();
+    const home = await mainText(page);
+    assertNoDemoAssumptions(home, "home with cab on");
+    assert(/Built-in video, fetching/.test(home), `cab row: ${home}`);
+    await shot(page, "prod-home-cab-on", { fullPage: true });
+  });
+
+  await check("a request that never answers doesn't freeze the screen: it recovers by itself", async () => {
+    await go("/m");
+    await page.getByTestId("cab-list").waitFor();
+    let hang = true;
+    let afterHang = 0;
+    const held = [];
+    await page.route("**/api/m/overview", async (route) => {
+      if (hang) {
+        held.push(route);
+        return; // never answer
+      }
+      afterHang += 1;
+      await route.continue();
+    });
+    await page.getByTestId("freshness").click();
+    await page.waitForTimeout(500);
+    hang = false; // the network is back, but the first request is still stuck
+    await page.waitForFunction(() => !document.querySelector('[data-testid="freshness"]')?.classList.contains("is-loading"), null, { timeout: 40_000 });
+    for (let i = 0; i < 40 && afterHang === 0; i += 1) await page.waitForTimeout(1000);
+    assert(afterHang > 0, "a new request went out after the stuck one timed out");
+    await page.waitForFunction(() => document.querySelector('[data-testid="freshness"]')?.textContent?.includes("just now"), null, { timeout: 30_000 });
+    await page.unroute("**/api/m/overview");
+    for (const route of held) await route.abort().catch(() => undefined);
+  });
+
+  await check("production shape, no cabs: home, map and the all-cabs confirmation read sensibly", async () => {
+    await prisma.device.update({ where: { id: device.id }, data: { isActive: false } });
+    await go("/m");
+    await page.getByText("No cabs yet").first().waitFor();
+    await page.waitForTimeout(500);
+    const home = await mainText(page);
+    assertNoDemoAssumptions(home, "home, no cabs");
+    assert(/no cabs yet/i.test(home), `home: ${home}`);
+    await shot(page, "prod-nocabs-home", { fullPage: true });
+    await go("/m/map");
+    await page.getByTestId("map-empty").waitFor();
+    assert(/No cabs yet/.test(await mainText(page)), "map");
+    await shot(page, "prod-nocabs-map");
+    const explore = shape.loops[4];
+    await go(`/m/change?target=fleet&loop=${explore.id}`);
+    await page.getByTestId("confirm-card").waitFor();
+    const confirm = await mainText(page);
+    assert(/There are no cabs yet/.test(confirm) && !/Every cab is following/.test(confirm), `confirm: ${confirm}`);
+    await shot(page, "prod-nocabs-change-fleet", { fullPage: true });
+  });
+
+  await check("a change whose answer is lost is checked, not reported as failed", async () => {
+    const explore = shape.loops[4];
+    await page.route("**/api/m/assign", async (route) => {
+      await route.fetch(); // the server applies it...
+      // ...but the answer never reaches the phone.
+    });
+    await page.getByTestId("confirm-change").click();
+    await page.getByTestId("change-done").waitFor({ timeout: 60_000 });
+    await page.getByTestId("done-confirmed").waitFor();
+    await shot(page, "prod-change-lost-answer-confirmed");
+    await page.unroute("**/api/m/assign");
+    const fleet = await prisma.systemSetting.findUnique({ where: { key: "fleet-loop-assignment" } });
+    assert(fleet.value.loopId === explore.id, "the server did apply it");
+  });
 }
 
 // ============================================================================ open (default) mode
@@ -554,7 +965,10 @@ async function openSuite(browser) {
     await page.locator(`[data-testid="choose-video"][data-loop-id="${theatre.id}"]`).click();
     await page.getByTestId("confirm-card").waitFor();
     const fresh = (await anon("/api/m/overview")).body;
-    const following = fresh.cabs.filter((cab) => cab.expectedSource === "fleet").length;
+    // Cabs that really change: following all cabs, and neither showing it already nor already set to it.
+    const following = fresh.cabs.filter(
+      (cab) => cab.expectedSource === "fleet" && cab.playing?.id !== theatre.id && cab.expected?.id !== theatre.id,
+    ).length;
     const countText = await page.getByTestId("impact-count").textContent();
     assert(countText.includes(`This changes ${following} cab`), `impact text "${countText}" vs ${following}`);
     assert((await page.getByTestId("confirm-question").textContent()).includes("all cabs"), "question names all cabs");
@@ -650,7 +1064,8 @@ async function openSuite(browser) {
   await check("a video that is playing can't be removed (explained)", async () => {
     await page.getByTestId("remove-video").click();
     await page.getByTestId("remove-sheet").waitFor();
-    assert((await page.getByTestId("remove-sheet").textContent()).includes("Put a different video on those cabs first"), "explains why");
+    assert((await page.getByTestId("remove-sheet").textContent()).includes("Put a different video on each first"), "explains why");
+    assert((await page.locator('[data-testid="remove-places"] a').count()) > 0, "and links to where to change it");
     await page.keyboard.press("Escape");
   });
 

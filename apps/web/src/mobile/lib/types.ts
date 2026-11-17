@@ -39,7 +39,7 @@ export type CabSummary = {
   driverName: string | null;
   group: { id: string; name: string } | null;
   status: CabStatus;
-  playerStatus: "journey" | "silent" | "idle" | "disabled" | "unknown";
+  playerStatus: "journey" | "silent" | "idle" | "disabled" | "fallback" | "error" | "unknown";
   lastSeenAt: string | null;
   playing: LoopRef | null;
   expected: LoopRef | null;
@@ -58,10 +58,25 @@ export type CabSummary = {
   fleetPaused: boolean;
   /** Worst-case minutes for this cab to act on a change (depends on its software version). */
   changeLagMinutes: number;
+  /** Seconds on since London midnight (hoursOnlineToday is rounded to a tenth of an hour). */
+  secondsOnlineToday?: number;
+  /** The cab plays its built-in standby video (a new box, or one that lost its video). */
+  playingBuiltIn?: boolean;
+  /** What its equipment reports about where it is (latest heartbeat). */
+  positionReporting?: "gps" | "cell" | "none" | "unknown";
+  /** How journeys start, once the cab reports it. */
+  playbackTrigger?: "gpio" | "keyboard" | "always" | null;
+  /** The cab plays for passenger journeys, so passenger wording applies. */
+  reportsJourneys?: boolean;
 };
 
 export type CabDetail = CabSummary & {
+  /** dBm from the modem, or (older firmware without a modem) a 0-100 percentage. */
   signalStrength: number | null;
+  /** 0-100 signal quality, when that is what the cab reports. */
+  signalPercent?: number | null;
+  /** When the technical figures were reported. */
+  reportedAt?: string | null;
   networkType: string | null;
   storageFreeMb: number | null;
   cpuTemp: number | null;

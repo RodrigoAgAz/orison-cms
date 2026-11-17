@@ -39,12 +39,14 @@ export type UploadJob = {
   warning: string | null;
   /** Failed phase only: we could not find out whether the server received the video. */
   uncertain?: boolean;
+  /** Length of the video in seconds, read on the phone before sending (for honest waiting times). */
+  seconds?: number | null;
   loop: LoopSummary | null;
 };
 
 type UploadContextValue = {
   job: UploadJob | null;
-  start: (input: { file: File; name: string; target: AssignTarget | null; targetLabel: string | null }) => void;
+  start: (input: { file: File; name: string; target: AssignTarget | null; targetLabel: string | null; seconds?: number | null }) => void;
   cancel: () => void;
   dismiss: () => void;
 };
@@ -103,6 +105,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [job, setJob] = useState<UploadJob | null>(null);
   const xhrRef = useRef<XMLHttpRequest | null>(null);
   const pollRef = useRef<number | null>(null);
+  // Bumped whenever polling starts or a new upload begins: a check still in flight for an earlier
+  // video must not write its answer onto the current one.
+  const pollTokenRef = useRef(0);
   // Key of the upload this provider is currently sending (null once cancelled or dismissed).
   const activeKeyRef = useRef<string | null>(null);
 
@@ -118,12 +123,27 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const poll = useCallback(
     (loopId: string) => {
       if (pollRef.current) window.clearTimeout(pollRef.current);
+      const token = ++pollTokenRef.current;
+      // Preparing takes minutes for a long video: check every 5 s at first, then less often. While
+      // the app is in the background nothing is checked; coming back checks at once.
+      let checks = 0;
+      const next = (tick: () => void, delay: number) => {
+        pollRef.current = window.setTimeout(() => {
+          if (document.visibilityState === "hidden") {
+            pollRef.current = null;
+            return;
+          }
+          tick();
+        }, delay);
+      };
       const tick = async () => {
+        checks += 1;
         try {
           const loop = await api<LoopSummary>(`/api/m/loops/${loopId}`);
+          if (token !== pollTokenRef.current) return;
           if (loop.processing.state === "processing") {
             update({ loop });
-            pollRef.current = window.setTimeout(tick, 2500);
+            next(tick, checks < 12 ? 5000 : 15_000);
             return;
           }
           if (loop.processing.state === "failed") {
@@ -134,12 +154,13 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           pollRef.current = null;
           void invalidate("/api/m/");
         } catch (error) {
+          if (token !== pollTokenRef.current) return;
           if (error instanceof ApiFailure && error.status === 404) {
             update({ phase: "failed", error: "This upload was removed." });
             return;
           }
-          // network blip: keep trying, a little slower
-          pollRef.current = window.setTimeout(tick, 6000);
+          // network blip or no answer: keep trying, a little slower
+          next(tick, 10_000);
         }
       };
       void tick();
@@ -176,8 +197,13 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   }, [job?.phase, job?.loopId, poll]);
 
   const start = useCallback<UploadContextValue["start"]>(
-    ({ file, name, target, targetLabel }) => {
+    ({ file, name, target, targetLabel, seconds }) => {
       xhrRef.current?.abort();
+      // An earlier video still being prepared carries on at the server (it stays in Videos);
+      // this screen follows the new one from now on.
+      if (pollRef.current) window.clearTimeout(pollRef.current);
+      pollRef.current = null;
+      pollTokenRef.current += 1;
       const fresh: UploadJob = {
         key: `${Date.now()}`,
         name,
@@ -193,6 +219,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         error: null,
         warning: null,
         loop: null,
+        seconds: seconds ?? null,
       };
       setJob(fresh);
       activeKeyRef.current = fresh.key;
@@ -334,6 +361,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   const dismiss = useCallback(() => {
     activeKeyRef.current = null;
+    pollTokenRef.current += 1;
     if (pollRef.current) window.clearTimeout(pollRef.current);
     setJob(null);
     remember(null);

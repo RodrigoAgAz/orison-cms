@@ -108,3 +108,11 @@ export function distance(metres: number) {
 export function quoted(name: string) {
   return `“${name}”`;
 }
+
+/** Copy for a video being prepared: honest about long videos (a 10-minute one takes several minutes). */
+export function preparingWords(durationMs: number | null | undefined) {
+  if (durationMs && durationMs <= 2 * 60_000) return "This usually takes a minute or two.";
+  if (durationMs) return "A video this long can take 5 minutes or more.";
+  return "Short videos take a minute or two; a long one (say 10 minutes) can take 5 minutes or more.";
+}
+

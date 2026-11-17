@@ -1,7 +1,7 @@
 import { AnalyticsDashboard } from "@/components/analytics-dashboard";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
-import { getAnalyticsData } from "@/lib/queries";
+import { getAnalyticsData } from "@/lib/fleet-data";
 
 export default async function AnalyticsPage() {
   await requireUser();
@@ -11,9 +11,12 @@ export default async function AnalyticsPage() {
     <div className="page">
       <div className="page-header">
         <div>
-          <span className="eyebrow">Reporting</span>
-          <h1>Playback Analytics</h1>
-          <p className="muted">High-level pilot metrics for impressions, ad plays, and uptime.</p>
+          <span className="eyebrow">Analytics</span>
+          <h1>Playback analytics</h1>
+          <p className="muted">
+            What the screens played over the last 30 days, by London calendar day. Each figure says exactly what it
+            counts.
+          </p>
         </div>
       </div>
 

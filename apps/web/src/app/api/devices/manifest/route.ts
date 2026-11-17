@@ -3,10 +3,13 @@ import { type NextRequest } from "next/server";
 import { deviceManifestResponseSchema } from "@orison/shared";
 
 import { requireDevice } from "@/lib/device-auth";
+import { env } from "@/lib/env";
 import { getFleetControlState } from "@/lib/fleet-control";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
 import { getLoopRoutingSnapshot, resolveDeviceLoop } from "@/lib/loop-routing";
 import { enforceDeviceRateLimit } from "@/lib/rate-limit";
+import { getConfiguredSafetyMessage } from "@/lib/safety-message";
+import { rebaseStorageUrl, requestOrigin } from "@/lib/storage-urls";
 
 export async function GET(request: NextRequest) {
   try {
@@ -20,10 +23,11 @@ export async function GET(request: NextRequest) {
       windowMs: 5 * 60 * 1000,
     });
 
-    const [device, routing, fleetControl] = await Promise.all([
+    const [device, routing, fleetControl, safety] = await Promise.all([
       requireDevice(request, serialNumber),
       getLoopRoutingSnapshot(),
       getFleetControlState(),
+      getConfiguredSafetyMessage(),
     ]);
 
     const { loop } = resolveDeviceLoop(device, routing);
@@ -32,15 +36,29 @@ export async function GET(request: NextRequest) {
       throw new ApiError("No published loop available", 404);
     }
 
+    // Stored URLs carry the domain the loop was published under; serve them on the one the cab
+    // is using now (lib/storage-urls.ts).
+    const origin = requestOrigin(request, env.appUrl);
+
     return apiResponse(
       deviceManifestResponseSchema.parse({
         loopId: loop.id,
-        manifestUrl: loop.manifestUrl,
+        manifestUrl: rebaseStorageUrl(loop.manifestUrl, origin),
         version: loop.version,
         checksum: loop.checksum ?? "",
-        compiledVideoUrl: loop.compiledVideoUrl,
+        compiledVideoUrl: rebaseStorageUrl(loop.compiledVideoUrl, origin),
         disabled: device.isDisabled || fleetControl.disabled,
         disabledReason: device.isDisabled ? device.disabledReason : fleetControl.reason,
+        // The safety message configured now, not the one frozen into the loop's manifest file
+        // (firmware 1.2.0+ uses this; older firmware keeps reading the file's copy).
+        safetyVideo: safety
+          ? {
+              url: rebaseStorageUrl(safety.url, origin),
+              checksum: safety.checksum ?? "",
+              durationMs: safety.durationMs,
+              mimeType: safety.mimeType,
+            }
+          : null,
       }),
     );
   } catch (error) {

@@ -138,3 +138,99 @@ export function startOfLocalDay(now: Date = new Date(), timeZone = "Europe/Londo
   }
   return new Date(candidate);
 }
+
+// --- Sync state and passenger detection (DEVICE_CONTRACT_V2) -----------------------------------
+// Shared by the desktop pages and, for the phone app, lib/mobile.ts. Both read the Device row:
+// Device.syncState/syncError/syncStateSince/syncNextRetryAt/lastSyncAt and Device.playbackTrigger
+// are written by POST /api/devices/heartbeat.
+
+export type SyncSummary = {
+  /** "failing": the cab reports its last attempt failed. "downloading": it is fetching content.
+   * "waiting": it plays something else than expected and reports no sync state (firmware before
+   * 1.2.0, which cannot say why). "current": plays what it should. "unknown": no data. */
+  state: "failing" | "downloading" | "waiting" | "current" | "unknown";
+  label: string;
+  /** Short reason from the cab, only when failing. */
+  error: string | null;
+  since: Date | null;
+  nextRetryAt: Date | null;
+  lastSyncedAt: Date | null;
+};
+
+type SyncDevice = {
+  currentLoopId: string | null;
+  lastSyncAt: Date | null;
+  syncState?: string | null;
+  syncError?: string | null;
+  syncStateSince?: Date | null;
+  syncNextRetryAt?: Date | null;
+};
+
+export function summarizeSync(device: SyncDevice, expectedLoopId: string | null): SyncSummary {
+  const base = {
+    since: device.syncStateSince ?? null,
+    nextRetryAt: device.syncNextRetryAt ?? null,
+    lastSyncedAt: device.lastSyncAt,
+  };
+  if (device.syncState === "failed") {
+    return { ...base, state: "failing", label: "Update failing", error: device.syncError ?? "No reason given" };
+  }
+  if (device.syncState === "downloading") {
+    return { ...base, state: "downloading", label: "Downloading new content", error: null };
+  }
+  if (expectedLoopId && device.currentLoopId !== expectedLoopId) {
+    return { ...base, state: "waiting", label: "Not on the expected loop yet", error: null };
+  }
+  if (!device.currentLoopId && !expectedLoopId) {
+    return { ...base, state: "unknown", label: "Nothing to play", error: null };
+  }
+  return { ...base, state: "current", label: "Up to date", error: null };
+}
+
+/**
+ * Whether journeys (and so "waiting for a passenger" / "passenger on board" and journey figures)
+ * apply to a cab. "always" = plays continuously with no passenger detection. Null = firmware
+ * before 1.2.0, which always starts journeys from the button/door input.
+ */
+export function hasPassengerDetection(playbackTrigger: string | null | undefined) {
+  return playbackTrigger !== "always";
+}
+
+/** One wording for what the screen is doing, aware of cabs without passenger detection. */
+export function screenActivityLabel(
+  playerStatus: string | null | undefined,
+  playbackTrigger: string | null | undefined,
+  online: boolean,
+) {
+  if (!online) {
+    return "Not reporting";
+  }
+  const detects = hasPassengerDetection(playbackTrigger);
+  switch (playerStatus) {
+    case "playing":
+      return detects ? "Passenger on board" : "Playing the loop";
+    case "silent":
+      return detects ? "Passenger on board (muted)" : "Playing muted";
+    case "idle":
+      return detects ? "Waiting for a passenger" : "Showing a still";
+    case "disabled":
+      return "Paused";
+    case "fallback":
+      return "Playing fallback content";
+    case "error":
+      return "Player not running";
+    default:
+      return "Unknown";
+  }
+}
+
+/** Signal as a person reads it: "62%" (quality) or "-95 dBm". */
+export function formatSignal(signalPercent: number | null | undefined, signalDbm: number | null | undefined) {
+  if (typeof signalPercent === "number") {
+    return `${signalPercent}%`;
+  }
+  if (typeof signalDbm === "number") {
+    return `${signalDbm} dBm`;
+  }
+  return "n/a";
+}

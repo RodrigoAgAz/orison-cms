@@ -4,19 +4,20 @@
 
 import { prisma } from "@orison/db";
 
-import { createLimiter, processSingleton } from "./job-limits";
+import { mediaJobLimiter, processSingleton } from "./job-limits";
 import { UPLOAD_LIVENESS_INTERVAL_MS } from "./upload-rules";
 
 export type UploadJobState = "waiting" | "running";
 
 type QueueState = {
-  limiter: ReturnType<typeof createLimiter>;
+  limiter: ReturnType<typeof mediaJobLimiter>;
   jobs: Map<string, UploadJobState>;
   timer: NodeJS.Timeout | null;
 };
 
 const queue = processSingleton<QueueState>("upload-queue", () => ({
-  limiter: createLimiter(1),
+  // Shared with desktop publishes and asset processing (one ffmpeg job at a time).
+  limiter: mediaJobLimiter(),
   jobs: new Map(),
   timer: null,
 }));

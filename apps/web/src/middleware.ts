@@ -15,8 +15,9 @@ const publicPrefixes = [
 ];
 
 const sessionCookieName = process.env.APP_SESSION_COOKIE ?? "orison_session";
+// Same secret as lib/env.ts (SESSION_SECRET; NEXTAUTH_SECRET is the old name, still accepted).
 const jwtSecret = new TextEncoder().encode(
-  process.env.NEXTAUTH_SECRET ?? "development-session-secret",
+  process.env.SESSION_SECRET || process.env.NEXTAUTH_SECRET || "development-session-secret",
 );
 
 async function hasValidSession(request: NextRequest) {

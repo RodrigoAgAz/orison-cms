@@ -2593,3 +2593,27 @@ textarea {
     display: grid;
   }
 }
+
+/* ═══════════════════════════════════════════
+   CABS AND ANALYTICS (server engineer)
+   ═══════════════════════════════════════════ */
+.text-danger {
+  color: var(--red);
+}
+
+.text-warning {
+  color: var(--amber);
+}
+
+.small-print {
+  font-size: 0.8rem;
+}
+
+.cab-cell-lines {
+  display: grid;
+  gap: 2px;
+}
+
+.cab-cell-lines .muted {
+  font-size: 0.82rem;
+}

@@ -124,15 +124,26 @@ export function HomeScreen() {
       {header}
       <InstallHint />
 
-      <section className="m-hero m-card" aria-label="Screens on now" data-testid="hero">
+      {/* With no cabs at all, the empty state under Cabs says so; a big "0" adds nothing. */}
+      <section className="m-hero m-card" aria-label="Screens on now" data-testid="hero" hidden={data.counts.total === 0}>
         <div className="m-hero-figure">
           <span className="m-hero-num" data-testid="on-count">
             {onCount}
           </span>
           <span className="m-hero-of">
-            of {plural(data.counts.total, "screen")}
-            <br />
-            on right now
+            {data.counts.total === 0 ? (
+              <>
+                no cabs yet
+                <br />
+                they appear when first switched on
+              </>
+            ) : (
+              <>
+                of {plural(data.counts.total, "screen")}
+                <br />
+                on right now
+              </>
+            )}
           </span>
         </div>
         {data.counts.total > 0 ? (
@@ -144,9 +155,10 @@ export function HomeScreen() {
             )}
           </div>
         ) : null}
+        {data.counts.total > 0 ? (
         <ul className="m-hero-legend">
           <li>
-            <StatusShape tone="on" /> <b>{data.counts.online}</b> on and playing
+            <StatusShape tone="on" /> <b>{data.counts.online}</b> on
           </li>
           {data.counts.updating > 0 ? (
             <li>
@@ -162,6 +174,7 @@ export function HomeScreen() {
             </li>
           ) : null}
         </ul>
+        ) : null}
       </section>
 
       <Section title="What’s playing">
@@ -173,7 +186,16 @@ export function HomeScreen() {
               <strong>{data.fleetLoop ? data.fleetLoop.name : "Nothing chosen yet"}</strong>
               <span className="m-muted">
                 {data.fleetLoop
-                  ? [cabCount(data.fleetLoop.liveOn.cabCount), videoLength(data.fleetLoop.durationMs)].filter(Boolean).join(" · ")
+                  ? [
+                      data.counts.total === 0
+                        ? "No cabs yet"
+                        : data.fleetLoop.liveOn.cabCount === 0
+                          ? "No cab follows it right now"
+                          : `Set for ${cabCount(data.fleetLoop.liveOn.cabCount)}`,
+                      videoLength(data.fleetLoop.durationMs),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")
                   : "Choose a video to play on every cab."}
               </span>
             </div>
@@ -193,7 +215,7 @@ export function HomeScreen() {
                     <strong>{group.name}</strong>
                     <span className="m-muted">
                       {group.followsFleet ? "Same as all cabs" : group.loop ? quoted(group.loop.name) : "Nothing chosen"} ·{" "}
-                      {group.onlineCount} of {cabCount(group.cabCount)} on
+                      {group.cabCount === 0 ? "no cabs in it yet" : `${group.onlineCount} of ${cabCount(group.cabCount)} on`}
                     </span>
                   </span>
                   <span className="m-listrow-action">Change</span>
@@ -238,7 +260,7 @@ export function HomeScreen() {
       ) : null}
 
       <Section title="Cabs" id="cabs">
-        <div className="m-chips" role="tablist" aria-label="Show cabs">
+        <div className="m-chips" role="tablist" aria-label="Show cabs" hidden={data.cabs.length === 0}>
           {(
             [
               ["all", "All", lists.all.length],
