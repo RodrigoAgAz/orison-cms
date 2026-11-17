@@ -190,18 +190,41 @@ export function summarizeSync(device: SyncDevice, expectedLoopId: string | null)
 }
 
 /**
- * Whether journeys (and so "waiting for a passenger" / "passenger on board" and journey figures)
- * apply to a cab. "always" = plays continuously with no passenger detection. Null = firmware
- * before 1.2.0, which always starts journeys from the button/door input.
+ * Whether a cab is known to start journeys from a passenger input (so "waiting for a passenger" /
+ * "passenger on board" and journey figures apply). A reported trigger decides: "always" = plays
+ * continuously with no passenger detection; "gpio"/"keyboard" = detects passengers. With no trigger
+ * (firmware before 1.2.0) the firmware has the code path but not necessarily the input: the one
+ * production cab is an x86 box with no GPIO, so it idles forever. Such a cab counts only once it
+ * has actually reported a journey (player status "playing" or "silent", which firmware before 1.2.0
+ * only reports during a passenger journey) in the last JOURNEY_EVIDENCE_DAYS.
+ * The phone app has the same rule (lib/mobile.ts reportsJourneysFor) and should call this one.
  */
+export const JOURNEY_EVIDENCE_DAYS = 30;
+
+export function reportsJourneys(playbackTrigger: string | null | undefined, hasReportedJourney: boolean) {
+  if (playbackTrigger) {
+    return playbackTrigger !== "always";
+  }
+  return hasReportedJourney;
+}
+
+/** A heartbeat player status that only a passenger journey produces. */
+export function isJourneyStatus(status: string | null | undefined) {
+  return status === "playing" || status === "silent";
+}
+
+/** Kept for callers that only know the trigger: true unless the cab says it plays continuously. */
 export function hasPassengerDetection(playbackTrigger: string | null | undefined) {
   return playbackTrigger !== "always";
 }
 
-/** One wording for what the screen is doing, aware of cabs without passenger detection. */
+/**
+ * One wording for what the screen is doing. Passenger wording only for cabs known to detect
+ * passengers (reportsJourneys); otherwise it says neutrally what is on screen.
+ */
 export function screenActivityLabel(
   playerStatus: string | null | undefined,
-  playbackTrigger: string | null | undefined,
+  knownToDetectPassengers: boolean,
   online: boolean,
   playerState?: string | null,
 ) {
@@ -211,14 +234,13 @@ export function screenActivityLabel(
   if (playerState === "SAFETY" && playerStatus !== "disabled") {
     return "Safety message playing";
   }
-  const detects = hasPassengerDetection(playbackTrigger);
   switch (playerStatus) {
     case "playing":
-      return detects ? "Passenger on board" : "Playing the loop";
+      return knownToDetectPassengers ? "Passenger on board" : "Playing the loop";
     case "silent":
-      return detects ? "Passenger on board (muted)" : "Playing muted";
+      return knownToDetectPassengers ? "Passenger on board (muted)" : "Playing muted";
     case "idle":
-      return detects ? "Waiting for a passenger" : "Showing a still";
+      return knownToDetectPassengers ? "Waiting for a passenger" : "Showing a still";
     case "disabled":
       return "Paused";
     case "fallback":
@@ -230,6 +252,9 @@ export function screenActivityLabel(
   }
 }
 
+/** Cabs are off whenever the engine is off; silence matters only after this long. */
+export const SILENT_CAB_ATTENTION_DAYS = 3;
+
 /** Signal as a person reads it: "62%" (quality) or "-95 dBm". */
 export function formatSignal(signalPercent: number | null | undefined, signalDbm: number | null | undefined) {
   if (typeof signalPercent === "number") {
@@ -239,4 +264,14 @@ export function formatSignal(signalPercent: number | null | undefined, signalDbm
     return `${signalDbm} dBm`;
   }
   return "n/a";
+}
+
+/**
+ * The network type a cab reported, only when it is a measurement: firmware before 1.2.0 sends
+ * "4g" whatever the connection (the production cab reports "4g" through NetworkManager).
+ */
+export function detectedNetworkType(networkType: string | null | undefined, firmwareVersion: string | null | undefined) {
+  const match = /^(\d+)\.(\d+)/.exec(firmwareVersion ?? "");
+  const detects = match ? Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 2) : false;
+  return detects && networkType && networkType !== "unknown" ? networkType : null;
 }

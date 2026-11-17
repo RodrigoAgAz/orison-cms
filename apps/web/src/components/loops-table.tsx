@@ -5,7 +5,16 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { requestDelete, requestPause } from "@/components/loop-actions-client";
-import { ConfirmDialog, LoopStatusBadge, PublishProgress, formatWhen, readError, type ConfirmRequest, type LoopStateView } from "@/components/loop-ui";
+import {
+  ConfirmDialog,
+  LoopStatusBadge,
+  PUBLISHED_BEFORE_UPDATE_NOTE,
+  PublishProgress,
+  formatWhen,
+  readError,
+  type ConfirmRequest,
+  type LoopStateView,
+} from "@/components/loop-ui";
 import { PaginationControls } from "@/components/pagination-controls";
 import { useToast } from "@/components/toast-provider";
 
@@ -121,6 +130,11 @@ export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
                   <div className="ll-status">
                     <LoopStatusBadge state={loop} />
                     {loop.unpublishedChanges ? <span className="lx-badge lx-badge-warn">Changes not yet published</span> : null}
+                    {loop.publishedBeforeUpdate && !loop.unpublishedChanges && loop.publish.kind !== "running" ? (
+                      <span className="ll-note" title={PUBLISHED_BEFORE_UPDATE_NOTE}>
+                        Published before the update · publish again to apply exact timings
+                      </span>
+                    ) : null}
                     {loop.publish.kind === "running" ? <PublishProgress compact state={loop} /> : null}
                     {loop.publish.kind !== "running" && loop.publishError ? (
                       <span className="ll-error" title={loop.publishError}>

@@ -11,8 +11,12 @@ import { prisma, Prisma } from "@orison/db";
 
 import { getCmsSettings } from "./cms-settings";
 import {
-  hasPassengerDetection,
+  detectedNetworkType,
   isDeviceOnline,
+  isJourneyStatus,
+  JOURNEY_EVIDENCE_DAYS,
+  reportsJourneys,
+  SILENT_CAB_ATTENTION_DAYS,
   offlineThresholdMs,
   resolveDesktopDeviceStatus,
   summarizeSync,
@@ -110,12 +114,52 @@ async function loopNames(ids: Array<string | null>) {
   return new Map(loops.map((loop) => [loop.id, loop.name]));
 }
 
+// --- Journey evidence for cabs that report no trigger (see reportsJourneys) --------------------
+// One query over the last JOURNEY_EVIDENCE_DAYS of heartbeats, only for cabs with no trigger whose
+// current Device row is not already evidence; the answer is reused for 10 minutes (as the phone
+// app does), so list pages do not read the heartbeat table on every load.
+type EvidenceCab = { id: string; playbackTrigger: string | null; playerStatus: string | null; statusReportedAt: Date | null };
+const EVIDENCE_TTL_MS = 10 * 60_000;
+const evidenceCache = new Map<string, { seen: boolean; at: number }>();
+
+async function journeyEvidence(cabs: EvidenceCab[], now: Date) {
+  const since = new Date(now.getTime() - JOURNEY_EVIDENCE_DAYS * 24 * 3600_000);
+  const seen = new Set<string>();
+  const toQuery: string[] = [];
+  for (const cab of cabs) {
+    if (cab.playbackTrigger) continue;
+    if (isJourneyStatus(cab.playerStatus) && cab.statusReportedAt && cab.statusReportedAt >= since) {
+      seen.add(cab.id);
+      continue;
+    }
+    const cached = evidenceCache.get(cab.id);
+    if (cached && now.getTime() - cached.at < EVIDENCE_TTL_MS) {
+      if (cached.seen) seen.add(cab.id);
+      continue;
+    }
+    toQuery.push(cab.id);
+  }
+  if (toQuery.length > 0) {
+    const rows = await prisma.$queryRaw<Array<{ deviceId: string }>>`
+      SELECT DISTINCT "deviceId" FROM "DeviceHeartbeat"
+      WHERE "deviceId" = ANY(${toQuery}) AND "receivedAt" >= ${since} AND "playerStatus" IN ('playing', 'silent')
+    `;
+    const found = new Set(rows.map((row) => row.deviceId));
+    for (const id of toQuery) {
+      evidenceCache.set(id, { seen: found.has(id), at: now.getTime() });
+      if (found.has(id)) seen.add(id);
+    }
+  }
+  return seen;
+}
+
 function describeCabs(
   cabs: CabRow[],
   routing: Awaited<ReturnType<typeof getLoopRoutingSnapshot>>,
   names: Map<string, string>,
   thresholdMs: number,
   now: Date,
+  journeysSeen: Set<string>,
 ) {
   return cabs.map((cab) => {
     const expected = resolveDeviceLoop(cab, routing);
@@ -130,10 +174,14 @@ function describeCabs(
       expectedSourceLabel: expected.source ? sourceLabels[expected.source] : null,
       currentLoopName: cab.currentLoopId ? names.get(cab.currentLoopId) ?? null : null,
       sync: summarizeSync(cab, expected.loop?.id ?? null),
-      detectsPassengers: hasPassengerDetection(cab.playbackTrigger),
+      // Known to start journeys from a passenger input (lib/device-status.ts reportsJourneys).
+      reportsJourneys: reportsJourneys(cab.playbackTrigger, journeysSeen.has(cab.id)),
+      hasReportedJourney: journeysSeen.has(cab.id),
       // Only an online cab's player state describes "now".
       playerStatusNow: online ? cab.playerStatus ?? "unknown" : null,
       playerStateNow: online ? cab.playerState : null,
+      // Older firmware hard-codes "4g"; only show a detected network type.
+      networkType: detectedNetworkType(cab.networkType, cab.firmwareVersion),
     };
   });
 }
@@ -214,10 +262,9 @@ async function loadPlaybackSummary(now: Date) {
   return { periods, seriesKeys, summary, perAdvert };
 }
 
-function journeysApplicable(cabs: Array<{ isActive: boolean; playbackTrigger: string | null }>) {
-  const active = cabs.filter((cab) => cab.isActive);
-  // With no cabs at all there is nothing to say either way; journeys are the normal case.
-  return active.length === 0 || active.some((cab) => hasPassengerDetection(cab.playbackTrigger));
+/** Journey figures apply when at least one active cab is known to detect passengers. */
+function journeysApplicable(cabs: Array<{ isActive: boolean; reportsJourneys: boolean }>) {
+  return cabs.some((cab) => cab.isActive && cab.reportsJourneys);
 }
 
 export async function getDashboardData() {
@@ -247,11 +294,13 @@ export async function getDashboardData() {
 
     const thresholdMs = offlineThresholdMs(settings.heartbeatIntervalSeconds);
     const names = await loopNames(cabRows.map((cab) => cab.currentLoopId));
-    const cabs = describeCabs(cabRows, routing, names, thresholdMs, now);
+    const cabs = describeCabs(cabRows, routing, names, thresholdMs, now, await journeyEvidence(cabRows, now));
     const fleetWideLoop = resolveFleetLoop(routing);
 
     const count = (predicate: (cab: (typeof cabs)[number]) => boolean) => cabs.filter(predicate).length;
-    const onlineNow = (status: string) => (cab: (typeof cabs)[number]) => cab.playerStatusNow === status;
+    // "Right now" journey figures: online cabs known to detect passengers only.
+    const onlineNow = (status: string) => (cab: (typeof cabs)[number]) =>
+      cab.reportsJourneys && cab.playerStatusNow === status;
 
     const groupSummaries = [
       {
@@ -339,16 +388,8 @@ export async function getDashboardData() {
         actionLabel: "Open loops",
       });
     }
-    for (const loop of publishingLoops) {
-      attentionItems.push({
-        id: `publishing-${loop.id}`,
-        severity: "info",
-        title: `${loop.name} is being published`,
-        detail: `Compiling for ${loop.targetGroup?.name ?? "all cabs"}.`,
-        href: `/loops/${loop.id}`,
-        actionLabel: "Open loop",
-      });
-    }
+    // Cabs are off whenever the engine is off, so "offline" alone needs nobody. What does: a cab
+    // whose update keeps failing, one that has never reported, one silent for several days.
     for (const cab of cabs.filter((item) => item.isActive && item.sync.state === "failing").slice(0, 3)) {
       attentionItems.push({
         id: `sync-${cab.id}`,
@@ -359,22 +400,26 @@ export async function getDashboardData() {
         actionLabel: "Open cabs",
       });
     }
-    for (const cab of cabs.filter((item) => item.status === "offline").slice(0, 3)) {
+    for (const cab of cabs.filter((item) => item.isActive && !item.lastHeartbeatAt).slice(0, 3)) {
       attentionItems.push({
-        id: `offline-${cab.id}`,
+        id: `never-${cab.id}`,
         severity: "warning",
-        title: `Cab ${cab.serialNumber} is offline`,
-        detail: cab.lastHeartbeatAt ? "No heartbeat recently." : "It has never sent a heartbeat.",
+        title: `Cab ${cab.serialNumber} has never reported`,
+        detail: "It is registered but has never sent a heartbeat. Check it is installed and switched on.",
         href: "/devices",
         actionLabel: "Open cabs",
       });
     }
-    for (const cab of cabs.filter((item) => item.status === "outdated" && item.sync.state !== "failing").slice(0, 3)) {
+    const silentMs = SILENT_CAB_ATTENTION_DAYS * 24 * 3600_000;
+    for (const cab of cabs
+      .filter((item) => item.isActive && item.lastHeartbeatAt && now.getTime() - item.lastHeartbeatAt.getTime() > silentMs)
+      .slice(0, 3)) {
+      const days = Math.floor((now.getTime() - cab.lastHeartbeatAt!.getTime()) / (24 * 3600_000));
       attentionItems.push({
-        id: `outdated-${cab.id}`,
-        severity: "info",
-        title: `Cab ${cab.serialNumber} is not on its loop yet`,
-        detail: `It should play ${cab.expectedLoopName ?? "a published loop"} but plays ${cab.currentLoopName ?? cab.currentLoopId ?? "nothing"}.`,
+        id: `silent-${cab.id}`,
+        severity: "warning",
+        title: `Cab ${cab.serialNumber} has not reported for ${days} days`,
+        detail: `Nothing heard from it for more than ${SILENT_CAB_ATTENTION_DAYS} days. A cab is offline while its engine is off; this is longer than that.`,
         href: "/devices",
         actionLabel: "Open cabs",
       });
@@ -431,7 +476,7 @@ export async function getDashboardData() {
       publishingLoops: [],
       attentionItems: [],
       groupSummaries: [],
-      passengerDetection: true,
+      passengerDetection: false,
       stats: {
         totalCabs: 0,
         onlineCount: 0,
@@ -484,7 +529,7 @@ export async function getDevicesData({
     const thresholdMs = offlineThresholdMs(settings.heartbeatIntervalSeconds);
     const names = await loopNames(cabRows.flatMap((cab) => [cab.currentLoopId, cab.syncFailedLoopId]));
     // cabSelect never includes apiTokenHash.
-    const cabs = describeCabs(cabRows, routing, names, thresholdMs, now).map((cab) => ({
+    const cabs = describeCabs(cabRows, routing, names, thresholdMs, now, await journeyEvidence(cabRows, now)).map((cab) => ({
       ...cab,
       syncFailedLoopName: cab.syncFailedLoopId ? names.get(cab.syncFailedLoopId) ?? null : null,
     }));
@@ -522,9 +567,12 @@ export async function getAnalyticsData() {
         where: { isActive: true },
         orderBy: { serialNumber: "asc" },
         select: {
+          id: true,
           serialNumber: true,
           lastHeartbeatAt: true,
           playbackTrigger: true,
+          playerStatus: true,
+          statusReportedAt: true,
           isActive: true,
           locationLat: true,
           locationLng: true,
@@ -536,6 +584,7 @@ export async function getAnalyticsData() {
       loadPlaybackSummary(now),
     ]);
     const thresholdMs = offlineThresholdMs(settings.heartbeatIntervalSeconds);
+    const journeysSeen = await journeyEvidence(cabs, now);
     const onlineNow = cabs.filter((cab) => isDeviceOnline(cab.lastHeartbeatAt, thresholdMs, now)).length;
 
     const assetIds = Array.from(playback.perAdvert.keys());
@@ -563,7 +612,9 @@ export async function getAnalyticsData() {
         .sort((left, right) => right.plays - left.plays),
       onlineNow,
       activeCabs: cabs.length,
-      passengerDetection: journeysApplicable(cabs),
+      passengerDetection: journeysApplicable(
+        cabs.map((cab) => ({ isActive: cab.isActive, reportsJourneys: reportsJourneys(cab.playbackTrigger, journeysSeen.has(cab.id)) })),
+      ),
       journeyMetrics: summary.journeys,
       cabLocations: cabs.map((cab) => ({
         serialNumber: cab.serialNumber,
@@ -592,7 +643,7 @@ export async function getAnalyticsData() {
       adBreakdown: [],
       onlineNow: 0,
       activeCabs: 0,
-      passengerDetection: true,
+      passengerDetection: false,
       journeyMetrics: { today: 0, week: 0, month: 0, averageDurationMs: null, advertPlaysPerJourney: null },
       cabLocations: [],
       error: formatQueryFailure("Analytics", error),

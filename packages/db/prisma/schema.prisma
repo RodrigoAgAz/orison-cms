@@ -200,7 +200,8 @@ model Device {
   // Fine-grained player state from firmware 1.2.0+ (IDLE, SAFETY, JOURNEY, SILENT, ...).
   playerState      String?
   // How journeys start: "gpio" | "keyboard" | "always" (no passenger detection). Null: firmware
-  // older than 1.2.0, which always has passenger detection.
+  // older than 1.2.0, which does not say; whether such a cab detects passengers is only known from
+  // the journeys it reports (lib/device-status.ts reportsJourneys).
   playbackTrigger  String?
   signalPercent    Int?
   signalDbm        Int?

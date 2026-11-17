@@ -28,7 +28,12 @@ export type LoopStateView = {
   liveLabel: string;
   publish: { kind: "idle" | "running" | "interrupted"; label: string | null; fraction: number; startedAt: string | null };
   unpublishedChanges: boolean;
+  /** Compiled before this release: plays exactly as it did until it is published again. */
+  publishedBeforeUpdate: boolean;
 };
+
+export const PUBLISHED_BEFORE_UPDATE_NOTE =
+  "Published before this update: cabs keep playing it exactly as it was. Publishing it again applies the exact slot timings, the new sound handling and the smaller file.";
 
 export function statusOf(state: Pick<LoopStateView, "status" | "live" | "publish" | "kind">) {
   if (state.publish.kind === "running") return { label: "Publishing", tone: "busy" as const };

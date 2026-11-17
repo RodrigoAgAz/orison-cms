@@ -18,6 +18,7 @@ import {
   useLoopState,
   type ConfirmRequest,
   type LoopStateView,
+  PUBLISHED_BEFORE_UPDATE_NOTE,
 } from "@/components/loop-ui";
 import {
   DURATION_STEP_MS,
@@ -590,6 +591,7 @@ export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTe
           <strong>Last publish did not go through.</strong> {state.publishError}
         </div>
       ) : null}
+      {state.publishedBeforeUpdate && !publishing ? <div className="lx-note">{PUBLISHED_BEFORE_UPDATE_NOTE}</div> : null}
       {state.unpublishedChanges && !publishing ? (
         <div className="alert alert-warning">
           The saved slots differ from what cabs are playing. Publish to send the changes to cabs.
@@ -637,7 +639,13 @@ export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTe
                   <span className="lb-slot-time">{formatClock(entry.position * SLOT_DURATION_MS)}</span>
                   <span className={`lb-slot-status is-${status.tone}`}>{status.text}</span>
                 </div>
-                <MediaPoster alt={entryAsset?.filename ?? ""} className="lb-slot-poster" label="No advert" src={entryAsset?.thumbnailUrl} />
+                <MediaPoster
+                  alt={entryAsset?.filename ?? ""}
+                  className="lb-slot-poster"
+                  label={entryAsset ? "No preview" : "No advert yet"}
+                  src={entryAsset?.thumbnailUrl}
+                  videoSrc={entryAsset && !entryAsset.mimeType.startsWith("image/") ? entryAsset.previewUrl : null}
+                />
                 <strong className="lb-slot-name">{entryAsset?.filename ?? "Choose an advert"}</strong>
                 <SlotBar assetMap={assetMap} slot={entry} />
               </button>
@@ -698,8 +706,9 @@ export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTe
                   <MediaPoster
                     alt={asset?.filename ?? ""}
                     className="lb-item-thumb"
-                    label={asset?.mimeType.startsWith("image/") ? "Image" : "Video"}
-                    src={asset?.thumbnailUrl ?? null}
+                    label="No preview"
+                    src={asset?.thumbnailUrl ?? (asset?.mimeType.startsWith("image/") ? asset.previewUrl : null)}
+                    videoSrc={asset && !asset.mimeType.startsWith("image/") ? asset.previewUrl : null}
                   />
                   <div className="lb-item-copy">
                     <span className={`lb-kind ${item.contentType === "ADVERTISEMENT" ? "is-ad" : ""}`}>
@@ -872,7 +881,13 @@ function AssetPicker({
           <div className="lb-picker-grid">
             {shown.map((asset) => (
               <button className={`lb-pick ${selectedId === asset.id ? "is-selected" : ""}`} key={asset.id} onClick={() => onChoose(asset)} type="button">
-                <MediaPoster alt={asset.filename} className="lb-pick-poster" label={asset.mimeType.startsWith("image/") ? "Image" : "Video"} src={asset.thumbnailUrl} />
+                <MediaPoster
+                  alt={asset.filename}
+                  className="lb-pick-poster"
+                  label="No preview"
+                  src={asset.thumbnailUrl ?? (asset.mimeType.startsWith("image/") ? asset.previewUrl : null)}
+                  videoSrc={asset.mimeType.startsWith("image/") ? null : asset.previewUrl}
+                />
                 <span className="lb-pick-length">{lengthLabel(asset).replace("file ", "")}</span>
                 <strong>{asset.filename}</strong>
                 <span className="muted">

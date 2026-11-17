@@ -40,6 +40,8 @@ type DeviceItem = {
   playerStatusNow: string | null;
   playerStateNow: string | null;
   playbackTrigger: string | null;
+  reportsJourneys: boolean;
+  hasReportedJourney: boolean;
   signalPercent: number | null;
   signalDbm: number | null;
   networkType: string | null;
@@ -76,14 +78,19 @@ const statusLabels: Record<DeviceItem["status"], string> = {
   inactive: "Inactive",
 };
 
-function triggerLabel(trigger: string | null) {
+function triggerLabel(trigger: string | null, hasReportedJourney: boolean) {
   switch (trigger) {
     case "always":
       return "Plays continuously (no passenger detection)";
     case "keyboard":
       return "Journeys start from a key press";
-    default:
+    case "gpio":
       return "Journeys start from the button/door input";
+    default:
+      // Firmware before 1.2.0 does not say whether a passenger input is connected.
+      return hasReportedJourney
+        ? "Has reported passenger journeys in the last 30 days"
+        : "No passenger journey reported in the last 30 days";
   }
 }
 
@@ -540,7 +547,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                       <td>
                         <div className="cab-cell-lines">
                           <span className={device.sync.state === "failing" ? "text-danger" : undefined}>
-                            {device.sync.label}
+                            {!device.online && device.sync.state === "current" ? "Up to date when last seen" : device.sync.label}
                           </span>
                           {device.sync.state === "failing" ? (
                             <span className="text-danger">
@@ -559,8 +566,8 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                       </td>
                       <td>
                         <div className="cab-cell-lines">
-                          <span>{screenActivityLabel(device.playerStatusNow, device.playbackTrigger, device.online, device.playerStateNow)}</span>
-                          <span className="muted">{triggerLabel(device.playbackTrigger)}</span>
+                          <span>{screenActivityLabel(device.playerStatusNow, device.reportsJourneys, device.online, device.playerStateNow)}</span>
+                          <span className="muted">{triggerLabel(device.playbackTrigger, device.hasReportedJourney)}</span>
                         </div>
                       </td>
                       <td>

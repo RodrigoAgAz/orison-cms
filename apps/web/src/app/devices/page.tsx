@@ -71,6 +71,8 @@ export default async function DevicesPage({ searchParams }: Props) {
           playerStatusNow: cab.playerStatusNow,
           playerStateNow: cab.playerStateNow,
           playbackTrigger: cab.playbackTrigger,
+          reportsJourneys: cab.reportsJourneys,
+          hasReportedJourney: cab.hasReportedJourney,
           signalPercent: cab.signalPercent,
           signalDbm: cab.signalDbm,
           networkType: cab.networkType,

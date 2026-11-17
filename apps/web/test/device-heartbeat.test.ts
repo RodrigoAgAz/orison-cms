@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { heartbeatSchema } from "@orison/shared";
 
 import { applyHeartbeat, readSignal } from "../src/lib/device-heartbeat";
-import { hasPassengerDetection, screenActivityLabel, summarizeSync } from "../src/lib/device-status";
+import { detectedNetworkType, isJourneyStatus, reportsJourneys, screenActivityLabel, summarizeSync } from "../src/lib/device-status";
 import { rebaseStorageUrl, rebaseStorageUrlsDeep } from "../src/lib/storage-urls";
 
 const now = new Date("2026-11-17T10:00:00Z");
@@ -126,7 +126,7 @@ describe("firmware 1.2.0 extras", () => {
     assert.equal(fields.syncError, "No loop is assigned to this cab (manifest 404)");
     assert.deepEqual(activity, []);
     assert.equal("logQueue" in body, false);
-    assert.equal(screenActivityLabel("playing", "gpio", true, "SAFETY"), "Safety message playing");
+    assert.equal(screenActivityLabel("playing", true, true, "SAFETY"), "Safety message playing");
     assert.match(summarizeSync({ currentLoopId: null, lastSyncAt: null, syncState: "ok", syncError: "nothing assigned" }, null).label, /nothing assigned/);
   });
 });
@@ -143,12 +143,30 @@ describe("status wording", () => {
     assert.equal(summarizeSync({ currentLoopId: "b", lastSyncAt: null, syncState: "ok" }, "b").state, "current");
   });
 
-  it("does not talk about passengers for cabs that play continuously", () => {
-    assert.equal(hasPassengerDetection("always"), false);
-    assert.equal(hasPassengerDetection(null), true);
-    assert.equal(screenActivityLabel("idle", "gpio", true), "Waiting for a passenger");
-    assert.equal(screenActivityLabel("playing", "always", true), "Playing the loop");
-    assert.equal(screenActivityLabel("playing", null, false), "Not reporting");
+  it("shows a network type only when firmware detects it", () => {
+    assert.equal(detectedNetworkType("4g", "1.0.0"), null);
+    assert.equal(detectedNetworkType("4g", "1.1.0"), null);
+    assert.equal(detectedNetworkType("ethernet", "1.2.0"), "ethernet");
+    assert.equal(detectedNetworkType("unknown", "1.2.0"), null);
+    assert.equal(detectedNetworkType("wifi", null), null);
+  });
+
+  it("uses passenger wording only for cabs known to detect passengers", () => {
+    // A reported trigger decides.
+    assert.equal(reportsJourneys("always", true), false);
+    assert.equal(reportsJourneys("gpio", false), true);
+    assert.equal(reportsJourneys("keyboard", false), true);
+    // No trigger (firmware before 1.2.0, like the production x86 cab): only a reported journey counts.
+    assert.equal(reportsJourneys(null, false), false);
+    assert.equal(reportsJourneys(undefined, false), false);
+    assert.equal(reportsJourneys(null, true), true);
+    assert.ok(isJourneyStatus("playing") && isJourneyStatus("silent") && !isJourneyStatus("idle"));
+
+    assert.equal(screenActivityLabel("idle", reportsJourneys(null, false), true), "Showing a still");
+    assert.equal(screenActivityLabel("idle", reportsJourneys("gpio", false), true), "Waiting for a passenger");
+    assert.equal(screenActivityLabel("playing", reportsJourneys("always", false), true), "Playing the loop");
+    assert.equal(screenActivityLabel("silent", reportsJourneys(null, true), true), "Passenger on board (muted)");
+    assert.equal(screenActivityLabel("playing", true, false), "Not reporting");
   });
 });
 

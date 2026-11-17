@@ -111,8 +111,8 @@ export default async function DashboardPage() {
           <strong className="ops-command-value">{passengerDetection ? stats.onJourneyNow : "n/a"}</strong>
           <p className="ops-command-note">
             {passengerDetection
-              ? `${stats.mutedNow} muted · ${stats.idleNow} waiting for a passenger (online cabs only)`
-              : "No cab detects passengers: they play continuously"}
+              ? `${stats.mutedNow} muted · ${stats.idleNow} waiting for a passenger (online cabs known to detect passengers)`
+              : "No cab is known to detect passengers"}
           </p>
         </article>
 
@@ -224,7 +224,7 @@ export default async function DashboardPage() {
                   <div className="ops-fleet-node-pills">
                     <StatusPill value={cab.status} />
                     <span className={activityClass(cab.playerStatusNow)}>
-                      {screenActivityLabel(cab.playerStatusNow, cab.playbackTrigger, cab.online, cab.playerStateNow)}
+                      {screenActivityLabel(cab.playerStatusNow, cab.reportsJourneys, cab.online, cab.playerStateNow)}
                     </span>
                     <span className="ops-mini-chip">{cab.group?.name ?? "No group"}</span>
                   </div>
@@ -240,7 +240,11 @@ export default async function DashboardPage() {
                     <div>
                       <dt>Update</dt>
                       <dd className={cab.sync.state === "failing" ? "text-danger" : undefined}>
-                        {cab.sync.state === "failing" ? `Failing: ${cab.sync.error}` : cab.sync.label}
+                        {cab.sync.state === "failing"
+                          ? `Failing: ${cab.sync.error}`
+                          : !cab.online && cab.sync.state === "current"
+                            ? "Up to date when last seen"
+                            : cab.sync.label}
                       </dd>
                     </div>
                     <div>
@@ -424,12 +428,15 @@ export default async function DashboardPage() {
             </div>
           ) : (
             <div className="empty-state compact">
-              <strong>Not applicable</strong>
-              <p>No cab has passenger detection: they play the loop continuously, so there are no journeys to count.</p>
+              <strong>No cab is known to detect passengers</strong>
+              <p>
+                Journeys are counted for cabs that start them from a passenger input: cabs that report a button/door
+                trigger, or older cabs that have reported a journey in the last 30 days. None does yet.
+              </p>
             </div>
           )}
           <p className="muted small-print">
-            Days and weeks are London time (weeks start on Monday). Only cabs with passenger detection record journeys.
+            Days and weeks are London time (weeks start on Monday). Only cabs known to detect passengers record journeys.
           </p>
         </section>
       </div>

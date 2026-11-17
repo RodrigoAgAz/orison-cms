@@ -434,14 +434,79 @@ export function draftKeyOf(
   return `sha256:${sha(JSON.stringify([COMPILER_VERSION, frame.width, frame.height, body]))}`;
 }
 
-/** Whether the saved slots differ from what is on air (legacy loops: edited after publishing). */
+type KeySlot = {
+  position: number;
+  staticCreativeId: string | null;
+  contents: Array<{ assetId: string; startTimeMs: number; durationMs: number; contentType: string; orderInSlot: number }>;
+};
+
+/**
+ * Key of what a loop published before this release put on air, computed the same way from the
+ * saved slots and from that publish's manifest file (which recorded every slot's items and still
+ * image). Asset ids, times and stills only: the old manifests have no loop frame or compiler.
+ * Stored as "legacy:<key>" in Loop.publishedDraftKey the first time such a loop is looked at.
+ */
+export function legacyContentKey(slots: KeySlot[]) {
+  const body = slots
+    .slice()
+    .sort((a, b) => a.position - b.position)
+    .filter((slot) => slot.contents.length > 0 || slot.staticCreativeId)
+    .map((slot) => [
+      slot.position,
+      slot.staticCreativeId ?? null,
+      sortContents(slot.contents).map((content) => [content.assetId, content.startTimeMs, content.durationMs, content.contentType]),
+    ]);
+  return `legacy:${sha(JSON.stringify(body)).slice(0, 40)}`;
+}
+
+/** The same key from a manifest file written by the old publish code, or null if unreadable. */
+export function legacyContentKeyFromManifest(manifest: unknown) {
+  if (!manifest || typeof manifest !== "object" || !Array.isArray((manifest as { slots?: unknown }).slots)) return null;
+  const slots = (manifest as { slots: Array<Record<string, unknown>> }).slots;
+  try {
+    return legacyContentKey(
+      slots.map((slot) => ({
+        position: Number(slot.position),
+        staticCreativeId: typeof slot.staticImageAssetId === "string" ? slot.staticImageAssetId : null,
+        contents: (Array.isArray(slot.contents) ? (slot.contents as Array<Record<string, unknown>>) : []).map((content, index) => ({
+          assetId: String(content.assetId),
+          startTimeMs: Number(content.startTimeMs),
+          durationMs: Number(content.durationMs),
+          contentType: String(content.type),
+          orderInSlot: index,
+        })),
+      })),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Marker stored when an old loop's manifest could not be read: edits after `at` count as changes. */
+export function legacyUnknownKey(at: Date) {
+  return `legacy-unknown:${at.toISOString()}`;
+}
+
+/**
+ * Whether the saved slots differ from what is on air. publishedDraftKey is
+ * - a draft key (published by this release): compare with the saved slots' draft key;
+ * - "legacy:<key>" (published before, recorded from its manifest): compare with the saved slots'
+ *   legacy key, so a loop nobody edited never claims changes and a real edit still does;
+ * - "legacy-unknown:<time>" (old manifest unreadable): only slot edits after that time count;
+ * - null: not worked out yet; no claim is made.
+ */
 export function hasUnpublishedChanges(loop: {
   publishedAt: Date | null;
   publishedDraftKey: string | null;
   currentDraftKey: string;
+  currentLegacyKey: string;
   lastSlotEditAt: Date | null;
 }) {
-  if (!loop.publishedAt) return false;
-  if (loop.publishedDraftKey) return loop.publishedDraftKey !== loop.currentDraftKey;
-  return Boolean(loop.lastSlotEditAt && loop.lastSlotEditAt.getTime() > loop.publishedAt.getTime());
+  if (!loop.publishedAt || !loop.publishedDraftKey) return false;
+  if (loop.publishedDraftKey.startsWith("legacy:")) return loop.publishedDraftKey !== loop.currentLegacyKey;
+  if (loop.publishedDraftKey.startsWith("legacy-unknown:")) {
+    const since = Date.parse(loop.publishedDraftKey.slice("legacy-unknown:".length));
+    return Boolean(loop.lastSlotEditAt && Number.isFinite(since) && loop.lastSlotEditAt.getTime() > since);
+  }
+  return loop.publishedDraftKey !== loop.currentDraftKey;
 }

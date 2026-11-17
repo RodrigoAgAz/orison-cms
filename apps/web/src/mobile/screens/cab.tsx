@@ -27,6 +27,20 @@ import { BuiltInStill } from "../components/built-in";
 import { invalidate, useResource } from "../lib/store";
 import type { CabDetail, Overview } from "../lib/types";
 
+/** How the cab starts its video: lib/device-status.ts hasPassengerDetection, in words. */
+function triggerWords(cab: CabDetail) {
+  switch (cab.playbackTrigger) {
+    case "gpio":
+      return "When a passenger gets in (door or button)";
+    case "keyboard":
+      return "When a passenger presses a key";
+    case "always":
+      return "All the time (no passenger detection)";
+    default:
+      return cab.reportsJourneys ? "When a passenger gets in (older software, so not reported)" : "Not reported (older software)";
+  }
+}
+
 function positionWords(cab: CabDetail) {
   switch (cab.positionReporting) {
     case "gps":
@@ -65,6 +79,8 @@ export function CabScreen({ id }: { id: string }) {
 
   const now = new Date();
   const on = isSwitchedOn(data);
+  // Still reporting, even if its screen is paused (a paused cab is switched on; its screen isn't playing).
+  const reporting = on || Boolean(data.onlineSince);
   const passenger = passengerLine(data);
   const group = data.group ? overview.data?.groups.find((item) => item.id === data.group?.id) : null;
   const inheritName = group ? `${group.name}’s video` : "the video for all cabs";
@@ -137,6 +153,11 @@ export function CabScreen({ id }: { id: string }) {
                     ? data.expected.name
                     : "Nothing has played yet"}
             </strong>
+            {on && data.playerState === "SAFETY" ? (
+              <span className="m-muted" data-testid="cab-safety-note">
+                The safety message is on the screen now; this video follows it.
+              </span>
+            ) : null}
             <span className="m-muted">
               {data.playingBuiltIn && !data.playing
                 ? "A standby video the box carries. It shows this until it has fetched its video from the library."
@@ -182,13 +203,13 @@ export function CabScreen({ id }: { id: string }) {
           <div className="m-stats">
             <div>
               <span className="m-stat-label">
-                <ClockIcon size={15} /> {on ? "On for" : "Status"}
+                <ClockIcon size={15} /> {reporting ? "On for" : "Status"}
               </span>
               <strong className="m-stat-value">
-                {on && data.onlineSince ? duration((now.getTime() - new Date(data.onlineSince).getTime()) / 1000) : on ? "On" : "Off"}
+                {reporting && data.onlineSince ? duration((now.getTime() - new Date(data.onlineSince).getTime()) / 1000) : reporting ? "On" : "Off"}
               </strong>
               <span className="m-muted m-stat-sub">
-                {on && data.onlineSince
+                {reporting && data.onlineSince
                   ? `since ${whenLong(data.onlineSince, now)}`
                   : data.lastSeenAt
                     ? `last on ${whenLong(data.lastSeenAt, now)}`
@@ -225,7 +246,7 @@ export function CabScreen({ id }: { id: string }) {
                     cab had no GPS fix, so the position comes from the nearest mobile phone mast.
                   </>
                 )}
-                {!on ? ` It may have moved since it was switched off.` : ""}
+                {!reporting ? ` It may have moved since it was switched off.` : ""}
               </p>
               <a
                 className="m-btn m-btn-secondary m-btn-block"
@@ -284,10 +305,10 @@ export function CabScreen({ id }: { id: string }) {
         <summary>
           <span>
             Technical details
-            {!on && reportedAt ? <span className="m-muted m-details-age"> · as of {ago(reportedAt)}</span> : null}
+            {!reporting && reportedAt ? <span className="m-muted m-details-age"> · as of {ago(reportedAt)}</span> : null}
           </span>
         </summary>
-        {!on && reportedAt ? (
+        {!reporting && reportedAt ? (
           <p className="m-muted m-details-note" data-testid="tech-stale">
             The cab is off. These are the figures it reported when it was last on, {whenLong(reportedAt, now)}; they may have changed since.
           </p>
@@ -297,12 +318,18 @@ export function CabScreen({ id }: { id: string }) {
             ["Screen serial", <code key="s">{data.serialNumber}</code>],
             ["Last check-in", data.lastSeenAt ? `${when(data.lastSeenAt, now)} (${ago(data.lastSeenAt)})` : "Never"],
             ["Running since restart", data.uptimeSeconds !== null ? duration(data.uptimeSeconds) : "Off"],
-            [on ? "Mobile signal" : "Mobile signal (last reported)", signalWords(data.signalStrength, data.signalPercent, data.signalDbm)],
+            [reporting ? "Mobile signal" : "Mobile signal (last reported)", signalWords(data.signalStrength, data.signalPercent, data.signalDbm)],
             ["Position", positionWords(data)],
             ["Connection", data.networkType ? data.networkType.toUpperCase() : "Unknown"],
-            [on ? "Free storage" : "Free storage (last reported)", data.storageFreeMb !== null ? `${(data.storageFreeMb / 1024).toFixed(1)} GB` : "Unknown"],
-            [on ? "Temperature" : "Temperature (last reported)", data.cpuTemp !== null ? `${Math.round(data.cpuTemp)}°C` : "Unknown"],
-            ["Software", data.firmwareVersion ?? "Unknown"],
+            [reporting ? "Free storage" : "Free storage (last reported)", data.storageFreeMb !== null ? `${(data.storageFreeMb / 1024).toFixed(1)} GB` : "Unknown"],
+            [reporting ? "Temperature" : "Temperature (last reported)", data.cpuTemp !== null ? `${Math.round(data.cpuTemp)}°C` : "Unknown"],
+            [
+              "Software",
+              data.firmwareVersion
+                ? `${data.firmwareVersion} · acts on a change within about ${plural(data.changeLagMinutes, "minute")}`
+                : "Unknown",
+            ],
+            ["Starts playing", triggerWords(data)],
             ["Playing (ID)", data.playing ? <code key="p">{data.playing.id}</code> : data.playingBuiltIn ? "Built-in video (fallback)" : "None"],
             ["In service since", longDate(data.inServiceSince)],
             ...(data.notes ? ([["Notes", data.notes]] as Array<[string, React.ReactNode]>) : []),

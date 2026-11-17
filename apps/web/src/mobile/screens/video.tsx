@@ -200,7 +200,11 @@ export function VideoScreen({ id }: { id: string }) {
                 />
               </>
             ) : (
-              <p className="m-body-text">Not playing on any cab. It&rsquo;s in the library, ready to use.</p>
+              <p className="m-body-text" data-testid="video-not-chosen">
+                {data.liveOn.onScreens
+                  ? `Not chosen for any cab, but ${data.liveOn.onScreens === 1 ? "1 cab still shows it" : `${data.liveOn.onScreens} cabs still show it`} until ${data.liveOn.onScreens === 1 ? "it switches" : "they switch"} to its new video.`
+                  : "Not playing on any cab. It’s in the library, ready to use."}
+              </p>
             )}
             <ButtonLink to={`/m/change?loop=${data.id}`} variant="primary" className="m-btn-block" testId="put-on-screens">
               Put on screens
@@ -287,7 +291,11 @@ export function VideoScreen({ id }: { id: string }) {
             </>
           )
         ) : (
-          <p className="m-body-text">It will disappear from this list. No cab is playing it, so nothing on the screens changes.</p>
+          <p className="m-body-text">
+            {data.liveOn.onScreens
+              ? "It will disappear from this list. No cab is set to play it; a cab that still shows it keeps it until it switches to its new video."
+              : "It will disappear from this list. No cab is playing it, so nothing on the screens changes."}
+          </p>
         )}
         {error ? <Notice tone="danger">{error}</Notice> : null}
       </Sheet>

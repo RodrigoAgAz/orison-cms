@@ -6,6 +6,9 @@ import {
   buildSlotLoopManifest,
   draftKeyOf,
   hasUnpublishedChanges,
+  legacyContentKey,
+  legacyContentKeyFromManifest,
+  legacyUnknownKey,
   msToFrame,
   PlanError,
   verifyCompiled,
@@ -194,18 +197,74 @@ describe("what a publish has to do", () => {
 
 describe("changes not yet published", () => {
   const draftSlots = standard.map((slot) => ({ ...slot, staticCreativeId: null }));
+  const publishedAt = new Date("2026-11-17T00:00:00Z");
+  const base = { publishedAt, currentLegacyKey: legacyContentKey(draftSlots), lastSlotEditAt: new Date("2026-11-18T00:00:00Z") };
+
   it("compares the saved slots with what was published", () => {
     const key = draftKeyOf(draftSlots, frame);
-    const publishedAt = new Date("2026-11-17T00:00:00Z");
-    assert.equal(hasUnpublishedChanges({ publishedAt, publishedDraftKey: key, currentDraftKey: key, lastSlotEditAt: new Date() }), false);
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: key, currentDraftKey: key }), false);
     const edited = draftSlots.map((slot, index) => (index === 0 ? { ...slot, staticCreativeId: "still1" } : slot));
-    assert.equal(hasUnpublishedChanges({ publishedAt, publishedDraftKey: key, currentDraftKey: draftKeyOf(edited, frame), lastSlotEditAt: null }), true);
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: key, currentDraftKey: draftKeyOf(edited, frame) }), true);
     assert.notEqual(draftKeyOf(draftSlots, { width: 1920, height: 1080 }), key);
   });
-  it("falls back to edit times for loops published before", () => {
-    const publishedAt = new Date("2026-11-17T00:00:00Z");
-    assert.equal(hasUnpublishedChanges({ publishedAt, publishedDraftKey: null, currentDraftKey: "x", lastSlotEditAt: new Date("2026-11-16T00:00:00Z") }), false);
-    assert.equal(hasUnpublishedChanges({ publishedAt, publishedDraftKey: null, currentDraftKey: "x", lastSlotEditAt: new Date("2026-11-18T00:00:00Z") }), true);
-    assert.equal(hasUnpublishedChanges({ publishedAt: null, publishedDraftKey: null, currentDraftKey: "x", lastSlotEditAt: new Date() }), false);
+
+  // A loop published before this release, as the old code left it: slots in the database and an
+  // old-format manifest (no formatVersion, slotCount or video block), every new column null.
+  const oldManifest = {
+    version: "1.0",
+    loopId: "l2",
+    loopName: "Say Now",
+    targetGroupId: null,
+    publishedAt: "2026-11-15T07:54:06.115Z",
+    totalDurationMs: 600000,
+    slots: draftSlots.map((slot) => ({
+      position: slot.position,
+      staticImageAssetId: null,
+      staticImageUrl: "https://cms.example/api/storage/loops/l2/1-static-fallback.jpg",
+      staticImageChecksum: "sha256:x",
+      advertisementVideoUrl: "https://cms.example/api/storage/assets/ad30/content.mp4",
+      contents: slot.contents.map((content) => ({
+        type: content.contentType,
+        assetId: content.assetId,
+        filename: "x.mp4",
+        url: "https://cms.example/api/storage/assets/x/content.mp4",
+        checksum: "",
+        startTimeMs: content.startTimeMs,
+        durationMs: content.durationMs,
+        fileSizeBytes: 1,
+      })),
+    })),
+    totalDownloadSizeBytes: 1,
+    compiledVideoUrl: "https://cms.example/api/storage/loops/l2/v.mp4",
+    compiledVideoChecksum: "sha256:v",
+    checksum: "sha256:m",
+  };
+
+  it("a loop published before this release that nobody edited claims no changes", () => {
+    const recorded = legacyContentKeyFromManifest(oldManifest)!;
+    assert.equal(recorded, legacyContentKey(draftSlots));
+    // Slots saved after the publish time (e.g. rows rewritten by a migration) do not matter.
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: recorded, currentDraftKey: "anything" }), false);
+    // Not worked out yet: no claim.
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: null, currentDraftKey: "anything" }), false);
+  });
+
+  it("a real edit to such a loop still shows", () => {
+    const recorded = legacyContentKeyFromManifest(oldManifest)!;
+    const edited = draftSlots.map((slot, index) =>
+      index === 3 ? { ...slot, contents: slot.contents.map((content, at) => (at === 1 ? { ...content, assetId: "other" } : content)) } : slot,
+    );
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: recorded, currentLegacyKey: legacyContentKey(edited), currentDraftKey: "x" }), true);
+  });
+
+  it("an unreadable old manifest only counts edits made after it was looked at", () => {
+    assert.equal(legacyContentKeyFromManifest({ nonsense: true }), null);
+    const marker = legacyUnknownKey(new Date("2026-11-20T00:00:00Z"));
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: marker, currentDraftKey: "x", lastSlotEditAt: new Date("2026-11-19T00:00:00Z") }), false);
+    assert.equal(hasUnpublishedChanges({ ...base, publishedDraftKey: marker, currentDraftKey: "x", lastSlotEditAt: new Date("2026-11-21T00:00:00Z") }), true);
+  });
+
+  it("a never-published loop has nothing unpublished", () => {
+    assert.equal(hasUnpublishedChanges({ ...base, publishedAt: null, publishedDraftKey: null, currentDraftKey: "x" }), false);
   });
 });

@@ -314,7 +314,7 @@ export function signalWords(signalStrength: number | null, signalPercent?: numbe
     typeof signalPercent === "number" ? signalPercent : signalStrength !== null && signalStrength > 0 && signalStrength <= 100 ? signalStrength : null;
   if (percent !== null) {
     const label = percent >= 70 ? "Strong" : percent >= 45 ? "Good" : percent >= 25 ? "Weak" : "Very weak";
-    return `${label} (${Math.round(percent)}%)`;
+    return typeof signalDbm === "number" ? `${label} (${Math.round(percent)}%, ${signalDbm} dBm)` : `${label} (${Math.round(percent)}%)`;
   }
   if (signalStrength === null || signalStrength >= 0) return "Unknown";
   const dbm = signalStrength;

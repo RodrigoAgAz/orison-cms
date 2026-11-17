@@ -28,6 +28,7 @@ import {
   isSwitchedOn,
   lagPhrase,
   placeWords,
+  readableSyncError,
   targetName,
   type Impact,
 } from "../lib/status";
@@ -503,6 +504,16 @@ function ImpactFacts({ impact, target, overview }: { impact: Impact; target: Ass
           </li>
         ) : null}
       </ul>
+      {changing.some((item) => item.sync?.state === "failing") ? (
+        <p className="m-facts-keep" data-testid="impact-failing">
+          <b>Update failing: </b>
+          {changing
+            .filter((item) => item.sync?.state === "failing")
+            .map((item) => `${item.label} can’t fetch new videos at the moment (${readableSyncError(item.sync?.error ?? "no reason given")})`)
+            .join("; ")}
+          . It may not switch until that&rsquo;s fixed.
+        </p>
+      ) : null}
       {impact.keepOwn.groups.length > 0 || impact.keepOwn.cabs.length > 0 ? (
         <p className="m-facts-keep" data-testid="impact-keep">
           <b>Not changing: </b>

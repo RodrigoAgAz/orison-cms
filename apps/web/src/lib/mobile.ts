@@ -6,8 +6,11 @@ import { prisma, type Prisma } from "@orison/db";
 import { getCmsSettings } from "./cms-settings";
 import {
   coveredSeconds,
-  hasPassengerDetection,
+  detectedNetworkType,
   heartbeatIntervals,
+  isJourneyStatus,
+  JOURNEY_EVIDENCE_DAYS,
+  reportsJourneys,
   isDeviceOnline,
   offlineThresholdMs,
   resolveMobileDeviceStatus,
@@ -509,20 +512,9 @@ export function parsePlaybackTrigger(value: unknown): PlaybackTrigger | null {
   return value === "gpio" || value === "keyboard" || value === "always" ? value : null;
 }
 
-/**
- * Passenger wording is shown only for cabs known to play for journeys. See CabSummary.reportsJourneys.
- * A reported trigger decides (lib/device-status.ts hasPassengerDetection). With none (firmware before
- * 1.2.0) the cab must have shown it: the production box has no passenger input at all.
- */
-export function reportsJourneysFor(trigger: PlaybackTrigger | null, hasReportedJourney: boolean) {
-  if (trigger) return hasPassengerDetection(trigger);
-  return hasReportedJourney;
-}
-
-/** A heartbeat player status that only a passenger journey produces. */
-export function isJourneyStatus(status: string | null | undefined) {
-  return status === "playing" || status === "silent";
-}
+// Passenger wording follows lib/device-status.ts reportsJourneys (shared with the desktop): a
+// reported trigger decides; with none (firmware before 1.2.0) the cab must have reported a journey
+// ("playing"/"silent", isJourneyStatus) in the last JOURNEY_EVIDENCE_DAYS.
 
 function deviceLocation(device: CabDeviceRow): CabLocation | null {
   if (device.locationLat === null || device.locationLng === null || !device.locationAt) {
@@ -551,7 +543,7 @@ type CabContext = {
 
 /** How far back run starts and journey evidence look. */
 export const RUN_START_LOOKBACK_MS = 30 * 24 * 3600_000;
-export const JOURNEY_LOOKBACK_MS = 30 * 24 * 3600_000;
+const JOURNEY_LOOKBACK_MS = JOURNEY_EVIDENCE_DAYS * 24 * 3600_000;
 /** How long the 30-day journey evidence is reused before it is looked up again. */
 const JOURNEY_EVIDENCE_TTL_MS = 10 * 60_000;
 
@@ -764,7 +756,7 @@ function buildCabSummary(
     playingBuiltIn: builtIn,
     positionReporting: device.locationSource === "gps" ? "gps" : device.locationAt && device.locationSource ? "cell" : positionReportingFrom(latest),
     playbackTrigger,
-    reportsJourneys: reportsJourneysFor(playbackTrigger, extra.hasReportedJourney),
+    reportsJourneys: reportsJourneys(playbackTrigger, extra.hasReportedJourney),
     playerState: online ? device.playerState ?? null : null,
     sync: {
       state: sync.state,
@@ -985,7 +977,8 @@ export async function getCabDetail(deviceId: string) {
     signalPercent: reported?.signalPercent ?? null,
     /** Additive: the signal in dBm when the cab's modem reports it. */
     signalDbm: reported?.signalDbm ?? null,
-    networkType: reported?.networkType ?? null,
+    // Firmware before 1.2.0 hard-codes "4g" whatever the connection: not shown (as on the desktop).
+    networkType: detectedNetworkType(reported?.networkType ?? null, device.firmwareVersion),
     storageFreeMb: device.storageFreeMb ?? latest?.storageFreeMb ?? null,
     // Not kept on the Device row: from the newest heartbeat.
     cpuTemp: latest?.cpuTemp ?? null,

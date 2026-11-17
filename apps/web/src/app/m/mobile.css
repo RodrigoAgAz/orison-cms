@@ -3006,3 +3006,7 @@ body.m-body.m-noscroll {
   place-items: center;
   color: var(--m-danger);
 }
+
+.m-hero-failing {
+  color: var(--m-danger);
+}

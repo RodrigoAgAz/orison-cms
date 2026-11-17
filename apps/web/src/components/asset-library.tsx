@@ -471,8 +471,9 @@ export function AssetLibrary({
               <MediaPoster
                 alt={asset.filename}
                 className="asset-preview"
-                label={asset.mimeType.startsWith("video/") ? "Video preview" : "Image asset"}
+                label={asset.status === "PROCESSING" ? "Processing…" : asset.status === "FAILED" ? "Not available" : "No preview"}
                 src={asset.thumbnailUrl}
+                videoSrc={asset.status === "READY" && asset.mimeType.startsWith("video/") ? asset.previewUrl : null}
               />
 
               <div className="stack-sm">

@@ -6,9 +6,10 @@ import type { AssetCategory } from "@orison/shared/src/constants";
 
 import { failInterruptedAssetProcessing } from "./asset-removal";
 import { getCmsSettings, loopFrameFrom } from "./cms-settings";
-import { draftKeyOf, hasUnpublishedChanges } from "./loop-plan";
+import { draftKeyOf, hasUnpublishedChanges, legacyContentKey, legacyContentKeyFromManifest, legacyUnknownKey } from "./loop-plan";
 import { describeLiveOn, isLiveSomewhere, liveOnFor, liveOnIndexOf, loadRoutingWorld, type LiveOn } from "./loop-live";
 import { recoverInterruptedPublishes } from "./loop-publish";
+import { readObject } from "./storage";
 import { describeProgress, progressFraction, publishJobView } from "./publish-state";
 import { publishSlotProblems } from "./slot-rules";
 
@@ -34,6 +35,7 @@ const listLoopSelect = {
   durationMs: true,
   compiledVideoKey: true,
   manifestKey: true,
+  compiledContentKey: true,
   publishError: true,
   targetGroupId: true,
   publishJobId: true,
@@ -94,8 +96,13 @@ export function loopStateOf(loop: ListLoop, liveOn: LiveOn, frame: { width: numb
       publishedAt: loop.publishedAt,
       publishedDraftKey: loop.publishedDraftKey,
       currentDraftKey: draftKeyOf(loop.slots, frame),
+      currentLegacyKey: legacyContentKey(loop.slots),
       lastSlotEditAt,
     });
+  // Compiled by the publish code before this release (no content key): it keeps playing exactly as
+  // it was until it is published again, which applies exact timings, sound handling and the
+  // smaller file. Shown once, calmly; it is not a change to the loop.
+  const publishedBeforeUpdate = kind === "builder" && Boolean(loop.compiledVideoKey && loop.manifestKey && !loop.compiledContentKey);
   return {
     id: loop.id,
     name: loop.name,
@@ -116,6 +123,7 @@ export function loopStateOf(loop: ListLoop, liveOn: LiveOn, frame: { width: numb
     liveLabel: describeLiveOn(liveOn),
     publish: publishStateSummary(loop),
     unpublishedChanges,
+    publishedBeforeUpdate,
   };
 }
 
@@ -150,7 +158,32 @@ async function statesFor(where: Prisma.LoopWhereInput, options: { skip?: number;
   ]);
   const index = liveOnIndexOf(world);
   const frame = loopFrameFrom(settings);
+  await recordLegacyPublishedContent(rows);
   return rows.map((row) => loopStateOf(row, liveOnFor(index, row.id), frame));
+}
+
+/**
+ * Loops published before this release have no record of what their publish put on air
+ * (publishedDraftKey). Work it out once from their published manifest, which lists every slot's
+ * items and still, and store it, so "changes not yet published" is true for them too: never
+ * claimed for a loop nobody edited, still shown after a real edit. Updates `rows` in place.
+ */
+async function recordLegacyPublishedContent(rows: ListLoop[]) {
+  const legacy = rows.filter((row) => row.slots.length > 0 && row.publishedAt && row.manifestKey && !row.publishedDraftKey);
+  for (const row of legacy) {
+    let key: string | null = null;
+    try {
+      key = legacyContentKeyFromManifest(JSON.parse((await readObject(row.manifestKey!)).toString("utf8")));
+    } catch (error) {
+      console.warn(`could not read the published manifest of loop ${row.id}`, error);
+    }
+    key ??= legacyUnknownKey(new Date());
+    // Raw update: recording this is not an edit of the loop (updatedAt must not move).
+    await prisma.$executeRaw`UPDATE "Loop" SET "publishedDraftKey" = ${key} WHERE "id" = ${row.id} AND "publishedDraftKey" IS NULL`.catch(
+      (error) => console.warn(`could not record the published content of loop ${row.id}`, error),
+    );
+    row.publishedDraftKey = key;
+  }
 }
 
 export async function getLoopStates(ids: string[]) {

@@ -1108,16 +1108,66 @@ async function openSuite(browser) {
   const theatre = loopsByName["Demo · Theatre week"];
   const spring = loopsByName["Demo · Spring campaign"];
   const portrait = loopsByName["Demo · Portrait phone clip"];
-  assert(theatre && spring && portrait, "demo loops exist");
+  const rotation = loopsByName["Demo · Ten-slot rotation"];
+  assert(theatre && spring && portrait && rotation, "demo loops exist (three uploads and the ten-slot rotation)");
 
-  await check("change times follow each cab's software (1.1.0: one heartbeat; older: 30 minutes)", async () => {
+  await check("change times follow each cab's software (1.1.0 and later: one heartbeat; 1.0.0: 30 minutes)", async () => {
     const lagOf = (serial) => cabBySerial[serial].changeLagMinutes;
-    assert(lagOf("DEMO-CAB-01") === 5, `1.1.0 cab lag ${lagOf("DEMO-CAB-01")}`);
-    assert(lagOf("DEMO-CAB-04") === 30 && lagOf("DEMO-CAB-02") === 30, "1.0.0 cabs lag 30");
+    for (const serial of ["DEMO-CAB-01", "DEMO-CAB-03", "DEMO-CAB-04", "DEMO-CAB-08"]) {
+      assert(lagOf(serial) === 5, `1.2.0 cab ${serial} lag ${lagOf(serial)}`);
+    }
+    assert(lagOf("DEMO-CAB-02") === 30, "the 1.0.0 cab lags 30");
     assert(overview.changeLagMinutes === 30, `fleet worst case ${overview.changeLagMinutes}`);
     assert(overview.changeLag.minMinutes === 5 && overview.changeLag.maxMinutes === 30, `range ${JSON.stringify(overview.changeLag)}`);
-    const detail = (await anon(`/api/m/cabs/${cabBySerial["DEMO-CAB-04"].id}`)).body;
-    assert(detail.firmwareVersion === "1.0.0" && detail.changeLagMinutes === 30, "detail carries firmware and lag");
+    const detail = (await anon(`/api/m/cabs/${cabBySerial["DEMO-CAB-02"].id}`)).body;
+    assert(detail.firmwareVersion === "1.0.0" && detail.changeLagMinutes === 30 && detail.playbackTrigger === null, "detail carries firmware and lag");
+  });
+
+  await check("the 1.2.0 states read right: a failing download, the safety message, an 'always' cab, the 1.0.0 cab", async () => {
+    // Failing download: says so with a readable reason and the next try, on the cab, the home list and the change flow.
+    const failing = cabBySerial["DEMO-CAB-04"];
+    assert(failing.status === "updating" && failing.sync?.state === "failing" && failing.sync.nextRetryAt, `CAB-04 sync ${JSON.stringify(failing.sync)}`);
+    await goto(page, `/m/cabs/${failing.id}`);
+    await page.getByTestId("cab-update-failing").waitFor();
+    const notice = await page.getByTestId("cab-update-failing").innerText();
+    assert(/connection closed after 18 MB of 58 MB/.test(notice) && /tries again/.test(notice), `failing notice: ${notice}`);
+    assert((await page.locator('[data-testid="cab-head"] [data-sync="failing"]').innerText()).includes("update failing"), "badge");
+    await shot(page, "demo-cab-failing-download", { fullPage: true });
+    await goto(page, "/m");
+    await page.getByTestId("attention").waitFor();
+    assert((await page.getByTestId("attention").innerText()).includes("LR68 FBN: update failing"), "home: needs a look");
+    const legend = (await page.locator(".m-hero-legend").innerText()).replace(/\s+/g, " ");
+    assert(/1 update failing/.test(legend) && !/switching/.test(legend), `hero counts it as failing, not switching: ${legend}`);
+    await goto(page, `/m/change?target=cab:${failing.id}&loop=${rotation.id}`);
+    await page.getByTestId("impact-failing").waitFor();
+    // SAFETY, and the always cab.
+    await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-03"].id}`);
+    await page.getByTestId("cab-safety-note").waitFor();
+    assert((await page.getByTestId("cab-head").innerText()).includes("Safety message playing"), "safety");
+    const always = cabBySerial["DEMO-CAB-08"];
+    assert(always.playbackTrigger === "always" && always.reportsJourneys === false, "CAB-08 always");
+    await goto(page, `/m/cabs/${always.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    assert((await page.getByTestId("cab-head").innerText()).includes("Playing the video continuously"), "always wording");
+    await page.locator('[data-testid="tech-details"] summary').click();
+    const tech = await page.getByTestId("tech-details").innerText();
+    assert(/Good \(62%\)/.test(tech) && !/dBm/.test(tech) && /no passenger detection/.test(tech), `always cab tech: ${tech}`);
+    await shot(page, "demo-cab-always", { fullPage: true });
+    // The one 1.0.0 cab among 1.2.0 cabs: no passenger wording, its slower change time said.
+    await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-02"].id}`);
+    await page.getByTestId("cab-head").waitFor();
+    assert(!/passenger/i.test(await page.getByTestId("cab-head").innerText()), "no passenger wording for the 1.0.0 cab with no journeys");
+    await page.locator('[data-testid="tech-details"] summary').click();
+    const old = await page.getByTestId("tech-details").innerText();
+    assert(/1\.0\.0 · acts on a change within about 30 minutes/.test(old) && /Not reported \(older software\)/.test(old), `1.0.0 tech: ${old}`);
+    await shot(page, "demo-cab-1.0.0", { fullPage: true });
+    // A video still shown by the failing cab is not "not playing anywhere".
+    const springRow = (await anon("/api/m/loops")).body.items.find((loop) => loop.id === spring.id);
+    assert(springRow.liveOn.cabCount === 0 && springRow.liveOn.onScreens >= 1, `spring liveOn ${JSON.stringify(springRow.liveOn)}`);
+    await goto(page, "/m/videos");
+    const row = page.locator(`[data-testid="video-row"][data-loop-id="${spring.id}"]`);
+    await row.waitFor();
+    assert(/still on 1 cab until it switches/.test(await row.innerText()), `spring row: ${await row.innerText()}`);
   });
 
   await check("home shows screens on, what plays and every cab", async () => {
@@ -1126,7 +1176,7 @@ async function openSuite(browser) {
     const on = Number(await page.getByTestId("on-count").textContent());
     assert(on === overview.counts.online + overview.counts.updating, `on-count ${on}`);
     assert((await page.getByTestId("cab-row").count()) === overview.cabs.length, "one row per cab");
-    assert((await page.getByTestId("fleet-loop").textContent()).includes(spring.name), "fleet plays Spring");
+    assert((await page.getByTestId("fleet-loop").textContent()).includes(rotation.name), "all cabs play the ten-slot rotation");
     await shot(page, "home-full", { fullPage: true });
     await page.getByRole("tab", { name: /^Off/ }).click();
     await shot(page, "home-filter-off");
@@ -1179,9 +1229,6 @@ async function openSuite(browser) {
     await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-07"].id}`);
     await page.getByTestId("cab-location-text").waitFor();
     assert((await page.getByTestId("cab-location-text").textContent()).includes("hasn’t reported"), "no position wording");
-    await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-04"].id}`);
-    await page.getByTestId("cab-pending").waitFor();
-    assert((await page.getByTestId("cab-pending").textContent()).includes("within about 30 minutes"), "old-firmware cab: 30 minutes");
     await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-06"].id}`);
     await page.getByTestId("resume-cab").waitFor();
   });
@@ -1236,7 +1283,7 @@ async function openSuite(browser) {
     await page.getByTestId("confirm-change").click();
     await page.getByTestId("change-done").waitFor();
     assert((await page.getByTestId("done-summary").textContent()).includes(`${following} cab`), "done count from the server");
-    const served = await manifestFor("DEMO-CAB-08"); // City group, follows all cabs
+    const served = await manifestFor("DEMO-CAB-08"); // West End group, follows all cabs
     assert(served.loopId === theatre.id, `DEMO-CAB-08 served ${served.loopId}`);
     await npm("demo:heartbeat");
     await page.waitForFunction(() => /^[1-9]/.test(document.querySelector('[data-testid="done-progress"]')?.textContent ?? ""), null, { timeout: 40_000 });
@@ -1269,15 +1316,18 @@ async function openSuite(browser) {
   });
 
   await check("without signing in: a group uses the same as all cabs", async () => {
-    const westEnd = overview.groups.find((group) => group.name === "Demo · West End");
+    // City has its own video (Theatre week); West End already follows all cabs.
+    const city = overview.groups.find((group) => group.name === "Demo · City");
     await goto(page, "/m");
-    await page.locator(`[data-testid="group-row"][data-group-id="${westEnd.id}"]`).click();
+    await page.locator(`[data-testid="group-row"][data-group-id="${city.id}"]`).click();
     await page.getByTestId("choose-inherit").waitFor();
     await page.getByTestId("choose-inherit").click();
     await page.getByTestId("confirm-card").waitFor();
     await page.getByTestId("confirm-change").click();
     await page.getByTestId("change-done").waitFor();
-    assert((await manifestFor("DEMO-CAB-01")).loopId === theatre.id, "West End cab follows all cabs");
+    assert((await manifestFor("DEMO-CAB-05")).loopId === theatre.id, "City cab follows all cabs (now Theatre week)");
+    const after = (await anon("/api/m/overview")).body.groups.find((group) => group.id === city.id);
+    assert(after.followsFleet === true, "City follows all cabs");
   });
 
   // ---------------------------------------------------------------- upload to a group
@@ -1305,7 +1355,7 @@ async function openSuite(browser) {
     assert(loop && loop.processing.state === "ready", "uploaded loop ready");
     created.loops.add(loop.id);
     assert(loop.liveOn.groups.some((group) => group.id === city.id), "live on City group");
-    assert((await manifestFor("DEMO-CAB-08")).loopId === loop.id, "City cab is served the upload");
+    assert((await manifestFor("DEMO-CAB-05")).loopId === loop.id, "City cab is served the upload");
     await page.getByTestId("upload-see").click();
     await page.getByTestId("video-title").waitFor();
   });
@@ -1491,7 +1541,7 @@ async function openSuite(browser) {
     assert(second.processing.state === "ready", `second ready: ${JSON.stringify(second.processing)}`);
     assert(/wasn't put on group Demo · City, because what group Demo · City plays was changed while this video was uploading/.test(second.processing.error ?? ""), `note: ${second.processing.error}`);
     assert(!second.liveOn.groups.some((group) => group.id === city.id) && second.liveOn.cabCount === 0, "not live anywhere");
-    assert((await manifestFor("DEMO-CAB-08")).loopId === spring.id, "City keeps the newer choice");
+    assert((await manifestFor("DEMO-CAB-05")).loopId === spring.id, "City keeps the newer choice");
     const first = (await apiJson(page, `/api/m/loops/${firstId}`)).body;
     assert(first.processing.state === "ready" && first.liveOn.cabCount === 0, "first upload ready, in Videos only");
   });

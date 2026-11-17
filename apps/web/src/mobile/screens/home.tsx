@@ -121,6 +121,7 @@ export function HomeScreen() {
     })),
   ];
 
+  const failingCount = data.cabs.filter((cab) => cab.status === "updating" && cab.sync?.state === "failing").length;
   const segments = [
     { key: "online", count: data.counts.online, tone: "on" as const },
     { key: "updating", count: data.counts.updating, tone: "switching" as const },
@@ -162,9 +163,14 @@ export function HomeScreen() {
           <li>
             <StatusShape tone="on" /> <b>{data.counts.online}</b> on
           </li>
-          {data.counts.updating > 0 ? (
+          {data.counts.updating - failingCount > 0 ? (
             <li>
-              <StatusShape tone="switching" /> <b>{data.counts.updating}</b> switching video
+              <StatusShape tone="switching" /> <b>{data.counts.updating - failingCount}</b> switching video
+            </li>
+          ) : null}
+          {failingCount > 0 ? (
+            <li className="m-hero-failing">
+              <AlertIcon size={13} /> <b>{failingCount}</b> update failing
             </li>
           ) : null}
           <li>

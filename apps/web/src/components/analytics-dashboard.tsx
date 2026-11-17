@@ -145,7 +145,7 @@ export function AnalyticsDashboard({ analytics }: Props) {
 
       <section className="stats-grid">
         <StatCard
-          hint={journeysNa ? "No cab detects passengers (they play continuously)." : "Since midnight, London time."}
+          hint={journeysNa ? "No cab is known to detect passengers yet." : "Since midnight, London time."}
           label="Journeys today"
           value={journeysNa ? "n/a" : analytics.journeyMetrics.today}
         />
