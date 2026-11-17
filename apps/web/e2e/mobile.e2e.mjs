@@ -562,11 +562,18 @@ async function productionShapeSuite(browser) {
     });
   } finally {
     if (shape) {
-      const ids = shape.loops.map((loop) => loop.id);
+      // Every video in the throwaway schema, including the ones uploaded during the pass (their
+      // files are in the shared storage folder, so they go with it).
+      const ids = await shape.prisma.loop
+        .findMany({ select: { id: true } })
+        .then((rows) => rows.map((row) => row.id))
+        .catch(() => shape.loops.map((loop) => loop.id));
       await shape.prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch((error) => console.log(`  could not drop ${schema}: ${error.message}`));
       await shape.prisma.$disconnect().catch(() => undefined);
       rmSync(shape.storageDir, { recursive: true, force: true });
-      for (const id of ids) rmSync(path.join(webDir, "tmp/storage/loops", id), { recursive: true, force: true });
+      for (const id of ids) {
+        for (const folder of ["loops", "manifests"]) rmSync(path.join(webDir, "tmp/storage", folder, id), { recursive: true, force: true });
+      }
     }
   }
 }
@@ -1396,6 +1403,10 @@ async function openSuite(browser) {
     await page.getByTestId("upload-failed-reason").waitFor({ timeout: 120_000 });
     const reason = await page.getByTestId("upload-failed-reason").textContent();
     assert(reason && reason.length > 10, `reason: ${reason}`);
+    assert(
+      !/video uploads in the last hour/.test(reason),
+      `the server's anonymous upload ceiling was reached (each run uploads 3 videos without signing in; restart the server or wait): ${reason}`,
+    );
     const items = (await anon("/api/m/loops")).body.items;
     const loop = items.find((item) => item.name === `E2E broken ${RUN_ID}`);
     assert(loop && loop.processing.state === "failed", "failed loop listed");

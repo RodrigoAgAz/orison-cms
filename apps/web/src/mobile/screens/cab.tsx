@@ -163,7 +163,10 @@ export function CabScreen({ id }: { id: string }) {
                 ? "A standby video the box carries. It shows this until it has fetched its video from the library."
                 : showsSetToPlay && data.expected && !data.lastSeenAt
                   ? `It hasn’t been switched on yet. ${sourceLine(data)}.`
-                  : sourceLine(data)}
+                  : data.playing && data.expected && !data.isUpToDate
+                    ? // What it shows isn't what it's set to: say which is which.
+                      `Its previous video. Set to play ${quoted(data.expected.name)} (${sourceLine(data).replace(/^./, (c) => c.toLowerCase())}).`
+                    : sourceLine(data)}
             </span>
           </div>
           {pending && data.sync?.state === "failing" ? (
