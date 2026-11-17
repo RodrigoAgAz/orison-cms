@@ -451,6 +451,44 @@ class TestReuse(SyncTestBase):
         self.assertNotIn("/loop-1.mp4", self.server.paths_requested())
         self.assertEqual(self.loop_bytes_served(), 0)
 
+    def republish_manifest(self, loop_id, change):
+        """Republish loop_id with a new manifest (new checksum) but the same compiled video."""
+        manifest = json.loads(self.server.files[f"/manifest-{loop_id}.json"])
+        change(manifest)
+        manifest["checksum"] = manifest["checksum"] + "-r"
+        self.server.files[f"/manifest-{loop_id}.json"] = json.dumps(manifest).encode()
+        self.server.manifest_response = {**self.server.manifest_response, "checksum": manifest["checksum"], "version": 2}
+        return manifest
+
+    def test_manifest_only_republish_downloads_no_video(self):
+        self.sync()
+        self.player.commands.clear()
+
+        def change(manifest):
+            manifest["formatVersion"] = 2
+            manifest["slots"][3]["staticImageAssetId"] = "new-still"
+
+        manifest = self.republish_manifest("L1", change)
+        self.sync()
+        requested = self.server.paths_requested()
+        self.assertIn("/manifest-L1.json", requested)
+        self.assertNotIn("/loop-1.mp4", requested)
+        self.assertNotIn("/static.jpg", requested)
+        self.assertEqual(self.loop_bytes_served(), 0)
+        local = common.read_json(common.current_manifest_path())
+        self.assertEqual(local["checksum"], manifest["checksum"])
+        self.assertEqual(common.current_loop_file().read_bytes(), self.loop)
+        self.assertEqual([c.get("action") for c in self.player.commands], ["reload"])
+
+    def test_unchanged_republish_causes_no_sync(self):
+        self.sync()
+        self.player.commands.clear()
+        before = common.read_json(common.current_manifest_path())
+        self.sync()  # the server answers exactly as before (same checksum)
+        self.assertEqual(self.server.paths_requested(), ["/api/devices/manifest"])
+        self.assertEqual(common.read_json(common.current_manifest_path()), before)
+        self.assertNotIn("reload", [c.get("action") for c in self.player.commands])
+
     def test_cache_is_capped(self):
         self.agent.config.raw["sync"]["cacheMaxMb"] = 1
         self.sync()

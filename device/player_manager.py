@@ -76,6 +76,7 @@ DEFAULT_SAFETY_IMAGE_MS = 8000
 STATE_WRITE_INTERVAL_SECONDS = 10
 DRIFT_CHECK_SECONDS = 30
 DRIFT_TOLERANCE_SECONDS = 2.0
+LEGACY_WRAP_TOLERANCE_MS = 1000.0  # legacy manifest vs real file length before the file wins
 MPV_RAPID_FAILURE_SECONDS = 30
 MPV_FAILURES_PER_OUTPUT = 3
 MPV_FAILURES_BEFORE_EXIT = 10
@@ -103,6 +104,20 @@ class PlayerFatal(RuntimeError):
 
 
 class Timeline:
+    """Where each item of the loop video starts and ends, and which still belongs to which slot.
+
+    Two manifest formats exist on cabs:
+    - formatVersion 2 (loops published with the compiler of release 1.2.0 onwards): the manifest
+      states the timing exactly. Items start at `contents[].absoluteStartMs` and last `durationMs`;
+      slots start at `slots[].startMs` and last `slots[].durationMs` / `slotDurationMs`;
+      `totalDurationMs` is measured from the compiled file. Pre-built (uploaded) loops have
+      `slotCount: 0` and no slots: the whole video is one item.
+    - no formatVersion (every loop published before that release, until someone republishes it):
+      slot p is assumed to start at p x (totalDurationMs / slot count) and an item at its slot's
+      start + `startTimeMs`. `totalDurationMs` was a constant there, not a measurement (the old
+      compiler's files could be longer), so the loop clock wraps where mpv says the file ends.
+    """
+
     FALLBACK_TOTAL_MS = 600_000.0
 
     def __init__(self, manifest: dict[str, Any] | None) -> None:
@@ -110,6 +125,9 @@ class Timeline:
         loop_id = manifest.get("loopId")
         self.loop_id: str | None = str(loop_id) if loop_id else None
         self.checksum = manifest.get("checksum")
+        video_checksum = manifest.get("compiledVideoChecksum")
+        self.video_checksum: str | None = video_checksum if isinstance(video_checksum, str) and video_checksum else None
+        self.format_version = _positive_int(manifest.get("formatVersion")) or 1
         total = manifest.get("totalDurationMs")
         self.total_known = False
         self.total_ms = self.FALLBACK_TOTAL_MS
@@ -121,6 +139,8 @@ class Timeline:
         ):
             self.total_ms = float(total)
             self.total_known = True
+        # Legacy manifests: the stated total is a constant; check it against the real file once.
+        self.wrap_checked = self.format_version >= 2
         self.slots: dict[int, dict[str, Any]] = {}
         for slot in manifest.get("slots") or []:
             if not isinstance(slot, dict):
@@ -132,6 +152,14 @@ class Timeline:
             if position >= 0:
                 self.slots[position] = slot
         self.slot_count = (max(self.slots) + 1) if self.slots else 0
+        self.slot_duration_ms: float | None = None
+        if self.format_version >= 2:
+            declared = manifest.get("slotCount")
+            if isinstance(declared, int) and not isinstance(declared, bool) and declared >= self.slot_count:
+                self.slot_count = declared
+            slot_ms = manifest.get("slotDurationMs")
+            if isinstance(slot_ms, (int, float)) and not isinstance(slot_ms, bool) and slot_ms > 0:
+                self.slot_duration_ms = float(slot_ms)
         self.items: list[dict[str, Any]] = []
         self._build()
 
@@ -139,8 +167,21 @@ class Timeline:
     def signature(self) -> tuple[Any, Any]:
         return (self.loop_id, self.checksum)
 
+    def same_picture_as(self, other: "Timeline") -> bool:
+        """Same loop, same compiled video (by checksum) and the same item timing."""
+        return (
+            self.loop_id is not None
+            and self.loop_id == other.loop_id
+            and bool(self.video_checksum)
+            and self.video_checksum == other.video_checksum
+            and self.total_ms == other.total_ms
+            and self.items == other.items
+        )
+
     @property
     def slot_ms(self) -> float:
+        if self.slot_duration_ms:
+            return self.slot_duration_ms
         return self.total_ms / self.slot_count if self.slot_count else self.total_ms
 
     def set_total_ms(self, total_ms: float) -> None:
@@ -149,20 +190,49 @@ class Timeline:
             self.total_known = True
             self._build()
 
+    def set_wrap_ms(self, wrap_ms: float) -> None:
+        """Legacy manifest whose file is not as long as it says: keep the slot layout the manifest
+        implies, wrap the loop clock where the file really ends."""
+        self.wrap_checked = True
+        if wrap_ms <= 0:
+            return
+        if self.slot_count and not self.slot_duration_ms:
+            self.slot_duration_ms = self.total_ms / self.slot_count
+        self.total_ms = float(wrap_ms)
+        self.total_known = True
+        self._build()
+
+    def slot_window(self, position: int) -> tuple[float, float]:
+        """(start, duration) of a slot within the loop, in ms."""
+        slot = self.slots.get(position, {})
+        slot_ms = self.slot_ms
+        start = position * slot_ms
+        duration = slot_ms
+        if self.format_version >= 2:
+            if _is_number(slot.get("startMs")):
+                start = float(slot["startMs"])
+            if _is_number(slot.get("durationMs")) and slot["durationMs"] > 0:
+                duration = float(slot["durationMs"])
+        return start, duration
+
     def _build(self) -> None:
         items: list[dict[str, Any]] = []
         if self.slot_count:
-            slot_ms = self.slot_ms
             for position in sorted(self.slots):
+                slot_start, _ = self.slot_window(position)
                 contents = [c for c in self.slots[position].get("contents") or [] if isinstance(c, dict)]
                 for content in sorted(contents, key=lambda c: _num(c.get("startTimeMs"))):
                     duration = _num(content.get("durationMs"))
                     if duration <= 0:
                         continue
                     content_type = content.get("type") if content.get("type") in ("ADVERTISEMENT", "FILLER") else "FILLER"
+                    if self.format_version >= 2 and _is_number(content.get("absoluteStartMs")):
+                        start = float(content["absoluteStartMs"])
+                    else:
+                        start = slot_start + _num(content.get("startTimeMs"))
                     items.append(
                         {
-                            "startMs": position * slot_ms + _num(content.get("startTimeMs")),
+                            "startMs": start,
                             "durationMs": duration,
                             "type": content_type,
                             "contentType": content_type,
@@ -204,6 +274,14 @@ class Timeline:
         except OSError:
             pass
         return None, None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _positive_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _num(value: Any) -> float:
@@ -670,7 +748,7 @@ class PlayerManager:
                     self.start_loop_pass(now)
             elif self.state == PlayerState.JOURNEY:
                 if self.loop_available:
-                    if not self.timeline.total_known:
+                    if not (self.timeline.total_known and self.timeline.wrap_checked):
                         self._learn_loop_duration()
                     self._drift_correct(now)
                 self._advance_video(now)
@@ -715,7 +793,10 @@ class PlayerManager:
                 self._close_open(end)
                 self.cursor = self._next_cursor(self.cursor)
                 if self.trigger == "always" and self.cursor[0] > 0:
-                    self._on_pass_complete(end, now)
+                    # The next pass starts where the file wraps (its measured length), which
+                    # can differ from where the last item ends by a frame (or, for a legacy
+                    # manifest, by the untimed tail of the old compiler's file).
+                    self._on_pass_complete(self.loop_started + self.timeline.total_ms / 1000.0, now)
                     return
                 continue
             if entry is not None:
@@ -851,10 +932,24 @@ class PlayerManager:
         return None
 
     def _learn_loop_duration(self) -> None:
+        """The loop's real length from mpv: needed when the manifest gives none (fallback video),
+        and checked once for a legacy manifest, whose stated length was a constant."""
+        if self.timeline.total_known and self.timeline.wrap_checked:
+            return
         value = self.get_mpv_property("duration")
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            measured_ms = value * 1000.0
             if not self.timeline.total_known:
-                self.timeline.set_total_ms(value * 1000.0)
+                self.timeline.set_total_ms(measured_ms)
+                self.timeline.wrap_checked = True
+            elif abs(measured_ms - self.timeline.total_ms) > LEGACY_WRAP_TOLERANCE_MS:
+                self.logger.warning(
+                    "loop %s: the manifest says %.1fs but the file is %.1fs long; following the file",
+                    self.timeline.loop_id, self.timeline.total_ms / 1000.0, value,
+                )
+                self.timeline.set_wrap_ms(measured_ms)
+            else:
+                self.timeline.wrap_checked = True
 
     def _drift_correct(self, now: float) -> None:
         """Keep the loop clock (which decides what is logged) aligned with what mpv shows."""
@@ -1030,9 +1125,15 @@ class PlayerManager:
                 self.enter_idle(now)
 
     def apply_reload(self, now: float) -> bool:
-        previous = self.timeline.signature
+        previous_timeline = self.timeline
+        previous = previous_timeline.signature
         self.reload_timeline()
         changed = self.timeline.signature != previous
+        if changed and self.state == PlayerState.JOURNEY and self.timeline.same_picture_as(previous_timeline):
+            # Republished with the same video and timing (only details such as a still, the name
+            # or the safety message changed): the loop on screen carries on uninterrupted.
+            self.logger.info("manifest for %s updated; same video and timing, playback continues", self.timeline.loop_id)
+            changed = False
         if changed:
             self.logger.info("content changed to %s", self.timeline.loop_id)
             self._close_all(now)

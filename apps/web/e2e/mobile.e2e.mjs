@@ -336,7 +336,7 @@ async function uploadInPieces(request, file, { name, target = null, fingerprint 
   const bytes = readFileSync(file);
   const opened = await request("/api/m/uploads", {
     method: "POST",
-    json: { name, fileName: path.basename(file), size: bytes.length, fingerprint: fingerprint ?? `e2e:${RUN_ID}:${name}:${bytes.length}`, target },
+    json: { name, fileName: path.basename(file), size: bytes.length, fingerprint: fingerprint ?? `e2e:${RUN_ID}:${name.replace(/[^A-Za-z0-9._-]+/g, "-")}:${bytes.length}`, target },
   });
   if (opened.status >= 300) return { opened };
   const { uploadId, pieceBytes, pieceCount, received } = opened.body;
@@ -1665,7 +1665,7 @@ async function openSuite(browser) {
 async function uploadCeilingSuite(browser, base) {
   assert((await serverMode(base)) === "open", "extra server is open");
   const anonymous = (url, init) => anon(url, init, base);
-  const opening = (name, size = 10, fingerprint = `e2e-ceiling-${RUN_ID}-${name}`) =>
+  const opening = (name, size = 10, fingerprint = `e2e-ceiling-${RUN_ID}-${name.replace(/[^A-Za-z0-9._-]+/g, "-")}`) =>
     anonymous("/api/m/uploads", { method: "POST", json: { name, fileName: "clip.mov", size, fingerprint } });
 
   await check("uploads in pieces: the size limit is enforced before anything is sent, and per piece", async () => {
@@ -1695,8 +1695,12 @@ async function uploadCeilingSuite(browser, base) {
     const adminOpen = await admin("/api/m/uploads", { method: "POST", json: { name: "E2E ceiling admin", fileName: "clip.mov", size: 10, fingerprint: `e2e-ceiling-admin-${RUN_ID}` } });
     assert(adminOpen.status === 201, `admin allowed: ${adminOpen.status}`);
     // A file that isn't a video is refused at its first piece, not after all of it.
-    const piece = await admin(`/api/m/uploads/${adminOpen.body.uploadId}/pieces/0`, { method: "PUT", body: Buffer.from("not a video"), headers: { "Content-Type": "application/octet-stream" } });
-    assert(piece.status === 400 || piece.status === 415, `a 10-byte piece of text: ${piece.status}`);
+    const pieceUrl = `/api/m/uploads/${adminOpen.body.uploadId}/pieces/0`;
+    const octets = { "Content-Type": "application/octet-stream" };
+    const tooLong = await admin(pieceUrl, { method: "PUT", body: Buffer.from("eleven byte"), headers: octets });
+    assert(tooLong.status === 413, `a piece longer than the declared file: ${tooLong.status}`);
+    const text = await admin(pieceUrl, { method: "PUT", body: Buffer.from("not video!"), headers: octets });
+    assert(text.status === 415 && /not a supported video/.test(text.body.error), `a first piece of text: ${text.status} ${JSON.stringify(text.body)}`);
   });
 
   await check("anonymous upload ceiling: the phone says so before sending anything", async () => {

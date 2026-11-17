@@ -321,6 +321,179 @@ class TestJourneyLogging(PlayerTestBase):
         self.assertEqual((weather[0]["durationMs"], weather[0]["completedFull"]), (8000, False))
 
 
+def v2_manifest(slots_spec, *, total_ms=600000, slot_ms=60000, loop_id="loop-V2", checksum="v2-1",
+                video_checksum="sha256:" + "b" * 64, still_asset=None):
+    """A formatVersion 2 manifest as lib/loop-plan.ts buildSlotLoopManifest writes it.
+    slots_spec: per slot a list of (type, assetId, durationMs, absoluteStartMs or None)."""
+    slots = []
+    for position, items in enumerate(slots_spec):
+        offset = 0
+        contents = []
+        for kind, asset, duration, absolute in items:
+            contents.append({
+                "type": kind, "assetId": asset, "startTimeMs": offset, "durationMs": duration,
+                "absoluteStartMs": position * slot_ms + offset if absolute is None else absolute,
+                "sourceDurationMs": duration, "fit": "exact",
+            })
+            offset += duration
+        slots.append({
+            "position": position, "startMs": position * slot_ms, "durationMs": slot_ms,
+            "staticImageAssetId": (still_asset or {}).get(position), "staticImageUrl": "http://x/shared.jpg",
+            "staticImageChecksum": "sha256:" + "c" * 64, "contents": contents,
+        })
+    return {
+        "version": "1.0", "formatVersion": 2, "loopId": loop_id, "checksum": checksum,
+        "totalDurationMs": total_ms, "slotCount": len(slots_spec), "slotDurationMs": slot_ms,
+        "video": {"frameRate": 30, "frameCount": round(total_ms * 30 / 1000), "keyframeIntervalMs": 2000,
+                  "keyframeAtEveryItemStart": True},
+        "slots": slots, "compiledVideoUrl": "http://x/loop.mp4", "compiledVideoChecksum": video_checksum,
+    }
+
+
+def common_ts(iso):
+    from datetime import datetime
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+def install_manifest(manifest, statics=True):
+    cur = common.CURRENT_DIR
+    (cur / "statics").mkdir(parents=True, exist_ok=True)
+    (cur / "loop.mp4").write_bytes(b"loop")
+    if statics:
+        for slot in manifest.get("slots") or []:
+            common.slot_static_path(slot["position"]).write_bytes(b"jpg")
+    common.atomic_write_json(cur / "manifest.json", manifest)
+
+
+class TestManifestV2(PlayerTestBase):
+    """Release 1.2.0 loop compiler: formatVersion 2 manifests state their timing exactly."""
+
+    def ten_slots(self, first_absolute=None):
+        spec = []
+        for p in range(10):
+            spec.append([("ADVERTISEMENT", f"ad-{p}", 20000 if p % 2 else 10000, None),
+                         ("FILLER", "fill", 40000 if p % 2 else 50000, None)])
+        if first_absolute is not None:
+            spec[1][0] = ("ADVERTISEMENT", "ad-1", 20000, first_absolute)
+        return spec
+
+    def test_item_timing_comes_from_absolute_start(self):
+        # The slot-relative start says slot 1's advert begins at 60 s; the manifest's absolute
+        # time (what the compiled file really has) says 61 s. The player must follow the latter.
+        manifest = v2_manifest(self.ten_slots(first_absolute=61000))
+        manifest["slots"][0]["contents"][1]["durationMs"] = 51000
+        install_manifest(manifest)
+        p = self.new_player()
+        p.on_door_sensor()
+        self.run_for(p, 90)
+        p.on_door_sensor()
+        journey = [e for e in self.plays() if e["mode"] == "journey"]
+        self.assertEqual([(e["assetId"], e["durationMs"]) for e in journey][:3],
+                         [("ad-0", 10000), ("fill", 51000), ("ad-1", 20000)])
+        self.assertTrue(journey[2]["completedFull"])
+
+    def test_wrap_follows_measured_total_and_slot_length_is_declared(self):
+        # Measured file a frame longer than the slots: stills keep 60 s periods, passes wrap at it.
+        self.durations["loop.mp4"] = 600.033
+        install_manifest(v2_manifest(self.ten_slots(), total_ms=600033))
+        p = self.new_player()
+        self.assertEqual(p.timeline.slot_ms, 60000)
+        self.run_for(p, 121)
+        self.assertEqual([e["durationMs"] for e in self.plays()], [60000, 60000])
+
+    def test_shared_branded_still_is_a_still_with_no_asset(self):
+        install_manifest(v2_manifest(self.ten_slots(), still_asset={2: "still-creative"}))
+        p = self.new_player()
+        self.run_for(p, 181)
+        stills = self.plays()
+        self.assertEqual([(e["type"], e["contentType"], e["assetId"], e["slotPosition"]) for e in stills],
+                         [("STATIC_IMAGE", None, None, 0), ("STATIC_IMAGE", None, None, 1),
+                          ("STATIC_IMAGE", None, "still-creative", 2)])
+
+    def test_prebuilt_loop_has_no_slots(self):
+        self.durations["loop.mp4"] = 45.0
+        manifest = {"version": "1.0", "formatVersion": 2, "loopId": "direct", "checksum": "d1",
+                    "totalDurationMs": 45000, "slotCount": 0, "slotDurationMs": None, "slots": [],
+                    "compiledVideoChecksum": "sha256:" + "d" * 64}
+        install_manifest(manifest, statics=False)
+        p = self.new_player()
+        self.assertEqual(p.timeline.slot_count, 0)
+        p.on_door_sensor()
+        self.run_for(p, 100)
+        p.on_door_sensor()
+        plays = [e for e in self.plays() if e["mode"] == "journey"]
+        self.assertEqual([(e["type"], e["durationMs"], e["completedFull"]) for e in plays],
+                         [("LOOP_VIDEO", 45000, True), ("LOOP_VIDEO", 45000, True), ("LOOP_VIDEO", 10000, False)])
+
+    def test_manifest_only_republish_does_not_interrupt_the_advert_on_screen(self):
+        install_manifest(v2_manifest(self.ten_slots()))
+        p = self.new_player()
+        p.on_door_sensor()
+        self.run_for(p, 5)
+        loads = self.mpv.current.loadfile_count()
+        changed = v2_manifest(self.ten_slots(), checksum="v2-2", still_asset={0: "new-still"})
+        install_manifest(changed)
+        common.write_player_command("reload", loopId="loop-V2", commandId="r-same-video")
+        self.run_for(p, 10)
+        self.assertEqual(self.mpv.current.loadfile_count(), loads)
+        self.assertEqual(p.timeline.checksum, "v2-2")
+        ad0 = [e for e in self.plays() if e["assetId"] == "ad-0"]
+        self.assertEqual([(e["durationMs"], e["completedFull"]) for e in ad0], [(10000, True)])
+        self.assertTrue(common.read_json(common.PLAYER_STATE_PATH)["lastHandledOk"])
+
+    def test_new_video_on_republish_reloads(self):
+        install_manifest(v2_manifest(self.ten_slots()))
+        p = self.new_player()
+        p.on_door_sensor()
+        self.run_for(p, 5)
+        loads = self.mpv.current.loadfile_count()
+        install_manifest(v2_manifest(self.ten_slots(), checksum="v2-3", video_checksum="sha256:" + "e" * 64))
+        common.write_player_command("reload", loopId="loop-V2", commandId="r-new-video")
+        self.run_for(p, 2)
+        self.assertGreater(self.mpv.current.loadfile_count(), loads)
+
+
+class TestLegacyManifest(PlayerTestBase):
+    """Loops published before release 1.2.0 stay in the old format until republished. Their
+    totalDurationMs was the constant 600000 even when the compiled file was longer."""
+
+    trigger = "always"
+
+    def test_pass_wraps_where_the_file_ends(self):
+        self.durations["loop.mp4"] = 623.0
+        write_manifest(slots=slot_loop(), safety=SAFETY_VIDEO)
+        p = self.new_player()
+        p.config.raw.setdefault("playback", {})["alwaysSafetyEveryCycles"] = 2
+        self.run_for(p, 8 + 623 + 600 + 8 + 5)
+        self.assertEqual(p.timeline.total_ms, 623000)
+        self.assertEqual(p.timeline.slot_ms, 60000)  # slot layout as the manifest implies
+        entries = self.logs()
+        self.assertEqual([e["type"] for e in entries].count("SAFETY"), 2)
+        ads = Counter(e["assetId"] for e in entries if e["contentType"] == "ADVERTISEMENT" and e["completedFull"])
+        self.assertEqual(ads, Counter({f"ad-{i}": 2 for i in range(10)}))
+        # The second pass starts where mpv wraps (623 s), not at 600 s: nothing is logged for the
+        # untimed tail, and no item is cut short.
+        starts = [common_ts(e["playedAt"]) for e in entries if e["assetId"] == "ad-0"]
+        self.assertAlmostEqual(starts[1] - starts[0], 623.0, places=2)
+        self.assertTrue(all(e["completedFull"] for e in entries), [e for e in entries if not e["completedFull"]])
+
+    def test_safety_due_skips_the_untimed_tail(self):
+        self.durations["loop.mp4"] = 623.0
+        write_manifest(slots=slot_loop(), safety=SAFETY_VIDEO)
+        p = self.new_player()
+        self.run_for(p, 8 + 600 + 8 + 600 + 5)
+        entries = self.logs()
+        self.assertEqual([e["type"] for e in entries].count("SAFETY"), 2)
+        ads = Counter(e["assetId"] for e in entries if e["contentType"] == "ADVERTISEMENT" and e["completedFull"])
+        self.assertEqual(ads, Counter({f"ad-{i}": 2 for i in range(10)}))
+
+    def test_matching_file_is_left_alone(self):
+        write_manifest(slots=slot_loop())
+        p = self.new_player()
+        self.run_for(p, 30)
+        self.assertEqual((p.timeline.total_ms, p.timeline.wrap_checked), (600000, True))
+
+
 class TestJourneyBookkeeping(PlayerTestBase):
     """Finding 13."""
 

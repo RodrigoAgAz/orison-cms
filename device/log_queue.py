@@ -9,7 +9,8 @@ Layout under LOG_DIR:
 
 The health monitor rotates playback.jsonl into outbox segments under the lock, then sends one
 segment at a time without holding the lock, so nothing the player appends during an upload can be
-lost. Every entry carries an eventId so a resend after a lost response can be de-duplicated.
+lost. Every entry the player writes carries an eventId so a resend after a lost response can be
+de-duplicated (entries left by firmware before 1.2.0 have none; see normalize_legacy_entry).
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ import json
 import os
 import re
 import time
-import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -115,21 +115,23 @@ def downgrade_for_old_server(entries: list[dict[str, Any]]) -> tuple[list[dict[s
 
 
 def normalize_legacy_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Entries written by firmware before 1.2.0 have no eventId, and logged every still image shown
-    while idle or muted as a completed ADVERTISEMENT play (attributed to the slot's video advert).
-    Give them an eventId and record those stills as what they were: a STATIC_IMAGE with no creative
-    we can vouch for. Plays are otherwise left as the old firmware recorded them."""
+    """Entries written by firmware before 1.2.0 (still in playback.jsonl after an update) logged
+    every still image shown while idle or muted as a completed ADVERTISEMENT play (attributed to
+    the slot's video advert). Record those stills as what they were: a STATIC_IMAGE with no creative
+    we can vouch for. Plays are otherwise left exactly as the old firmware recorded them.
+
+    They deliberately get NO eventId: the server treats an eventId as the mark of a 1.2.0 entry
+    whose durationMs and completedFull were measured (lib/playback-metrics.ts), and these were not
+    (the old firmware logged every play as complete when it started). The cost is that this one
+    leftover batch cannot be de-duplicated if its upload response is lost."""
     if entry.get("eventId"):
         return entry
-    entry = {**entry, "eventId": str(uuid.uuid4()), "legacy": True}
     if (
         not entry.get("event")
         and entry.get("type") == "ADVERTISEMENT"
         and entry.get("mode") in ("idle", "silent")
     ):
-        entry["type"] = "STATIC_IMAGE"
-        entry["contentType"] = None
-        entry["assetId"] = None
+        entry = {**entry, "type": "STATIC_IMAGE", "contentType": None, "assetId": None}
     return entry
 
 

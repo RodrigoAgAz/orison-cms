@@ -257,7 +257,8 @@ class TestLogUpload(HealthTestBase):
         self.hm.upload_logs()
         stored = self.server.stored
         self.assertEqual(len(stored), 3)
-        self.assertTrue(all(e.get("eventId") for e in stored))
+        # No eventId: the server must not count the old firmware's completion as measured.
+        self.assertFalse(any(e.get("eventId") for e in stored))
         self.assertEqual((stored[0]["type"], stored[0]["contentType"], stored[0]["assetId"]), ("STATIC_IMAGE", None, None))
         self.assertEqual((stored[1]["type"], stored[1]["assetId"]), ("ADVERTISEMENT", "video-ad"))
         self.assertEqual(normalize_legacy_entry({"eventId": "keep"}), {"eventId": "keep"})
