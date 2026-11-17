@@ -39,6 +39,31 @@ trigger is shown in each heartbeat (`playbackTrigger`) and in `runtime/player_st
 Between journeys (gpio/keyboard) the screen shows each slot's still in turn, one slot length each.
 A loop uploaded as a single video (no slots) shows the default still.
 
+## Loop manifests
+
+The player takes the loop's timing from the manifest the sync agent downloaded
+(`content/current/manifest.json`). Two formats are on cabs:
+
+- **`formatVersion: 2`** (loops published by the CMS's loop compiler from release 1.2.0 on). Items
+  start at `contents[].absoluteStartMs` and last `durationMs`; slots are `slotDurationMs` long
+  (`slots[].startMs` / `durationMs`); `totalDurationMs` is measured from the compiled file and is
+  where the loop wraps. Every slot has a `staticImageUrl`; slots without a still image of their own
+  share one branded still with `staticImageAssetId: null`, downloaded once and logged as a
+  `STATIC_IMAGE` with no `assetId`. A pre-built (uploaded) loop has `slotCount: 0`, no slots and
+  `slotDurationMs: null`: the whole video is one `LOOP_VIDEO` item. `fit`, `sourceDurationMs` and
+  `video` are informational; the player does not need them.
+- **No `formatVersion`** (every loop published before that release, until someone republishes it).
+  Slot p starts at p x `totalDurationMs` / slot count and an item at its slot start + `startTimeMs`.
+  `totalDurationMs` was a constant 600000 there, while the old compiler's files could be longer, so
+  the player checks the file's real length with mpv once and wraps where the file ends (the
+  untimed tail is not logged).
+
+Republishing: when nothing changed the CMS keeps the same manifest checksum, so the cab does
+nothing at all. When only the manifest changed (a still, the name, the safety message in the
+file) the cab downloads the manifest and reuses the video it has (matched by
+`compiledVideoChecksum`); if the video and item timing are the same, the loop on screen carries on
+without a restart.
+
 ## Configuration: `/opt/orison/config.json`
 
 Only `device.*` is required. Keys that are missing take the default below; keys from older
@@ -49,7 +74,7 @@ are ignored. `config.json.template` lists every key.
 | Key | Default | Meaning |
 |---|---|---|
 | `device.serialNumber` | required | Cab serial as registered in the CMS |
-| `device.apiBaseUrl` | required | e.g. `https://cms.orisonscreens.com/api` |
+| `device.apiBaseUrl` | required | The CMS's address followed by `/api`, e.g. `https://<CMS host>/api` |
 | `device.apiToken` | required | Device token |
 | `sync.checkIntervalSeconds` | 1800 | Content check interval. Overridden by the CMS setting when the server sends one (clamped 300..86400) |
 | `sync.maxDownloadRetries` | 3 | Attempts per file per sync cycle (resumed with Range) |
@@ -77,8 +102,10 @@ reported in the heartbeat (`display`).
 From a checkout or release of this directory, on the box:
 
 ```sh
-sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> [API_BASE_URL]
+sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> <API_BASE_URL>
 ```
+
+`API_BASE_URL` is required for a new cab (there is no default address).
 
 This installs `mpv`, `python3-requests`, `python3-psutil` (and the GPIO library on a Pi), creates
 user `orison` and adds it to the `video`, `render`, `audio`, `dialout`, `gpio` and `input` groups
@@ -118,6 +145,38 @@ never touched. `--rollback` restores the most recent backup.
 
 Playback entries are written when an item leaves the screen, with the measured `durationMs`;
 `completedFull` is true only if it ran to within 500 ms of its scheduled length.
+
+## What the cab and the CMS exchange
+
+The contract is `DEVICE_CONTRACT_V2` (firmware 1.2.0); every new field is optional both ways, so
+1.2.0 works with an older CMS and 1.0.0/1.1.0 cabs work with the current one.
+
+| Call | The cab sends | The cab uses from the answer |
+|---|---|---|
+| `POST /api/devices/heartbeat` (every `heartbeatIntervalSeconds`, and right after an activation) | status, `playerStatus` (`error` when the player's state file is stale), `playerState`, `playbackTrigger`, signal (`signalStrength` only as dBm, `signalPercent` as 0-100), detected `networkType`, `safetyChecksum`, `sync` (state, error, failed loop, since, last synced, next retry), location | `expectedLoopId` / `expectedChecksum` / `disabled` / `expectedSafetyChecksum`: any difference from what is installed asks the sync agent to sync now (at most every 2 minutes); `config` intervals (clamped) |
+| `GET /api/devices/manifest` (every `syncIntervalSeconds`, or on request) | | loop id, manifest checksum and URL, pause flag; `safetyVideo` when present (null = remove it), else the copy in the manifest file. 404 = nothing assigned (checked again after 5 minutes, then less often) |
+| `POST /api/devices/playback-log` (with each heartbeat, segments of 200) | entries with `eventId`, `loopId` (the loop on screen), measured `durationMs`, `completedFull`, `mode` (`journey`, `continuous`, `idle`, `silent`), stills as `type: STATIC_IMAGE` with `contentType: null` | 2xx: the segment is removed (entries listed in `rejected` go to `playback.dead.jsonl`); 400/413/422: retried once with `continuous` sent as `journey` (older CMS), then dead-lettered; anything else: kept and retried with backoff |
+
+The CMS skips entries whose `eventId` it already stored for the cab, so a batch re-sent after a
+lost response is not counted twice; it treats an `eventId` as the mark of a measured entry.
+Entries that firmware 1.0.0/1.1.0 left unsent in `playback.jsonl` are sent once after the update
+without an `eventId` (their durations and completion were never measured), with the stills that
+old firmware logged as adverts rewritten to `STATIC_IMAGE`.
+
+How the CMS counts these rows for advertisers is in `apps/web/src/lib/playback-metrics.ts`.
+
+## Tests
+
+- `python3 -m unittest discover -s tests` (from `device/`): the services against a fake mpv,
+  fake clock and local HTTP servers.
+- `apps/web/e2e/billing.e2e.py`: the billing path end to end against a running CMS (real upload,
+  compile, publish, sync, player, upload, analytics and CSV export), including firmware 1.0.0
+  from git history. See the file's header for how to run it.
+- `scripts/demo/simulate-cab.py`: one simulated cab (real services, fake modem and mpv) driven
+  through the phone app's actions.
+
+`scripts/demo/mac-demo-player.py` is a separate player for showing a loop on a Mac. It is not part
+of the firmware and is never installed on a cab (it used to be `device/demo.py`).
 
 ## After an update, check on the box
 

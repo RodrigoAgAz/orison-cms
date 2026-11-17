@@ -18,6 +18,7 @@
     "test": "node --import tsx --test apps/web/test/*.test.ts",
     "test:device": "cd device && python3 -m unittest discover -s tests -t .",
     "test:e2e:mobile": "node apps/web/e2e/mobile.e2e.mjs",
+    "test:e2e:desktop": "node apps/web/e2e/desktop.e2e.mjs",
     "demo:seed": "node --import tsx scripts/demo/seed.ts",
     "demo:heartbeat": "node --import tsx scripts/demo/heartbeat.ts"
   },

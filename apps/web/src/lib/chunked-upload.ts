@@ -17,7 +17,10 @@
 // a deploy (new machine) loses the pieces, and the client then starts that file again.
 //
 // Nothing here knows about phones or loops: a route decides who may upload what, when to count
-// an upload, and what to do with the joined file (see app/api/m/uploads).
+// an upload, and what to do with the joined file (app/api/m/uploads for the phone app,
+// app/api/uploads for the desktop's asset and pre-built loop uploads). Each family of routes
+// passes its own `scope`: a session is only found, fed or finished through the routes of the
+// scope that opened it, and the same file opened from two places makes two sessions.
 
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -46,9 +49,27 @@ export type UploadSessionMeta<T = unknown> = {
   updatedAt: string;
   /** "open": taking pieces. "finished": joined and handed over (pieces deleted). */
   status: "open" | "finished";
+  /** Which family of routes owns it ("phone" when missing: sessions made before scopes existed). */
+  scope?: string;
   /** Whatever the route wants to keep with the upload (name, target, the result once finished). */
   data: T;
 };
+
+/** Scope of the phone app's routes, and of any call that does not name one. */
+export const DEFAULT_UPLOAD_SCOPE = "phone";
+
+function scopeOf(meta: { scope?: string }) {
+  return meta.scope ?? DEFAULT_UPLOAD_SCOPE;
+}
+
+const NOT_FOUND_MESSAGE = "Upload not found. It may have expired, or the server restarted; start it again.";
+
+/** The session's meta, or 404 when there is none or it belongs to another scope. */
+async function readOwnMeta<T>(dir: string, scope: string) {
+  const meta = await readMeta<T>(dir);
+  if (!meta || scopeOf(meta) !== scope) throw new ApiError(NOT_FOUND_MESSAGE, 404);
+  return meta;
+}
 
 export type UploadSessionState<T = unknown> = UploadSessionMeta<T> & { received: number[]; receivedBytes: number };
 
@@ -154,8 +175,10 @@ export async function openUploadSession<T>(options: {
   tooLargeMessage: string;
   data: T;
   root?: string;
+  scope?: string;
 }): Promise<{ session: UploadSessionState<T>; isNew: boolean }> {
   const root = options.root ?? uploadSessionsRoot();
+  const scope = options.scope ?? DEFAULT_UPLOAD_SCOPE;
   if (!FINGERPRINT_PATTERN.test(options.fingerprint)) throw new ApiError("Invalid file fingerprint", 400);
   if (!Number.isInteger(options.size) || options.size < 0) throw new ApiError("Invalid file size", 400);
   if (options.size === 0) throw new ApiError("The file is empty", 400);
@@ -163,8 +186,8 @@ export async function openUploadSession<T>(options: {
   await mkdir(root, { recursive: true });
   void sweepAbandonedUploads({ root }).catch(() => undefined);
 
-  return withLock(`open:${options.fingerprint}`, async () => {
-    const existing = await findByFingerprint<T>(root, options.fingerprint, options.size);
+  return withLock(`open:${scope}:${options.fingerprint}`, async () => {
+    const existing = await findByFingerprint<T>(root, scope, options.fingerprint, options.size);
     if (existing) {
       const dir = path.join(root, existing.id);
       return withLock(existing.id, async () => {
@@ -189,6 +212,7 @@ export async function openUploadSession<T>(options: {
       createdAt: now,
       updatedAt: now,
       status: "open",
+      scope,
       data: options.data,
     };
     await writeMeta(dir, meta);
@@ -196,7 +220,7 @@ export async function openUploadSession<T>(options: {
   });
 }
 
-async function findByFingerprint<T>(root: string, fingerprint: string, size: number) {
+async function findByFingerprint<T>(root: string, scope: string, fingerprint: string, size: number) {
   let names: string[] = [];
   try {
     names = await readdir(root);
@@ -207,16 +231,15 @@ async function findByFingerprint<T>(root: string, fingerprint: string, size: num
   for (const name of names) {
     if (!ID_PATTERN.test(name)) continue;
     const meta = await readMeta<T>(path.join(root, name));
-    if (!meta || meta.status !== "open" || meta.fingerprint !== fingerprint || meta.size !== size) continue;
+    if (!meta || meta.status !== "open" || scopeOf(meta) !== scope || meta.fingerprint !== fingerprint || meta.size !== size) continue;
     if (!best || meta.updatedAt > best.updatedAt) best = meta;
   }
   return best;
 }
 
-export async function getUploadSession<T>(id: string, root = uploadSessionsRoot()) {
+export async function getUploadSession<T>(id: string, root = uploadSessionsRoot(), scope = DEFAULT_UPLOAD_SCOPE) {
   const dir = sessionDir(root, id);
-  const meta = await readMeta<T>(dir);
-  if (!meta) throw new ApiError("Upload not found. It may have expired, or the server restarted; start it again.", 404);
+  const meta = await readOwnMeta<T>(dir, scope);
   return stateOf(dir, meta);
 }
 
@@ -232,12 +255,12 @@ export async function putUploadPiece(options: {
   body: ReadableStream<Uint8Array> | null;
   sha256?: string | null;
   root?: string;
+  scope?: string;
   check?: (index: number, filePath: string) => Promise<void>;
 }) {
   const root = options.root ?? uploadSessionsRoot();
   const dir = sessionDir(root, options.id);
-  const meta = await readMeta(dir);
-  if (!meta) throw new ApiError("Upload not found. It may have expired, or the server restarted; start it again.", 404);
+  const meta = await readOwnMeta(dir, options.scope ?? DEFAULT_UPLOAD_SCOPE);
   if (meta.status !== "open") throw new ApiError("This upload is already complete", 409);
   const expected = pieceLength(options.index, meta.size, meta.pieceBytes);
   if (expected < 0) throw new ApiError(`There is no piece ${options.index} in this upload`, 400);
@@ -292,6 +315,7 @@ export async function finishUploadSession<T, R>(options: {
   id: string;
   tempPrefix: string;
   root?: string;
+  scope?: string;
   consume: (file: { tempDir: string; filePath: string; meta: UploadSessionMeta<T> }) => Promise<R>;
   storeResult: (data: T, result: R) => T;
   readResult: (data: T) => R | null;
@@ -299,8 +323,7 @@ export async function finishUploadSession<T, R>(options: {
   const root = options.root ?? uploadSessionsRoot();
   const dir = sessionDir(root, options.id);
   return withLock(options.id, async () => {
-    const meta = await readMeta<T>(dir);
-    if (!meta) throw new ApiError("Upload not found. It may have expired, or the server restarted; start it again.", 404);
+    const meta = await readOwnMeta<T>(dir, options.scope ?? DEFAULT_UPLOAD_SCOPE);
     if (meta.status === "finished") {
       const result = options.readResult(meta.data);
       if (result !== null) return result;
@@ -348,8 +371,10 @@ async function removePieces(dir: string) {
   }
 }
 
-export async function cancelUploadSession(id: string, root = uploadSessionsRoot()) {
+export async function cancelUploadSession(id: string, root = uploadSessionsRoot(), scope = DEFAULT_UPLOAD_SCOPE) {
   const dir = sessionDir(root, id);
+  const meta = await readMeta(dir);
+  if (meta && scopeOf(meta) !== scope) throw new ApiError(NOT_FOUND_MESSAGE, 404);
   await withLock(id, () => rm(dir, { recursive: true, force: true }));
 }
 

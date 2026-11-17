@@ -1,7 +1,7 @@
 {
   "device": {
     "serialNumber": "ORISON-P1-001",
-    "apiBaseUrl": "https://cms.orisonscreens.com/api",
+    "apiBaseUrl": "https://YOUR-CMS-HOST/api",
     "apiToken": "replace-with-real-token"
   },
   "sync": {

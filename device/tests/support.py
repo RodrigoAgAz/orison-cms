@@ -75,7 +75,13 @@ def make_time_shim(clock: FakeClock):
 
 
 class FakeMpv:
-    """One fake mpv 'process' (Popen interface) serving the IPC socket."""
+    """One fake mpv 'process' (Popen interface) serving the IPC socket.
+
+    Every reply is preceded by an event line, as real mpv may interleave events, to check that the
+    player skips them. Firmware 1.0.0 cannot (it reads one recv() as one JSON document), so the
+    billing end-to-end script turns that off (send_events = False) when it runs the old player."""
+
+    send_events = True
 
     def __init__(self, sock_path: str, media: str, loop_forever: bool, durations: dict, clock: FakeClock, command: list):
         self.sock_path = sock_path
@@ -151,7 +157,7 @@ class FakeMpv:
                         d = self._duration()
                         resp = {"error": "property unavailable"} if d is None else {"error": "success", "data": d}
                 # mpv broadcasts events to every client; make sure the player skips them.
-                event = json.dumps({"event": "property-change", "name": "x"}) + "\n"
+                event = json.dumps({"event": "property-change", "name": "x"}) + "\n" if self.send_events else ""
                 try:
                     conn.sendall((event + json.dumps(resp) + "\n").encode())
                 except OSError:

@@ -3,17 +3,24 @@
 # then installs packages, the service user, the code and the systemd services (install.sh).
 # Works on Debian/Ubuntu (x86) and Raspberry Pi OS. Safe to re-run.
 #
-# Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> [API_BASE_URL]
+# Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> <API_BASE_URL>
+#   API_BASE_URL is the CMS's address followed by /api, e.g. https://<your CMS host>/api. It is
+#   needed only when there is no config.json yet (there is no default: a guessed address leaves a
+#   new cab polling a host that is not the CMS).
 set -euo pipefail
 
 SERIAL="${1:-}"
 TOKEN="${2:-}"
-API_BASE_URL="${3:-https://cms.orisonscreens.com/api}"
+API_BASE_URL="${3:-}"
 BASE_DIR="${ORISON_BASE_DIR:-/opt/orison}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -z "$SERIAL" || -z "$TOKEN" ]]; then
-  echo "Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> [API_BASE_URL]"
+  echo "Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> <API_BASE_URL>"
+  exit 1
+fi
+if [[ -z "$API_BASE_URL" && ! -f "$BASE_DIR/config.json" ]]; then
+  echo "Usage: sudo ./bootstrap.sh <SERIAL_NUMBER> <API_TOKEN> <API_BASE_URL>   (e.g. https://<your CMS host>/api)"
   exit 1
 fi
 if [[ $EUID -ne 0 ]]; then

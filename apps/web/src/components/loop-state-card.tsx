@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -14,6 +14,12 @@ export function LoopStateCard({ state }: { state: LoopStateView }) {
   const { toast } = useToast();
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const processing = state.status === "PUBLISHING" && !state.publishError;
+  useEffect(() => {
+    // Converted in the background: show the video as soon as it is ready.
+    if (!processing) return;
+    const timer = window.setInterval(() => router.refresh(), 4000);
+    return () => window.clearInterval(timer);
+  }, [processing, router]);
   return (
     <div className="card stack lb-empty-loop">
       <Link className="lb-back" href="/loops">
@@ -27,7 +33,7 @@ export function LoopStateCard({ state }: { state: LoopStateView }) {
         {state.kind === "phone" ? "Uploaded from the phone app" : "Pre-built loop"} · last changed {formatWhen(state.updatedAt)}
       </p>
       {processing ? (
-        <div className="alert alert-warning">This video is still being processed. This page shows it once it is ready.</div>
+        <div className="alert alert-warning">This video is still being converted to the cab format. This page shows it as soon as it is ready.</div>
       ) : (
         <div className="alert alert-danger">
           <strong>There is no video for this loop.</strong> {state.publishError ?? "Its upload did not finish."}

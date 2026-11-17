@@ -56,8 +56,26 @@ export async function parseBody<S extends ZodTypeAny>(request: Request, schema: 
 }
 
 /** Map library errors to API errors (anything else stays a 500 with the detail in the log). */
+/** Prisma's known request error codes, without importing the client into every caller. */
+function prismaCode(error: unknown) {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^P\d{4}$/.test(code) ? code : null;
+}
+
+/** A unique-constraint violation (P2002), e.g. a group name that is already taken. */
+export function isUniqueViolation(error: unknown) {
+  return prismaCode(error) === "P2002";
+}
+
+export function groupNameTakenMessage(name: string) {
+  return `There is already a cab group called "${name}". Choose another name.`;
+}
+
 export function toApiError(error: unknown) {
   if (error instanceof ApiError) return error;
+  // Safety nets for routes that do not word these themselves: never a 500 for either.
+  if (prismaCode(error) === "P2002") return new ApiError("Something with that name already exists. Choose another name.", 409);
+  if (prismaCode(error) === "P2025") return new ApiError("Not found", 404);
   if (error instanceof StaleEditError) return new ApiError(error.message, 409, { stale: true });
   if (error instanceof PublishRefused) return new ApiError(error.message, error.status);
   if (error instanceof LoopRuleError || error instanceof PlanError) return new ApiError(error.message, 400);

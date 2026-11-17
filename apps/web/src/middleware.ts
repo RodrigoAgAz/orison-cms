@@ -142,12 +142,19 @@ export async function middleware(request: NextRequest) {
   return noIndex(NextResponse.redirect(url));
 }
 
-// Large raw-body upload routes are excluded: when middleware runs, Next 14 clones (buffers) the
-// whole request body in memory before the handler starts, so a 500MB upload costs >500MB of RAM
-// and the route cannot reject it early. Those routes authenticate the session themselves.
+// Which requests run this middleware. Deliberately every page and every API route (only Next's
+// own files and public files with an extension, such as /m-app/icon.png, are skipped), so access
+// is decided here for all of them, and every route also checks it itself (requireApiUser /
+// requirePhoneAppActor) because the middleware only checks the cookie's signature.
+//
+// Cost, measured on Next 14.2: for a request that runs the middleware, Next receives the WHOLE
+// request body into memory (body-streams.js getCloneableBody) before the route handler starts.
+// That is why the upload routes used to be excluded here. They no longer need to be: every upload
+// (desktop and phone) is sent in pieces of at most PIECE_BYTES (4 MB, lib/chunked-upload.ts), so
+// no legitimate request body is larger than that. A body sent to any route is buffered either way
+// (an exclusion would only have spared the upload routes), so no exclusion is kept.
+// test/middleware-matcher.test.ts compiles this matcher with Next's own code and fails if an API
+// route is skipped or a piece could grow past a few MB.
 export const config = {
-  matcher: [
-    "/((?!api/m/upload|api/loops/direct-upload|api/assets/upload|.*\\..*).*)",
-    "/api/((?!m/upload|loops/direct-upload|assets/upload).*)",
-  ],
+  matcher: ["/((?!_next/|.*\\..*).*)", "/api/:path*"],
 };

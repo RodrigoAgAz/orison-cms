@@ -143,6 +143,26 @@ class Cms:
             raise RuntimeError(f"{method} {path}: HTTP {r.status_code} {str(data)[:400]}")
         return r.status_code, data
 
+    def upload_asset(self, path: Path, category: str, metadata: dict) -> str:
+        """Desktop upload in pieces (POST /api/uploads, PUT .../pieces/<n>, POST .../complete)."""
+        import hashlib
+
+        data = path.read_bytes()
+        _, session = self.call("POST", "/uploads", {"kind": "asset", "fileName": path.name, "size": len(data),
+                                                    "fingerprint": hashlib.sha256(data).hexdigest(), "category": category,
+                                                    "metadata": metadata})
+        size = session["pieceBytes"]
+        for index in range(session["pieceCount"]):
+            if index in session.get("received", []):
+                continue
+            piece = data[index * size:(index + 1) * size]
+            r = self.http.put(f"{API}/uploads/{session['uploadId']}/pieces/{index}", data=piece, timeout=120,
+                              headers={"content-type": "application/octet-stream", "x-piece-sha256": hashlib.sha256(piece).hexdigest()})
+            if not r.ok:
+                raise RuntimeError(f"piece {index} of {path.name}: HTTP {r.status_code} {r.text[:200]}")
+        _, result = self.call("POST", f"/uploads/{session['uploadId']}/complete")
+        return result["assetId"]
+
     def device_get(self, path: str, serial: str):
         r = self.requests.get(API + path, headers={"Authorization": f"Bearer {DEVICE_TOKEN}", "X-Device-Serial": serial}, timeout=30)
         return r.status_code, (r.json() if r.headers.get("content-type", "").startswith("application/json") else r.text)
@@ -248,6 +268,12 @@ def make_media(directory: Path, prefix: str) -> dict[str, Path]:
 # Journeys: safety message, then the loop from its start; after a journey 5 s of the default
 # still (not logged); a journey ended during the safety message goes straight back to idle.
 # ------------------------------------------------------------------------------------------------
+
+
+def safety_ticks(seconds: float) -> int:
+    """Whole seconds (player ticks) until the loop replaces the safety message: the player moves
+    on once mpv is within 250 ms of the end of the file (firmware 1.0.0 did the same)."""
+    return math.ceil(seconds - 0.25 - 1e-9)
 
 
 class Model:
@@ -361,7 +387,7 @@ class Model:
             self.idle_origin = self.wd_start + self.WIND_DOWN
         if self.state == "SAFETY" and self.safety_s is not None and self.t >= self.safety_start + self.safety_s:
             self.state = "JOURNEY"
-            self.loop_start = self.safety_start + math.ceil(self.safety_s - 1e-9)  # the next 1 s tick
+            self.loop_start = self.safety_start + safety_ticks(self.safety_s)
 
     def door(self):
         if self.state in ("IDLE", "WIND_DOWN"):
@@ -383,7 +409,7 @@ class Model:
                      content_type=None, asset=None, slot=None, mode="journey", state="SAFETY", journey="J")
         else:
             if self.safety_s:
-                self.add(start=self.safety_start, dur_s=self.safety_s, scheduled_s=self.safety_s, type_="SAFETY",
+                self.add(start=self.safety_start, dur_s=min(self.safety_s, safety_ticks(self.safety_s)), scheduled_s=self.safety_s, type_="SAFETY",
                          content_type=None, asset=None, slot=None, mode="journey", state="SAFETY", journey="J")
             if self.mutes and self.mutes[-1][1] is None:
                 self.mutes[-1][1] = end
@@ -416,11 +442,12 @@ class Model:
         last_end = max(i["start"] + i["dur"] for i in items)
         while t < end:
             s = self.safety_s
-            self.add(start=t, dur_s=min(s, end - t), scheduled_s=s, type_="SAFETY", content_type=None, asset=None, slot=None,
+            shown = min(s, safety_ticks(s))
+            self.add(start=t, dur_s=min(shown, end - t), scheduled_s=s, type_="SAFETY", content_type=None, asset=None, slot=None,
                      mode="continuous", state="SAFETY")
-            if t + s >= end:
+            if t + shown >= end:
                 break
-            L = t + math.ceil(s - 1e-9)
+            L = t + safety_ticks(s)
             self.mutes = []
             self.video(L, min(end, L + last_end), "continuous", None)
             t = L + math.ceil(last_end - 1e-9) if L + last_end < end else end
@@ -454,10 +481,10 @@ def old_firmware_runner(args: list[str]) -> None:
     old_common.ensure_directories()
     shutil.rmtree(old_common.CURRENT_DIR, ignore_errors=True)
     shutil.copytree(content_dir, old_common.CURRENT_DIR)
-    for name in ("safety.mp4", "safety.jpg", "safety.json"):  # the loop's manifest file has no safety message
-        (old_common.CURRENT_DIR / name).unlink(missing_ok=True)
+    (old_common.CURRENT_DIR / "safety.json").unlink(missing_ok=True)  # 1.2.0's file; 1.0.0 reads the manifest's copy
     manifest = json.loads((old_common.CURRENT_DIR / "manifest.json").read_text())
 
+    support.FakeMpv.send_events = False  # 1.0.0 reads one recv() as one JSON reply
     clock = support.FakeClock()
     clock.t = 0.0
     e0 = float(epoch0)
@@ -469,7 +496,9 @@ def old_firmware_runner(args: list[str]) -> None:
             return datetime.fromtimestamp(e0 + clock.t, tz or timezone.utc)
 
     sock = str(base / "mpv.sock")
-    mpv = support.MpvFactory(sock, clock, {"loop.mp4": manifest["totalDurationMs"] / 1000.0})
+    safety = manifest.get("safetyVideo") or {}
+    mpv = support.MpvFactory(sock, clock, {"loop.mp4": manifest["totalDurationMs"] / 1000.0,
+                                           "safety.mp4": (safety.get("durationMs") or 0) / 1000.0 or None})
     patches = [
         mock.patch.object(old_pm, "time", support.make_time_shim(clock)),
         mock.patch.object(old_pm, "datetime", FakeDatetime),
@@ -507,52 +536,64 @@ def old_firmware_runner(args: list[str]) -> None:
 
 
 def old_model(session, manifest):
-    """What firmware 1.0.0 logs for the session, from its documented rules (lib/playback-metrics.ts
-    and the 1.0.0 code): everything is logged when it STARTS, on the player's 1 s ticks; a still
-    is logged each time the slot changes while idle (from the idle start) or muted (loop clock);
-    on starting or resuming the loop it skips every item that has already started (so slot 0's
-    advert is never logged at the start of a journey); no safety message is installed here.
-    Returns (counts by kind, advert plays by asset)."""
+    """What firmware 1.0.0 logs for the session, from its rules (lib/playback-metrics.ts and the
+    1.0.0 code): everything is logged when it STARTS, on the player's 1 s ticks; a still each time
+    the slot changes while idle (from the idle start) or muted (loop clock); the safety message
+    when it starts, with the manifest's duration; on starting or resuming the loop every item that
+    has already started is skipped (so slot 0's advert is not logged at the start of a journey).
+    Returns a list of {t, kind, assetId}."""
     T = manifest["totalDurationMs"] / 1000.0
+    safety = (manifest.get("safetyVideo") or {}).get("durationMs")
+    S = safety / 1000.0 if safety else None
     items = sorted(
         ((slot["position"] * 60.0 + c["startTimeMs"] / 1000.0, c) for slot in manifest["slots"] for c in slot["contents"]),
         key=lambda x: x[0],
     )
-    out, adverts = Counter(), Counter()
-    state = {"name": "IDLE", "origin": 0.0, "L": None, "next": 0, "last": 0.0, "marker": None, "wd": None}
+    out = []
+    st = {"name": "IDLE", "origin": 0.0, "L": None, "next": 0, "last": 0.0, "marker": None, "wd": None, "s": None}
 
-    def log_still(mode, slot):
-        if state["marker"] != (mode, slot):
-            state["marker"] = (mode, slot)
-            out["still"] += 1
+    def log(t, kind, asset=None, ms=None):
+        out.append({"t": float(t), "kind": kind, "assetId": asset, "durationMs": ms})
+
+    def still_asset(slot):
+        sl = next((x for x in manifest["slots"] if x["position"] == slot), {})
+        if sl.get("staticImageAssetId"):
+            return sl["staticImageAssetId"]
+        return next((c["assetId"] for c in sl.get("contents", []) if c["type"] == "ADVERTISEMENT"), None)
+
+    def log_still(t, mode, slot):
+        if st["marker"] != (mode, slot):
+            st["marker"] = (mode, slot)
+            log(t, "still", still_asset(slot))
 
     def cursor_to(position):
-        state["last"] = position
-        state["next"] = sum(1 for start, _ in items if start <= position)
+        st["last"] = position
+        st["next"] = sum(1 for start, _ in items if start <= position)
 
     def enter_idle(t):
-        state.update(name="IDLE", origin=t, marker=None)
-        log_still("idle", 0)
+        st.update(name="IDLE", origin=float(t), marker=None)
+        log_still(t, "idle", 0)
 
     def tick(t):
-        name = state["name"]
+        name = st["name"]
         if name == "IDLE":
-            log_still("idle", int((t - state["origin"]) // 60) % 10)
+            log_still(t, "idle", int((t - st["origin"]) // 60) % 10)
+        elif name == "SAFETY":
+            if t - st["s"] >= S - 0.25:
+                st.update(name="JOURNEY", L=float(t))
+                cursor_to(0.0)
         elif name == "JOURNEY":
-            elapsed = (t - state["L"]) % T
-            if elapsed + 3 < state["last"]:
-                state["next"] = 0
-            state["last"] = elapsed
-            while state["next"] < len(items) and items[state["next"]][0] <= elapsed:
-                c = items[state["next"]][1]
-                kind = "advert" if c["type"] == "ADVERTISEMENT" else "filler"
-                out[kind] += 1
-                if kind == "advert":
-                    adverts[c["assetId"]] += 1
-                state["next"] += 1
+            elapsed = (t - st["L"]) % T
+            if elapsed + 3 < st["last"]:
+                st["next"] = 0
+            st["last"] = elapsed
+            while st["next"] < len(items) and items[st["next"]][0] <= elapsed:
+                c = items[st["next"]][1]
+                log(t, "advert" if c["type"] == "ADVERTISEMENT" else "filler", c["assetId"])
+                st["next"] += 1
         elif name == "SILENT":
-            log_still("silent", int((t - state["L"]) // 60) % 10)
-        elif name == "WIND_DOWN" and t - state["wd"] >= 5:
+            log_still(t, "silent", int((t - st["L"]) // 60) % 10)
+        elif name == "WIND_DOWN" and t - st["wd"] >= 5:
             enter_idle(t)
 
     t = 0
@@ -563,21 +604,39 @@ def old_model(session, manifest):
                 tick(t)
                 t += 1
         elif action[0] == "door":
-            if state["name"] == "IDLE":
-                out["journey_start"] += 1
-                state.update(name="JOURNEY", L=float(t))
-                cursor_to(0.0)
-            elif state["name"] != "WIND_DOWN":
-                out["journey_end"] += 1
-                state.update(name="WIND_DOWN", wd=t)
+            if st["name"] == "IDLE":
+                log(t, "journey_start")
+                if S:
+                    log(t, "safety")
+                    st.update(name="SAFETY", s=float(t))
+                else:
+                    st.update(name="JOURNEY", L=float(t))
+                    cursor_to(0.0)
+            elif st["name"] == "SAFETY":
+                log(t, "journey_end", ms=0)  # 1.0.0 times a journey from the start of the loop
+                enter_idle(t)
+            elif st["name"] != "WIND_DOWN":
+                log(t, "journey_end", ms=int((t - st["L"]) * 1000))
+                st.update(name="WIND_DOWN", wd=t)
         elif action[0] == "mute":
-            if state["name"] == "JOURNEY":
-                state.update(name="SILENT", marker=None)
-                log_still("silent", int((t - state["L"]) // 60) % 10)
-            elif state["name"] == "SILENT":
-                state["name"] = "JOURNEY"
-                cursor_to((t - state["L"]) % T)
-    return out, adverts
+            if st["name"] == "JOURNEY":
+                st.update(name="SILENT", marker=None)
+                log_still(t, "silent", int((t - st["L"]) // 60) % 10)
+            elif st["name"] == "SILENT":
+                st["name"] = "JOURNEY"
+                cursor_to((t - st["L"]) % T)
+    return out
+
+
+def old_counts(entries):
+    counts, adverts = Counter(), Counter()
+    for e in entries:
+        counts[e["kind"]] += 1
+        if e["kind"] == "journey_end":
+            counts["journey_ms"] += e["durationMs"]
+        if e["kind"] == "advert":
+            adverts[e["assetId"]] += 1
+    return counts, adverts
 
 
 # ------------------------------------------------------------------------------------------------
@@ -601,10 +660,7 @@ def main() -> int:
         media = make_media(work, prefix)
         for key, path in media.items():
             category = MEDIA[key][0]
-            q = urllib.parse.urlencode({"filename": path.name, "category": category,
-                                        "metadata": json.dumps({"advertiser": f"{prefix} advertiser"})})
-            _, body = cms.call("POST", f"/assets/upload?{q}", raw=path.read_bytes())
-            created["assets"][key] = body["id"]
+            created["assets"][key] = cms.upload_asset(path, category, {"advertiser": f"{prefix} advertiser"})
         deadline = time.time() + 900
         assets = {}
         while time.time() < deadline:
@@ -656,6 +712,15 @@ def main() -> int:
             if not ok:
                 raise RuntimeError("publish failed")
 
+        step("Safety message (a global setting: configured before publishing, restored right after the cab session)")
+        _, settings = cms.call("GET", "/settings")
+        if not settings.get("safetyVideoAssetId"):
+            settings_restore = dict(settings)
+            cms.call("PUT", "/settings", {**settings, "safetyVideoAssetId": aid["SAFETY"]})
+            print("   configured the test safety message")
+        else:
+            print("   a safety message is already configured; using it as it is")
+
         loop_a = build(LOOP_A, f"{prefix} loop A", created["groups"][0])
         created["loops"]["A"] = loop_a
         loop_b = build(LOOP_B, f"{prefix} loop B", created["groups"][1])
@@ -664,16 +729,6 @@ def main() -> int:
         publish(loop_b, "loop B")
         status, answer = cms.device_get("/devices/manifest", serial_new)
         check(status == 200 and answer.get("loopId") == loop_a, "the test cab is told to play loop A", answer)
-
-        step("Safety message (global setting; restored as soon as the cab session is over)")
-        _, settings = cms.call("GET", "/settings")
-        if not settings.get("safetyVideoAssetId"):
-            settings_restore = dict(settings)
-            cms.call("PUT", "/settings", {**settings, "safetyVideoAssetId": aid["SAFETY"]})
-            print("   configured the test safety message")
-        else:
-            print("   a safety message is already configured; using it as it is")
-        status, answer = cms.device_get("/devices/manifest", serial_new)
         safety_desc = answer.get("safetyVideo")
         check(isinstance(safety_desc, dict) and safety_desc.get("durationMs", 0) > 0, "manifest response carries the safety message", safety_desc)
         safety_s = safety_desc["durationMs"] / 1000.0
@@ -868,15 +923,15 @@ def main() -> int:
         upload("lose-response")
 
         step("Republish loop B unchanged: no sync at all")
-        state_before = common.read_json(common.PLAYER_STATE_PATH, {})
+        loads_before = mpv.current.loadfile_count()
         publish(loop_b, "loop B (unchanged)")
         status, answer = cms.device_get("/devices/manifest", serial_new)
         check(answer.get("checksum") == manifest_b["checksum"], "server tells the cab exactly what it told it before")
         heartbeat()
         got, reloaded, status = sync_now("unchanged")
         check(got == [] and not reloaded, "sync downloaded nothing and did not reload the player", got)
-        check(common.read_json(common.PLAYER_STATE_PATH, {}).get("lastHandledCommandId") == state_before.get("lastHandledCommandId"),
-              "player saw no reload command")
+        check(common.read_json(common.PLAYER_STATE_PATH, {}).get("lastHandledAction") != "reload" and mpv.current.loadfile_count() == loads_before,
+              "the player was not told to reload and loaded nothing")
 
         step("Republish loop B with only a still changed: manifest only, no video download")
         _, loop_row = cms.call("GET", f"/loops/{loop_b}")
@@ -982,7 +1037,15 @@ def main() -> int:
 
         step("Analytics and CSV export against the independent figures")
         exp = expected_figures(model.entries)
-        exp_old, exp_old_adverts = old_model(SESSION_1, manifest_b2)
+        old_expected = old_model(SESSION_1, manifest_b2)
+        old_logged = [{"t": round(datetime.fromisoformat(e["playedAt"].replace("Z", "+00:00")).timestamp() - epoch0, 3),
+                       "kind": kind_of(e), "assetId": e.get("assetId")} for e in old_run["entries"]]
+        key = lambda e: (round(e["t"], 1), e["kind"], e["assetId"])  # noqa: E731
+        missing = Counter(map(key, old_expected)) - Counter(map(key, old_logged))
+        extra = Counter(map(key, old_logged)) - Counter(map(key, old_expected))
+        check(not missing and not extra, f"firmware 1.0.0 logged what its rules predict ({len(old_expected)} entries)",
+              {"expected-not-logged": sorted(missing)[:8], "logged-not-expected": sorted(extra)[:8]})
+        exp_old, exp_old_adverts = old_counts(old_expected)
         csv_rows = export_rows(cms, {serial_new, serial_old}, epoch0)
         report = []
         compare_csv(csv_rows, exp, exp_old, exp_old_adverts, serial_new, serial_old, report, aid, {loop_a: "A", loop_b: "B"})
@@ -1134,6 +1197,10 @@ def compare_csv(rows, exp, exp_old, exp_old_adverts, serial_new, serial_old, rep
     by_old = Counter(r["countsAs"] for r in old)
     for kind in ("advert", "filler", "still", "journey_start", "journey_end"):
         report.append((f"CSV 1.0.0 cab: {LABEL[kind]}", exp_old[kind], by_old[LABEL[kind]]))
+    report.append(("CSV 1.2.0 cab: journey seconds (sum)", f["journey_ms"] / 1000,
+                   sum(int(r["durationMs"]) for r in new if r["countsAs"] == "journey_end") / 1000))
+    report.append(("CSV 1.0.0 cab: journey seconds (sum)", exp_old["journey_ms"] / 1000,
+                   sum(int(r["durationMs"]) for r in old if r["countsAs"] == "journey_end") / 1000))
     report.append(("CSV 1.0.0 cab: rows marked measured", 0, sum(r["measured"] == "yes" for r in old)))
     report.append(("CSV 1.0.0 cab: stills counted as advert plays", 0,
                    sum(1 for r in old if r["mode"] in ("idle", "silent") and r["countsAs"] == "advert_play")))
@@ -1209,6 +1276,14 @@ def cleanup(cms: Cms, created, settings_restore, prefix):
             print(f"   asset {key}: {status} {body}")
     for group_id in created["groups"]:
         cms.call("DELETE", f"/device-groups/{group_id}", ok=None)
+    # Local-disk storage (development) deletes objects but leaves their folders behind.
+    storage = REPO / "apps/web/tmp/storage"
+    for folder in [*(storage / "loops" / i for i in created["loops"].values()), *(storage / "manifests" / i for i in created["loops"].values()),
+                   *(storage / "assets" / i for i in created["assets"].values())]:
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
     if DATABASE_URL:
         try:
             psql(f'DELETE FROM "ActivityEvent" WHERE message LIKE \'%{prefix}%\'')

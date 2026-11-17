@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+"""Stand-alone loop player for a Mac (sales demos, checking a loop on a laptop). NOT cab firmware.
+
+    brew install mpv
+    python3 scripts/demo/mac-demo-player.py
+
+It asks the CMS what a cab with the configured serial should play (GET /api/devices/manifest),
+downloads that loop with curl into ~/.orison-demo-player/content, and plays it with mpv the way a
+cab looks: safety message, the loop, the slot stills between journeys (keys: j journey start/end,
+space mute, d driver override). It sends no heartbeat and no playback log, so nothing it plays
+is counted in analytics.
+
+Configuration: ~/.orison-demo-player/config.json (created on first run; ORISON_DEMO_DIR moves the
+folder): {"device": {"serialNumber", "apiBaseUrl", "apiToken"}}. The serial must be a cab
+registered in the CMS (the manifest endpoint refuses unknown serials); use a cab set aside for
+demos, not a working cab, so the fleet view is not confused.
+
+This used to be device/demo.py, which the 1.0.0 install scripts copied onto every cab, where it
+shared /opt/orison/config.json with the real services. Firmware 1.2.0's install.sh removes that
+leftover; the file now lives here so no release of device/ contains it.
+"""
 
 from __future__ import annotations
 
@@ -22,14 +42,15 @@ from urllib.request import Request, urlopen
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = SCRIPT_DIR / "config.json"
-CONTENT_DIR = SCRIPT_DIR / "demo_content"
+DEMO_DIR = Path(os.environ.get("ORISON_DEMO_DIR") or Path.home() / ".orison-demo-player")
+CONFIG_PATH = DEMO_DIR / "config.json"
+CONTENT_DIR = DEMO_DIR / "content"
 STATICS_DIR = CONTENT_DIR / "statics"
 MANIFEST_PATH = CONTENT_DIR / "manifest.json"
 LOOP_PATH = CONTENT_DIR / "loop.mp4"
 SAFETY_VIDEO_PATH = CONTENT_DIR / "safety.mp4"
 SAFETY_IMAGE_PATH = CONTENT_DIR / "safety.jpg"
-DEFAULT_STATIC_IMAGE_PATH = SCRIPT_DIR / "orison_static_fallback.jpg"
+DEFAULT_STATIC_IMAGE_PATH = SCRIPT_DIR.parent.parent / "device" / "orison_static_fallback.jpg"
 MPV_SOCKET_PATH = "/tmp/orison-demo-mpv.sock"
 CHUNK_SIZE = 1024 * 1024
 WIND_DOWN_SECONDS = 5
@@ -63,11 +84,12 @@ def ensure_mpv_installed() -> None:
 
 def ensure_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open("w", encoding="utf-8") as handle:
             json.dump(DEFAULT_CONFIG, handle, indent=2)
             handle.write("\n")
         os.chmod(CONFIG_PATH, 0o600)
-        print(f"Created {CONFIG_PATH.name} with demo defaults.")
+        print(f"Created {CONFIG_PATH} with demo defaults: set the serial of a cab registered for demos.")
 
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         return json.load(handle)

@@ -48,15 +48,6 @@ type SafetyVideoManifestData = {
   mimeType: string;
 };
 
-type DirectLoopUploadOptions = {
-  name: string;
-  originalFilename: string;
-  tempFilePath: string;
-  publishedByUserId: string;
-  /** Desktop: where it plays once ready (null = all cabs), or "library" to keep it off air. */
-  target?: { groupId: string | null } | "library";
-};
-
 /** A save based on data that someone else has changed since it was loaded. */
 export class StaleEditError extends Error {}
 /** A request that breaks a rule, with a message fit for staff. */
@@ -557,52 +548,21 @@ async function publishPreparedLoopVideo(options: {
   }
 }
 
-/**
- * Desktop direct upload: synchronous (through the shared media limiter), creates the loop and
- * either puts it on air for its target (all cabs, or a group) or keeps it off air as a draft
- * ("library"). The desktop form asks for the target and confirms before uploading.
- * Without `target` (older callers): on air for all cabs, as before.
- */
-export async function publishDirectLoopUpload({
-  name,
-  originalFilename,
-  tempFilePath,
-  publishedByUserId,
-  target,
-}: DirectLoopUploadOptions) {
-  return mediaJobLimiter().run(async () => {
-  const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
-  let loop: Loop | null = null;
+/** Where a pre-built loop uploaded from the desktop plays once it is ready. */
+export type DesktopUploadTarget = { kind: "library" } | { kind: "all" } | { kind: "group"; groupId: string };
 
-  try {
-    const prepared = await prepareLoopVideo(tempFilePath, workDir);
-    loop = await prisma.loop.create({
-      data: { name, status: "DRAFT", targetGroupId: target && target !== "library" ? target.groupId : null },
-    });
-    const published = await publishPreparedLoopVideo({
-      loop,
-      prepared,
-      workDir,
-      publishedByUserId,
-      requireStatus: "DRAFT",
-      finalStatus: target === "library" ? "DRAFT" : "PUBLISHED",
-      activity: {
-        message: `Loop ${loop.name} published from direct upload`,
-        metadata: { originalFilename, mode: "DIRECT_UPLOAD" },
-      },
-    });
-    if (!published) {
-      throw new Error("The loop was changed while it was being published");
-    }
-    return published;
-  } catch (error) {
-    if (loop) {
-      await prisma.loop.delete({ where: { id: loop.id } }).catch(() => undefined);
-    }
-    throw error;
-  } finally {
-    await rm(workDir, { recursive: true, force: true });
-  }
+/**
+ * Create the Loop row for a pre-built loop uploaded from the desktop (PUBLISHING, autoLive: it
+ * behaves like any desktop loop, with its target group) before it is processed in the background.
+ */
+export async function createPendingDesktopLoop(options: { name: string; target: DesktopUploadTarget }) {
+  return prisma.loop.create({
+    data: {
+      name: options.name,
+      status: "PUBLISHING",
+      autoLive: true,
+      targetGroupId: options.target.kind === "group" ? options.target.groupId : null,
+    },
   });
 }
 
@@ -692,6 +652,8 @@ export async function processUploadedLoop(options: {
   tempFilePath: string;
   tempDir: string;
   publishedBy: UploadUser;
+  /** Phone (default): published, then put where the phone asked. Desktop: see DesktopUploadTarget. */
+  desktop?: { target: DesktopUploadTarget };
 }) {
   const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-mobile-loop-")).catch(() => null);
   try {
@@ -703,17 +665,35 @@ export async function processUploadedLoop(options: {
       return; // removed before it was prepared
     }
     const prepared = await prepareLoopVideo(options.tempFilePath, workDir);
+    let finalStatus: "PUBLISHED" | "DRAFT" = "PUBLISHED";
+    let note: string | null = null;
+    const desktopTarget = options.desktop?.target;
+    if (desktopTarget) {
+      finalStatus = desktopTarget.kind === "library" ? "DRAFT" : "PUBLISHED";
+      if (desktopTarget.kind === "group") {
+        // The group may have been deleted while this was converted: then it would play on all cabs.
+        const current = await prisma.loop.findUnique({ where: { id: loop.id }, select: { targetGroupId: true } });
+        if (current?.targetGroupId !== desktopTarget.groupId) {
+          finalStatus = "DRAFT";
+          note = "Its group was deleted while the video was being converted, so it was kept off air. Choose where it plays and put it on air.";
+        }
+      }
+    }
+    const where = desktopTarget?.kind === "group" ? "its group" : "all cabs";
     const published = await publishPreparedLoopVideo({
       loop,
       prepared,
       workDir,
       publishedByUserId: options.publishedBy.id,
       requireStatus: "PUBLISHING",
+      finalStatus,
       activity: {
-        message: `Loop ${loop.name} uploaded from the mobile app by ${options.publishedBy.name}`,
+        message: desktopTarget
+          ? `Loop ${loop.name} uploaded by ${options.publishedBy.name}${finalStatus === "PUBLISHED" ? ` and put on air for ${where}` : ", kept off air"}`
+          : `Loop ${loop.name} uploaded from the phone app by ${options.publishedBy.name}`,
         metadata: {
           originalFilename: options.originalFilename,
-          mode: "MOBILE_UPLOAD",
+          mode: desktopTarget ? "DIRECT_UPLOAD" : "MOBILE_UPLOAD",
           userId: options.publishedBy.id,
           userName: options.publishedBy.name,
           ...(options.publishedBy.anonymous
@@ -731,6 +711,9 @@ export async function processUploadedLoop(options: {
         loopId: loop.id,
       }).catch(() => undefined);
       return;
+    }
+    if (note) {
+      await prisma.loop.update({ where: { id: loop.id }, data: { publishError: note } });
     }
     if (next === "apply-target") {
       await applyUploadTarget(loop.id, options.publishedBy);
@@ -763,8 +746,8 @@ export async function processUploadedLoop(options: {
 }
 
 /**
- * Queue an upload for processing (long-lived Node server). Phone uploads are prepared one at a
- * time; later ones wait and are reported as waiting.
+ * Queue an upload for processing (long-lived Node server). Uploads (phone and desktop) are
+ * prepared one at a time; later ones wait and are reported as waiting.
  */
 export function startUploadedLoopProcessing(options: Parameters<typeof processUploadedLoop>[0]) {
   void enqueueUploadJob(options.loopId, () => processUploadedLoop(options)).catch((error) =>

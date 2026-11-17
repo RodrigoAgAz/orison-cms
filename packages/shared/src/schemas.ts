@@ -176,7 +176,6 @@ export const settingsSchema = z.object({
     .default([]),
   syncIntervalSeconds: z.number().int().min(60).default(defaultSyncIntervalSeconds),
   heartbeatIntervalSeconds: z.number().int().min(60).default(defaultHeartbeatIntervalSeconds),
-  notificationEmails: z.array(z.string().email()).default([]),
   safetyVideoAssetId: z.string().nullable().default(null),
   safetyMessageDurationSeconds: z.number().int().min(1).max(300).default(8),
 });

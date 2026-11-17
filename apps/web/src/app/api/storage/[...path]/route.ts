@@ -74,7 +74,8 @@ async function serve(request: Request, { params }: Props, includeBody: boolean) 
 
     const key = params.path.join("/");
     if (isManifestKey(key)) {
-      return serveManifest(request, key, includeBody);
+      // Awaited here so a missing manifest is answered by the catch below (404), not as a 500.
+      return await serveManifest(request, key, includeBody);
     }
     const redirectUrl = await getStorageRouteRedirectUrl(key);
     if (redirectUrl) {

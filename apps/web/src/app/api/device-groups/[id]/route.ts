@@ -6,7 +6,7 @@ import { deviceGroupInputSchema } from "@orison/shared";
 import { requireApiUser } from "@/lib/auth";
 import { logActivity } from "@/lib/activity";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
-import { parseBody, toApiError } from "@/lib/loop-api";
+import { groupNameTakenMessage, isUniqueViolation, parseBody, toApiError } from "@/lib/loop-api";
 
 type Props = {
   params: {
@@ -18,13 +18,18 @@ export async function PUT(request: Request, { params }: Props) {
   try {
     await requireApiUser();
     const body = await parseBody(request, deviceGroupInputSchema);
-    const group = await prisma.deviceGroup.update({
-      where: { id: params.id },
-      data: {
-        name: body.name,
-        description: body.description ?? null,
-      },
-    });
+    const group = await prisma.deviceGroup
+      .update({
+        where: { id: params.id },
+        data: {
+          name: body.name,
+          description: body.description ?? null,
+        },
+      })
+      .catch((error) => {
+        if (isUniqueViolation(error)) throw new ApiError(groupNameTakenMessage(body.name), 409);
+        throw error;
+      });
 
     await logActivity("DEVICE_GROUP_UPDATED", `Group ${group.name} updated`, {
       groupId: group.id,

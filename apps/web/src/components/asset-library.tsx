@@ -7,6 +7,7 @@ import { MediaPoster } from "@/components/media-poster";
 import { Modal } from "@/components/modal";
 import { PaginationControls } from "@/components/pagination-controls";
 import { useToast } from "@/components/toast-provider";
+import { fileFingerprint, sendFileInPieces, UploadCancelled, UploadRefused } from "@/lib/piece-sender";
 
 type AssetItem = {
   id: string;
@@ -110,7 +111,9 @@ export function AssetLibrary({
   const router = useRouter();
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const progressTimerRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const uploadIdRef = useRef<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string>(currentCategory || "ALL");
   const [query, setQuery] = useState(currentQuery);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -128,34 +131,12 @@ export function AssetLibrary({
     return () => window.clearInterval(timer);
   }, [processingIds, router]);
   const [uploadState, setUploadState] = useState<{
-    phase: "idle" | "uploading" | "processing";
+    phase: "idle" | "uploading" | "finishing";
     progress: number;
   }>({
     phase: "idle",
     progress: 0,
   });
-
-  function stopProgressTimer() {
-    if (progressTimerRef.current) {
-      window.clearInterval(progressTimerRef.current);
-      progressTimerRef.current = null;
-    }
-  }
-
-  function startProcessingProgress() {
-    stopProgressTimer();
-    setUploadState((current) => ({
-      phase: "processing",
-      progress: Math.max(current.progress, 72),
-    }));
-
-    progressTimerRef.current = window.setInterval(() => {
-      setUploadState((current) => ({
-        ...current,
-        progress: Math.min(current.progress + 3, 94),
-      }));
-    }, 250);
-  }
 
   function handleFileSelect(file: File | null) {
     setSelectedFile(file);
@@ -204,109 +185,58 @@ export function AssetLibrary({
       setError("Choose a file to upload.");
       return;
     }
-
+    const file = selectedFile;
     setError(null);
-    setUploadState({
-      phase: "uploading",
-      progress: 8,
-    });
-
-    // The file is sent as the request body (streamed to disk on the server, never held in memory).
-    const params = new URLSearchParams({
-      filename: selectedFile.name,
-      category,
-      metadata: JSON.stringify({
-        advertiserName: advertiserName.trim() || undefined,
-        campaignName: campaignName.trim() || undefined,
-      }),
-    });
-
-    const result = await new Promise<{
-      ok: boolean;
-      body: { error?: string; filename?: string };
-    }>((resolve) => {
-      const request = new XMLHttpRequest();
-      request.open("POST", `/api/assets/upload?${params.toString()}`);
-      request.setRequestHeader("Content-Type", "application/octet-stream");
-
-      request.upload.onprogress = (progressEvent) => {
-        if (!progressEvent.lengthComputable) {
-          return;
-        }
-
-        const next = 12 + Math.round((progressEvent.loaded / progressEvent.total) * 58);
-        setUploadState({
-          phase: "uploading",
-          progress: next,
-        });
-      };
-
-      let finished = false;
-      request.upload.onload = () => {
-        // Can arrive after the response on a fast connection: never restart the timer then.
-        if (!finished) startProcessingProgress();
-      };
-
-      request.onerror = () => {
-        stopProgressTimer();
-        resolve({
-          ok: false,
-          body: { error: "The upload was interrupted. Check the connection and try again." },
-        });
-      };
-
-      request.onload = () => {
-        finished = true;
-        stopProgressTimer();
-        let body: { error?: string; filename?: string } = {};
-
-        if (request.responseText) {
-          try {
-            body = JSON.parse(request.responseText) as { error?: string; filename?: string };
-          } catch {
-            body = {
-              error:
-                request.status >= 500
-                  ? "The server could not take this file. Try again; if it fails again, the details are in the server log."
-                  : `Upload failed (HTTP ${request.status}).`,
-            };
-          }
-        }
-
-        resolve({
-          ok: request.status >= 200 && request.status < 300,
-          body,
-        });
-      };
-
-      request.send(selectedFile);
-    });
-
-    if (!result.ok) {
-      setError(result.body.error ?? "Upload failed");
-      setUploadState({
-        phase: "idle",
-        progress: 0,
+    setUploadState({ phase: "uploading", progress: 0 });
+    const controller = new AbortController();
+    abortRef.current = controller;
+    uploadIdRef.current = null;
+    try {
+      // In pieces of a few MB (lib/piece-sender.ts): the hosting proxy cuts off any request whose
+      // body takes more than 5 minutes, and a dropped connection only pauses the upload.
+      const result = await sendFileInPieces({
+        baseUrl: "/api/uploads",
+        open: {
+          kind: "asset",
+          category,
+          metadata: { advertiserName: advertiserName.trim(), campaignName: campaignName.trim() },
+        },
+        file,
+        fileName: file.name,
+        fingerprint: await fileFingerprint(file),
+        signal: controller.signal,
+        events: {
+          onSession: (session) => {
+            uploadIdRef.current = session.uploadId;
+            setUploadState({ phase: "uploading", progress: Math.floor((session.receivedBytes / file.size) * 100) });
+          },
+          onProgress: ({ confirmedBytes }) => setUploadState({ phase: "uploading", progress: Math.floor((confirmedBytes / file.size) * 100) }),
+          onConnection: (state) => setWaiting(state === "waiting"),
+          onFinishing: () => setUploadState({ phase: "finishing", progress: 100 }),
+        },
       });
       toast({
-        title: "Upload failed",
-        message: result.body.error ?? "The asset could not be processed.",
-        tone: "error",
+        title: "Uploaded",
+        message: `${typeof result.filename === "string" ? result.filename : file.name} is being processed; it shows as Ready when it can be used.`,
+        tone: "success",
       });
-      return;
+      resetForm();
+      router.refresh();
+    } catch (failure) {
+      setUploadState({ phase: "idle", progress: 0 });
+      if (failure instanceof UploadCancelled) {
+        // Delete the pieces already sent (otherwise kept a day so the same file can carry on).
+        if (uploadIdRef.current) void fetch(`/api/uploads/${uploadIdRef.current}`, { method: "DELETE" }).catch(() => undefined);
+        toast({ title: "Upload cancelled", message: "Nothing was saved.", tone: "info" });
+        return;
+      }
+      const message = failure instanceof UploadRefused ? failure.message : "The upload failed. Try again.";
+      setError(message);
+      toast({ title: "Upload failed", message, tone: "error" });
+    } finally {
+      abortRef.current = null;
+      setWaiting(false);
     }
-
-    setUploadState({
-      phase: "processing",
-      progress: 100,
-    });
-    toast({
-      title: "Uploaded",
-      message: `${result.body.filename} is being processed; it shows as Ready when it can be used.`,
-      tone: "success",
-    });
-    resetForm();
-    router.refresh();
   }
 
   async function handleDelete(asset: AssetItem) {
@@ -433,13 +363,25 @@ export function AssetLibrary({
             <div className="upload-progress-card">
               <div className="card-header">
                 <strong>
-                  {uploadState.phase === "uploading" ? "Uploading" : "Finishing the upload"}
+                  {uploadState.phase === "uploading" ? (waiting ? "Waiting for the connection" : "Uploading") : "Finishing the upload"}
                 </strong>
                 <span>{uploadState.progress}%</span>
               </div>
               <div className="progress-track">
                 <span className="progress-fill" style={{ width: `${uploadState.progress}%` }} />
               </div>
+              <span className="muted">
+                {waiting
+                  ? "The connection dropped. The upload carries on by itself when it is back."
+                  : "Keep this page open until the upload finishes. If it is closed, choose the same file again to carry on."}
+              </span>
+              {uploadState.phase === "uploading" ? (
+                <div className="button-row">
+                  <button className="button button-secondary" onClick={() => abortRef.current?.abort()} type="button">
+                    Cancel upload
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
 

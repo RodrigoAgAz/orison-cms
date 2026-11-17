@@ -28,7 +28,7 @@ const frameDimension = z.number().int().min(320).max(3840).refine((value) => val
 
 /** What the settings page may save (the shared schema plus this page's own fields). */
 export const cmsSettingsInputSchema = settingsSchema
-  .omit({ defaultFillerTemplate: true, notificationEmails: true })
+  .omit({ defaultFillerTemplate: true })
   .extend({
     defaultFillerTemplate: z
       .array(
@@ -53,7 +53,6 @@ function defaults(): CmsSettings {
     defaultFillerTemplate: DEFAULT_FILLER_TEMPLATE.map((item) => ({ ...item })),
     syncIntervalSeconds: 1800,
     heartbeatIntervalSeconds: 300,
-    notificationEmails: [],
     safetyVideoAssetId: null,
     safetyMessageDurationSeconds: 8,
     loopFrameWidth: DEFAULT_LOOP_FRAME.width,
@@ -78,7 +77,6 @@ export async function getCmsSettings(): Promise<CmsSettings> {
     defaultFillerTemplate: Array.isArray(value.defaultFillerTemplate) ? value.defaultFillerTemplate : base.defaultFillerTemplate,
     syncIntervalSeconds: value.syncIntervalSeconds ?? base.syncIntervalSeconds,
     heartbeatIntervalSeconds: value.heartbeatIntervalSeconds ?? base.heartbeatIntervalSeconds,
-    notificationEmails: value.notificationEmails ?? [],
     safetyVideoAssetId: value.safetyVideoAssetId ?? null,
     safetyMessageDurationSeconds: value.safetyMessageDurationSeconds ?? base.safetyMessageDurationSeconds,
     loopFrameWidth: value.loopFrameWidth ?? base.loopFrameWidth,

@@ -59,6 +59,14 @@ export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
     return () => window.clearInterval(timer);
   }, [runningIds, toast]);
 
+  // Uploaded videos being converted (desktop pre-built loops and phone uploads): refresh until done.
+  const convertingIds = loops.filter((loop) => loop.status === "PUBLISHING" && !loop.publishError && loop.publish.kind !== "running").map((loop) => loop.id).join(",");
+  useEffect(() => {
+    if (!convertingIds) return;
+    const timer = window.setInterval(() => router.refresh(), 5000);
+    return () => window.clearInterval(timer);
+  }, [convertingIds, router]);
+
   async function duplicate(loop: LoopStateView) {
     setBusyId(loop.id);
     try {

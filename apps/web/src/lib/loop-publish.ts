@@ -41,7 +41,7 @@ import {
   type PublishStage,
 } from "./publish-state";
 import { deleteObject, getPublicUrl, putObject, putObjectFromFile, readObject } from "./storage";
-import { STALE_PUBLISHING_MS } from "./upload-rules";
+import { STALE_PUBLISHING_MESSAGE, STALE_PUBLISHING_MS } from "./upload-rules";
 
 const execFileAsync = promisify(execFile);
 
@@ -306,6 +306,21 @@ export async function recoverInterruptedPublishes(loopId?: string, now = new Dat
       ...(loopId ? { id: loopId } : {}),
     },
     data: { status: "DRAFT", publishError: "An earlier publish was interrupted, so this loop is not on air. Publish it again." },
+  });
+
+  // Pre-built loops uploaded from the desktop: while one waits or is converted, the upload queue
+  // touches its row every minute (lib/upload-queue.ts), so one untouched for longer than
+  // STALE_PUBLISHING_MS was lost to a restart.
+  await prisma.loop.updateMany({
+    where: {
+      status: "PUBLISHING",
+      autoLive: true,
+      publishJobId: null,
+      updatedAt: { lt: new Date(now.getTime() - STALE_PUBLISHING_MS) },
+      slots: { none: {} },
+      ...(loopId ? { id: loopId } : {}),
+    },
+    data: { status: "DRAFT", publishError: STALE_PUBLISHING_MESSAGE },
   });
 }
 

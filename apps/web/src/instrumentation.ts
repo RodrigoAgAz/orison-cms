@@ -11,6 +11,21 @@ export async function register() {
       console.log(`removed ${removed.length} stale upload temp folder(s)`);
     }
 
+    // Uploads in pieces that nobody has touched for a day (or finished ones past their keep time):
+    // deleted now rather than when the next upload starts.
+    const { sweepAbandonedUploads } = await import("./lib/chunked-upload");
+    await sweepAbandonedUploads({ force: true })
+      .then((ids) => {
+        if (ids.length > 0) {
+          console.log(`removed ${ids.length} abandoned upload(s)`);
+        }
+      })
+      .catch((error) => console.warn("could not clean abandoned uploads", error));
+    // And every few hours while the server runs, even if nobody uploads anything.
+    setInterval(() => {
+      void sweepAbandonedUploads({ force: true }).catch((error) => console.warn("could not clean abandoned uploads", error));
+    }, 6 * 60 * 60 * 1000).unref();
+
     // Latest cab state on the Device row for cabs that have not reported since the upgrade.
     const { backfillDeviceStatus } = await import("./lib/device-backfill");
     await backfillDeviceStatus()

@@ -1,8 +1,9 @@
 // npm run demo:heartbeat [-- --loop]  — posts one round of real heartbeats for the demo cabs that
 // are meant to be "alive", through the HTTP API (POST /api/devices/heartbeat), like a device would.
-// With --loop it repeats every 5 minutes until stopped.
+// With --loop it repeats every 5 minutes until stopped. Each cab reports in its firmware's format
+// (common.ts demoHeartbeat): 1.2.0 cabs send their player state, trigger and sync state.
 // Target server: DEMO_BASE_URL, else APP_URL from .env, else http://localhost:3000.
-import { DEMO_CABS, DEMO_CELL_RAW, demoFirmware, loadEnv, wander } from "./common";
+import { DEMO_CABS, DEMO_CELL_RAW, demoHeartbeat, loadEnv, wander } from "./common";
 
 loadEnv();
 
@@ -20,7 +21,7 @@ async function post(body: Record<string, unknown>) {
   if (!response.ok) {
     throw new Error(`${response.status} ${JSON.stringify(json)}`);
   }
-  return json as { expectedLoopId: string | null; disabled: boolean };
+  return json as { expectedLoopId: string | null; disabled: boolean; expectedSafetyChecksum?: string | null };
 }
 
 async function round() {
@@ -30,7 +31,7 @@ async function round() {
     if (!cab.alive) continue;
     const device = await prisma.device.findUnique({
       where: { serialNumber: cab.serial },
-      select: { currentLoopId: true, createdAt: true },
+      select: { currentLoopId: true, createdAt: true, safetyChecksum: true, lastSyncAt: true, syncStateSince: true, syncFailedLoopId: true },
     });
     if (!device) {
       console.warn(`${cab.serial} not found; run npm run demo:seed first`);
@@ -42,24 +43,22 @@ async function round() {
         ? // Old firmware shape: wrong top-level ids, server re-parses raw.
           { method: "cell_tower", mcc: "234", mnc: "10", lac: "215", cellId: "1617", signalStrength: -97, raw: DEMO_CELL_RAW }
         : { method: "gps", lat: position.lat, lng: position.lng, accuracyM: 9, speedKmh: 21, fixTime: new Date().toISOString() };
-    const payload = {
-      serialNumber: cab.serial,
-      firmwareVersion: demoFirmware(cab),
-      storageFreeMb: 18_000 - index * 900,
+    const payload = demoHeartbeat(cab, index, new Date(), {
       currentLoopId: device.currentLoopId,
-      cpuTemp: 51,
       uptimeSeconds: 3600 + (Math.floor(Date.now() / 1000) % 36_000),
-      memoryUsedPercent: 42,
-      playerStatus: cab.playerStatus,
-      networkType: "4g",
-      signalStrength: -88,
       location,
-    };
+      safetyChecksum: device.safetyChecksum,
+      lastSyncedAt: device.lastSyncAt,
+      syncSince: device.syncStateSince,
+      failedLoopId: device.syncFailedLoopId,
+    });
     let result = await post(payload);
     let synced = "";
     if (result.expectedLoopId && result.expectedLoopId !== device.currentLoopId && !KEEP_STALE.has(cab.scenario)) {
-      // Simulate the cab syncing straight away (as new firmware does on expectedLoopId change).
-      result = await post({ ...payload, currentLoopId: result.expectedLoopId });
+      // Simulate the cab syncing straight away (as firmware 1.1.0+ does on expectedLoopId change).
+      const syncedAt = new Date().toISOString();
+      const sync = "sync" in payload && payload.sync ? { ...payload.sync, state: "ok", error: null, since: syncedAt, lastSyncedAt: syncedAt, nextRetryAt: null } : undefined;
+      result = await post({ ...payload, currentLoopId: result.expectedLoopId, ...(sync ? { sync } : {}) });
       synced = " (synced)";
     }
     console.log(`${cab.serial} -> expected ${result.expectedLoopId ?? "none"}${synced}${result.disabled ? " [paused]" : ""}`);

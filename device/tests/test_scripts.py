@@ -152,6 +152,16 @@ class TestScripts(unittest.TestCase):
         self.assertIn("dpkg-query -W -f=${Status} mpv", self.log.read_text())  # packages checked every run
         self.assertNotIn("apt-get install", self.log.read_text())  # and only installed when missing
 
+    def test_bootstrap_needs_the_cms_address_for_a_new_cab(self):
+        result = self.run_script(str(self.release / "bootstrap.sh"), "NEW-CAB-8", "tok", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("API_BASE_URL", result.stdout)
+        self.assertFalse((self.base / "config.json").exists())
+
+    def test_demo_player_is_not_part_of_the_firmware(self):
+        self.assertFalse((DEVICE / "demo.py").exists())
+        self.assertNotIn("demo.py", (DEVICE / "install.sh").read_text().split("CODE_FILES=(")[1].split(")")[0])
+
     def test_scripts_parse(self):
         for script in ("install.sh", "bootstrap.sh", "update.sh"):
             subprocess.run(["bash", "-n", str(DEVICE / script)], check=True)
