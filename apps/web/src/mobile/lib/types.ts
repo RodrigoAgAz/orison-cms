@@ -19,7 +19,13 @@ export type LoopSummary = {
   publishedAt: string | null;
   createdAt: string;
   source: "upload" | "builder";
-  liveOn: { fleet: boolean; groups: { id: string; name: string }[]; cabCount: number };
+  liveOn: {
+    fleet: boolean;
+    groups: { id: string; name: string }[];
+    cabCount: number;
+    /** Cabs that last reported playing it (a cab whose update fails still shows its old video). */
+    onScreens?: number;
+  };
 };
 
 export type CabLocation = {

@@ -73,7 +73,16 @@ export type LoopSummary = {
   publishedAt: string | null;
   createdAt: string;
   source: "upload" | "builder";
-  liveOn: { fleet: boolean; groups: { id: string; name: string }[]; cabCount: number };
+  liveOn: {
+    fleet: boolean;
+    groups: { id: string; name: string }[];
+    cabCount: number;
+    /**
+     * Additive: active cabs that last reported playing it, whatever they are set to. A cab whose
+     * download keeps failing still shows its old video, so "not playing anywhere" would be false.
+     */
+    onScreens: number;
+  };
 };
 
 /**
@@ -125,12 +134,13 @@ export function videoUrlFor(loop: { compiledVideoKey: string | null }) {
   return loop.compiledVideoKey ? `/api/storage/${loop.compiledVideoKey}` : null;
 }
 
-type ActiveDeviceForRouting = { id: string; groupId: string | null; overrideLoopId: string | null };
+type ActiveDeviceForRouting = { id: string; groupId: string | null; overrideLoopId: string | null; currentLoopId?: string | null };
 
 export type LiveOnIndex = {
   fleetLoopId: string | null;
   groupsByLoop: Map<string, { id: string; name: string }[]>;
   cabCountByLoop: Map<string, number>;
+  onScreensByLoop?: Map<string, number>;
 };
 
 /**
@@ -154,13 +164,17 @@ export function buildLiveOnIndex(
     }
   }
   const cabCountByLoop = new Map<string, number>();
+  const onScreensByLoop = new Map<string, number>();
   for (const device of devices) {
     const loopId = resolveDeviceLoop(device, snapshot).loop?.id;
     if (loopId) {
       cabCountByLoop.set(loopId, (cabCountByLoop.get(loopId) ?? 0) + 1);
     }
+    if (device.currentLoopId) {
+      onScreensByLoop.set(device.currentLoopId, (onScreensByLoop.get(device.currentLoopId) ?? 0) + 1);
+    }
   }
-  return { fleetLoopId, groupsByLoop, cabCountByLoop };
+  return { fleetLoopId, groupsByLoop, cabCountByLoop, onScreensByLoop };
 }
 
 /** Shown instead of a desktop publish error, whose text can carry internal detail (paths, tools). */
@@ -198,6 +212,7 @@ export function toLoopSummary(loop: LoopRow, liveOn: LiveOnIndex, now = new Date
       fleet: liveOn.fleetLoopId === loop.id,
       groups: liveOn.groupsByLoop.get(loop.id) ?? [],
       cabCount: liveOn.cabCountByLoop.get(loop.id) ?? 0,
+      onScreens: liveOn.onScreensByLoop?.get(loop.id) ?? 0,
     },
   };
 }
@@ -208,7 +223,7 @@ async function loadRoutingContext() {
     prisma.deviceGroup.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
     prisma.device.findMany({
       where: { isActive: true },
-      select: { id: true, groupId: true, overrideLoopId: true },
+      select: { id: true, groupId: true, overrideLoopId: true, currentLoopId: true },
     }),
   ]);
   return { snapshot, groups, devices, liveOn: buildLiveOnIndex(snapshot, groups, devices) };

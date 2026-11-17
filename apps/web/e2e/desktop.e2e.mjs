@@ -44,6 +44,13 @@ const PREFIX = `E2E-LOOPS-${Date.now().toString(36).toUpperCase()}`;
 mkdirSync(SHOTS, { recursive: true });
 
 const created = { assets: [], loops: [], groups: [], cabs: [] };
+// Temp folders this run makes (test media, prefixed copies); removed at the end.
+const tempDirs = [];
+function tempDir(prefix) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 let failures = 0;
 function check(condition, message) {
   if (condition) {
@@ -58,7 +65,7 @@ const step = (title) => console.log(`\n${title}`);
 // --- test media -------------------------------------------------------------------------------
 async function makeMedia() {
   if (process.env.MEDIA_DIR) return process.env.MEDIA_DIR;
-  const dir = mkdtempSync(path.join(os.tmpdir(), "orison-e2e-media-"));
+  const dir = tempDir("orison-e2e-media-");
   const ff = (args) => run("ffmpeg", ["-v", "error", "-y", ...args]);
   await ff(["-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "30", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", path.join(dir, "advert-30s.mp4")]);
   await ff(["-f", "lavfi", "-i", "smptebars=s=1280x720:r=25", "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000", "-t", "10", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path.join(dir, "advert-10s.mp4")]);
@@ -72,7 +79,7 @@ async function makeMedia() {
 
 // A video of about 12 MB (noise does not compress), for uploads of more than two pieces.
 async function makeBigVideo() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "orison-e2e-big-"));
+  const dir = tempDir("orison-e2e-big-");
   const file = path.join(dir, "big.mp4");
   await run("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30", "-f", "lavfi", "-i", "sine=frequency=550:sample_rate=48000", "-t", "6", "-vf", "noise=alls=80:allf=t", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "16M", "-minrate", "16M", "-maxrate", "16M", "-bufsize", "16M", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "2", file]);
   return file;
@@ -165,7 +172,7 @@ async function main() {
     await page.waitForTimeout(3000);
     for (const [file, category] of uploads) {
       const named = path.join(media, file);
-      const prefixed = path.join(mkdtempSync(path.join(os.tmpdir(), "orison-e2e-up-")), `${PREFIX}-${file}`);
+      const prefixed = path.join(tempDir("orison-e2e-up-"), `${PREFIX}-${file}`);
       await run("cp", [named, prefixed]);
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await page.setInputFiles("input[type=file]", prefixed);
@@ -481,7 +488,7 @@ async function main() {
     // More than two 4 MB pieces (lib/chunked-upload.ts PIECE_BYTES), so every upload here has a
     // first, a middle and a last piece.
     const big = await makeBigVideo();
-    const bigAssetFile = path.join(mkdtempSync(path.join(os.tmpdir(), "orison-e2e-up-")), `${PREFIX}-pieces-asset.mp4`);
+    const bigAssetFile = path.join(tempDir("orison-e2e-up-"), `${PREFIX}-pieces-asset.mp4`);
     await run("cp", [big, bigAssetFile]);
     const pieceRequests = [];
     const onRequest = (request) => {
@@ -522,7 +529,7 @@ async function main() {
     check(existsSync(sessionDir) && readdirSync(sessionDir).join(",") === "meta.json", "its pieces were deleted once joined");
 
     step("Uploads in pieces: a pre-built loop, the page closed mid-upload and the same file chosen again");
-    const bigLoopFile = path.join(mkdtempSync(path.join(os.tmpdir(), "orison-e2e-up-")), `${PREFIX}-pieces-loop.mp4`);
+    const bigLoopFile = path.join(tempDir("orison-e2e-up-"), `${PREFIX}-pieces-loop.mp4`);
     await run("cp", [big, bigLoopFile]);
     const loopName = `${PREFIX} pre-built`;
     const submitLoop = page.locator("button[type=submit]:has-text('Upload and put on air')");
@@ -612,6 +619,7 @@ async function main() {
 
 async function cleanup() {
   step("Clean up");
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   for (const loopId of created.loops) {
     const state = await json(await api.get(`${BASE}/api/loops/${loopId}/publish`)).catch(() => null);
     if (state?.state?.status === "PUBLISHED") {

@@ -1,4 +1,4 @@
-import { ago, plural, quoted, when, whenLong } from "./format";
+import { ago, fileSize, plural, quoted, when, whenLong } from "./format";
 import type { AssignTarget, CabSummary, LoopRef, Overview } from "./types";
 
 export type Tone = "on" | "switching" | "off" | "paused";
@@ -253,9 +253,13 @@ export function changesWords(impact: Impact, emptyWords: string) {
  * change flow). `live` is true only when at least one cab plays it: a video chosen for a group
  * with no cabs, or for all cabs while there are none, is set but not on any screen.
  */
-export function placeWords(liveOn: { fleet: boolean; groups: { name: string }[]; cabCount: number }) {
+export function placeWords(liveOn: { fleet: boolean; groups: { name: string }[]; cabCount: number; onScreens?: number }) {
   const { fleet, groups, cabCount: count } = liveOn;
-  if (!fleet && groups.length === 0 && count === 0) return null;
+  if (!fleet && groups.length === 0 && count === 0) {
+    // Chosen nowhere, but a cab that hasn't switched yet (say its download keeps failing) still shows it.
+    const showing = liveOn.onScreens ?? 0;
+    return showing > 0 ? { text: `Not chosen anywhere · still on ${cabCount(showing)} until ${showing === 1 ? "it switches" : "they switch"}`, live: false } : null;
+  }
   const where = fleet ? "all cabs" : groups.length ? groups.map((group) => group.name).join(", ") : null;
   if (count === 0) {
     const text = fleet
@@ -324,11 +328,16 @@ export function updateFailureText(cab: Pick<CabSummary, "sync" | "expected">, no
   const sync = cab.sync;
   if (!sync) return "";
   const what = sync.failedLoop ?? cab.expected;
-  const reason = sync.error ? `${sync.error.replace(/\.$/, "")}.` : "It gave no reason.";
+  const reason = sync.error ? `${readableSyncError(sync.error).replace(/\.$/, "")}.` : "It gave no reason.";
   const retry = sync.nextRetryAt
     ? new Date(sync.nextRetryAt).getTime() > now.getTime()
       ? ` It tries again ${whenLong(sync.nextRetryAt, now)}.`
       : " It should try again any moment."
     : "";
   return `${what ? `Couldn’t fetch ${quoted(what.name)}: ` : ""}${reason}${retry}`;
+}
+
+/** The cab's own words, with byte counts made readable ("18874368 of 61203456 bytes" -> "18 MB of 58 MB"). */
+export function readableSyncError(error: string) {
+  return error.replace(/(\d{4,}) of (\d{4,}) bytes/g, (_, done: string, total: string) => `${fileSize(Number(done))} of ${fileSize(Number(total))}`);
 }
