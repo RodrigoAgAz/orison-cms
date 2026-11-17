@@ -75,9 +75,11 @@ export default async function AssetsPage({ searchParams }: Props) {
           width: asset.width,
           height: asset.height,
           fileSize: asset.fileSize,
+          // Only once processed: before that the files do not exist yet.
           thumbnailUrl:
-            assetUrlForKey(asset.thumbnailKey) ??
-            (asset.mimeType.startsWith("image/") ? assetUrlForKey(asset.s3Key) : null),
+            asset.status !== "READY"
+              ? null
+              : assetUrlForKey(asset.thumbnailKey) ?? (asset.mimeType.startsWith("image/") ? assetUrlForKey(asset.s3Key) : null),
           previewUrl: `/api/assets/${asset.id}/preview`,
           metadata: normaliseMetadata(asset.metadata),
           createdAt: asset.createdAt.toISOString(),

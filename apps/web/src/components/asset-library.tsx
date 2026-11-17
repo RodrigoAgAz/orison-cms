@@ -241,8 +241,10 @@ export function AssetLibrary({
         });
       };
 
+      let finished = false;
       request.upload.onload = () => {
-        startProcessingProgress();
+        // Can arrive after the response on a fast connection: never restart the timer then.
+        if (!finished) startProcessingProgress();
       };
 
       request.onerror = () => {
@@ -254,6 +256,7 @@ export function AssetLibrary({
       };
 
       request.onload = () => {
+        finished = true;
         stopProgressTimer();
         let body: { error?: string; filename?: string } = {};
 

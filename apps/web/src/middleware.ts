@@ -147,7 +147,7 @@ export async function middleware(request: NextRequest) {
 // and the route cannot reject it early. Those routes authenticate the session themselves.
 export const config = {
   matcher: [
-    "/((?!api/m/upload|api/loops/direct-upload|.*\\..*).*)",
-    "/api/((?!m/upload|loops/direct-upload).*)",
+    "/((?!api/m/upload|api/loops/direct-upload|api/assets/upload|.*\\..*).*)",
+    "/api/((?!m/upload|loops/direct-upload|assets/upload).*)",
   ],
 };

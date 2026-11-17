@@ -176,8 +176,9 @@ export function DirectLoopUploadForm({ deviceGroups }: { deviceGroups: Array<{ i
           });
         };
 
+        let finished = false;
         request.upload.onload = () => {
-          startProcessingProgress();
+          if (!finished) startProcessingProgress();
         };
 
         request.onerror = () => {
@@ -201,6 +202,7 @@ export function DirectLoopUploadForm({ deviceGroups }: { deviceGroups: Array<{ i
         };
 
         request.onload = () => {
+          finished = true;
           stopProgressTimer();
           const body = parseResponseBody();
 

@@ -2994,3 +2994,15 @@ body.m-body.m-noscroll {
 .m-chips[hidden] {
   display: none;
 }
+
+/* A cab whose content update keeps failing (firmware 1.2.0+ says why). */
+.m-status-failing {
+  background: var(--m-danger-soft);
+  color: var(--m-danger);
+}
+
+.m-shape-failing {
+  display: inline-grid;
+  place-items: center;
+  color: var(--m-danger);
+}

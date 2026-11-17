@@ -22,7 +22,7 @@ import {
 import { VideoPlayer } from "../components/video-player";
 import { api, ApiFailure } from "../lib/api";
 import { ago, distance, duration, longDate, plural, quoted, when, whenLong } from "../lib/format";
-import { isSwitchedOn, passengerLine, signalWords, sourceLine } from "../lib/status";
+import { isSwitchedOn, passengerLine, signalWords, sourceLine, updateFailureText } from "../lib/status";
 import { BuiltInStill } from "../components/built-in";
 import { invalidate, useResource } from "../lib/store";
 import type { CabDetail, Overview } from "../lib/types";
@@ -145,7 +145,16 @@ export function CabScreen({ id }: { id: string }) {
                   : sourceLine(data)}
             </span>
           </div>
-          {pending ? (
+          {pending && data.sync?.state === "failing" ? (
+            <Notice tone="warn" title="Its update is failing" testId="cab-update-failing">
+              {updateFailureText(data, now)} Until then it keeps playing what it has.
+              {data.sync.since ? ` Failing since ${whenLong(data.sync.since, now)}.` : ""}
+            </Notice>
+          ) : pending && data.sync?.state === "downloading" && on ? (
+            <Notice tone="info" title="Downloading its new video" testId="cab-pending">
+              It is downloading {quoted(data.expected!.name)} and switches to it once that has finished.
+            </Notice>
+          ) : pending ? (
             <Notice tone="info" title={on ? "Switching to a new video" : "New video waiting"} testId="cab-pending">
               {on
                 ? `It has been told to play ${quoted(data.expected!.name)} and will switch within about ${plural(lag, "minute")}.`
@@ -288,7 +297,7 @@ export function CabScreen({ id }: { id: string }) {
             ["Screen serial", <code key="s">{data.serialNumber}</code>],
             ["Last check-in", data.lastSeenAt ? `${when(data.lastSeenAt, now)} (${ago(data.lastSeenAt)})` : "Never"],
             ["Running since restart", data.uptimeSeconds !== null ? duration(data.uptimeSeconds) : "Off"],
-            [on ? "Mobile signal" : "Mobile signal (last reported)", signalWords(data.signalStrength, data.signalPercent)],
+            [on ? "Mobile signal" : "Mobile signal (last reported)", signalWords(data.signalStrength, data.signalPercent, data.signalDbm)],
             ["Position", positionWords(data)],
             ["Connection", data.networkType ? data.networkType.toUpperCase() : "Unknown"],
             [on ? "Free storage" : "Free storage (last reported)", data.storageFreeMb !== null ? `${(data.storageFreeMb / 1024).toFixed(1)} GB` : "Unknown"],

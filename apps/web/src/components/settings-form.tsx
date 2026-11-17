@@ -237,8 +237,8 @@ export function SettingsForm({ settings, safetyAssets, users }: Props) {
             <h2>Check-in intervals</h2>
           </div>
           <p className="muted">
-            Sent to cabs in their heartbeat reply. Cabs on firmware 1.2.0 or later use them; cabs on older firmware (the pilot cab
-            runs 1.0.0) keep the intervals in their own configuration file until they are updated.
+            Sent to cabs in their heartbeat reply. Cabs on firmware 1.2.0 or later use them; cabs on older firmware keep the intervals in their own
+            configuration file until they are updated.
           </p>
           <div className="grid-two">
             <label className="field">

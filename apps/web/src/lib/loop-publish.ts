@@ -47,6 +47,9 @@ const execFileAsync = promisify(execFile);
 
 export const RETIRE_GRACE_MS = 6 * 60 * 60 * 1000;
 
+/** Identifies this server process start (see publishJobView). */
+export const BOOT_ID: string = processSingleton("publish-boot-id", () => randomUUID());
+
 export class PublishRefused extends Error {
   constructor(message: string, readonly status = 409) {
     super(message);
@@ -278,7 +281,7 @@ export async function recoverInterruptedPublishes(loopId?: string, now = new Dat
     select: { id: true, name: true, publishJobId: true, publishHeartbeatAt: true, publishProgress: true, manifestKey: true, compiledVideoKey: true, posterKey: true },
   });
   for (const row of rows) {
-    const view = publishJobView(row, now);
+    const view = publishJobView(row, now, BOOT_ID);
     if (view.kind !== "interrupted") continue;
     const cleared = await prisma.loop.updateMany({
       where: { id: row.id, publishJobId: view.jobId },
@@ -313,7 +316,7 @@ export async function currentPublishJob(loopId: string) {
     where: { id: loopId },
     select: { publishJobId: true, publishHeartbeatAt: true, publishProgress: true },
   });
-  return row ? publishJobView(row) : null;
+  return row ? publishJobView(row, new Date(), BOOT_ID) : null;
 }
 
 /** Throws PublishRefused if a publish is running for the loop. */
@@ -367,7 +370,7 @@ export async function startLoopPublish(loopId: string, user: { id: string; name?
 
   const jobId = randomUUID();
   const now = new Date();
-  const progress: PublishProgress = { stage: "queued", startedAt: now.toISOString(), userId: user.id };
+  const progress: PublishProgress = { stage: "queued", startedAt: now.toISOString(), userId: user.id, bootId: BOOT_ID };
   const claimed = await prisma.loop.updateMany({
     where: { id: loop.id, publishJobId: null },
     data: { publishJobId: jobId, publishHeartbeatAt: now, publishProgress: progress as Prisma.InputJsonValue, publishError: null },
@@ -401,7 +404,7 @@ async function touch(job: Job, progress?: PublishProgress) {
 
 async function setStage(job: Job, stage: PublishStage, done?: number, total?: number, extra: Partial<PublishProgress> = {}) {
   const previous = job.progress;
-  job.progress = { ...(previous ?? { startedAt: new Date().toISOString(), userId: job.userId }), ...extra, stage, done, total };
+  job.progress = { ...(previous ?? { startedAt: new Date().toISOString(), userId: job.userId, bootId: BOOT_ID }), ...extra, stage, done, total };
   const now = Date.now();
   // Stage changes are written at once; counts at most once a second.
   if (!previous || previous.stage !== stage || !job.lastWrite || now - job.lastWrite > 1000 || done === total || extra.pendingKeys) {

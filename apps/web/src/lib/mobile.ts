@@ -1,15 +1,18 @@
-// Server-side data assembly for the mobile JSON API (/api/m/*). Shapes follow CONTRACT.md.
+// Server-side data assembly for the mobile JSON API (/api/m/*). The client mirror of these shapes
+// is src/mobile/lib/types.ts; keep the two in step.
 
 import { prisma, type Prisma } from "@orison/db";
 
 import { getCmsSettings } from "./cms-settings";
 import {
   coveredSeconds,
+  hasPassengerDetection,
   heartbeatIntervals,
   isDeviceOnline,
   offlineThresholdMs,
   resolveMobileDeviceStatus,
   startOfLocalDay,
+  summarizeSync,
   type MobileCabStatus,
 } from "./device-status";
 import { getFleetControlState } from "./fleet-control";
@@ -348,6 +351,22 @@ export type CabSummary = {
    * reported a journey (player "playing" or "silent") in the last 30 days.
    */
   reportsJourneys: boolean;
+  /** Additive: fine-grained player state from firmware 1.2.0+ ("SAFETY", "JOURNEY", ...), or null. */
+  playerState: string | null;
+  /**
+   * Additive: how the cab's content update stands (lib/device-status.ts summarizeSync).
+   * "failing" (with the cab's reason and when it retries) and "downloading" come from firmware
+   * 1.2.0+; "waiting" is an older cab not yet on its expected video, which can't say why.
+   */
+  sync: {
+    state: "failing" | "downloading" | "waiting" | "current" | "unknown";
+    error: string | null;
+    since: string | null;
+    nextRetryAt: string | null;
+    lastSyncedAt: string | null;
+    /** The video it failed to fetch, when the cab names it. */
+    failedLoop: { id: string; name: string } | null;
+  };
 };
 
 const cabDeviceSelect = {
@@ -369,8 +388,24 @@ const cabDeviceSelect = {
   locationSource: true,
   locationAt: true,
   firmwareVersion: true,
-  // Reported by firmware 1.2.0+; null for older firmware (which does not say).
+  // The latest reported state, kept on the Device row by the heartbeat route (filled from the
+  // newest heartbeat at server start for cabs that have not reported since). statusReportedAt null
+  // = not filled yet: fall back to the newest heartbeat.
   playbackTrigger: true,
+  playerStatus: true,
+  playerState: true,
+  signalPercent: true,
+  signalDbm: true,
+  uptimeSeconds: true,
+  networkType: true,
+  storageFreeMb: true,
+  statusReportedAt: true,
+  syncState: true,
+  syncError: true,
+  syncFailedLoopId: true,
+  syncStateSince: true,
+  syncNextRetryAt: true,
+  lastSyncAt: true,
 } satisfies Prisma.DeviceSelect;
 
 type CabDeviceRow = Prisma.DeviceGetPayload<{ select: typeof cabDeviceSelect }>;
@@ -388,6 +423,47 @@ type LatestHeartbeat = {
   /** locationData.method of the heartbeat: "gps", "cell_tower", "network_manager", or null. */
   locationMethod: string | null;
 };
+
+/** What the cab last reported: from the Device row, or (not filled yet) its newest heartbeat. */
+type ReportedState = {
+  at: Date;
+  playerStatus: string | null;
+  uptimeSeconds: number | null;
+  networkType: string | null;
+  signalPercent: number | null;
+  signalDbm: number | null;
+};
+
+function reportedState(device: CabDeviceRow, latest: LatestHeartbeat | null): ReportedState | null {
+  if (device.statusReportedAt) {
+    return {
+      at: device.statusReportedAt,
+      playerStatus: device.playerStatus,
+      uptimeSeconds: device.uptimeSeconds,
+      networkType: device.networkType,
+      signalPercent: device.signalPercent,
+      signalDbm: device.signalDbm,
+    };
+  }
+  if (!latest) return null;
+  const signal = splitSignal(latest.signalStrength, latest.signalPercent);
+  return {
+    at: latest.receivedAt,
+    playerStatus: latest.playerStatus,
+    uptimeSeconds: latest.uptimeSeconds,
+    networkType: latest.networkType,
+    signalPercent: signal.signalPercent,
+    signalDbm: signal.signalDbm,
+  };
+}
+
+/**
+ * Cabs whose newest heartbeat is still needed: the Device row has no reported state yet, or the
+ * cab has no position (its heartbeats say whether its equipment can report one).
+ */
+function needsLatestHeartbeat(device: Pick<CabDeviceRow, "statusReportedAt" | "lastHeartbeatAt" | "locationAt">) {
+  return Boolean(device.lastHeartbeatAt && (!device.statusReportedAt || !device.locationAt));
+}
 
 /** The currentLoopId a box reports while it plays its built-in standby video. */
 export const BUILT_IN_LOOP_ID = "fallback";
@@ -418,9 +494,13 @@ export function parsePlaybackTrigger(value: unknown): PlaybackTrigger | null {
   return value === "gpio" || value === "keyboard" || value === "always" ? value : null;
 }
 
-/** Passenger wording is shown only for cabs known to play for journeys. See CabSummary.reportsJourneys. */
+/**
+ * Passenger wording is shown only for cabs known to play for journeys. See CabSummary.reportsJourneys.
+ * A reported trigger decides (lib/device-status.ts hasPassengerDetection). With none (firmware before
+ * 1.2.0) the cab must have shown it: the production box has no passenger input at all.
+ */
 export function reportsJourneysFor(trigger: PlaybackTrigger | null, hasReportedJourney: boolean) {
-  if (trigger) return trigger !== "always";
+  if (trigger) return hasPassengerDetection(trigger);
   return hasReportedJourney;
 }
 
@@ -626,6 +706,9 @@ function buildCabSummary(
       ? context.fleetReason ?? "All cabs are paused"
       : null;
   const playbackTrigger = parsePlaybackTrigger(device.playbackTrigger);
+  const reported = reportedState(device, latest);
+  const sync = summarizeSync(device, expectedLoop?.id ?? null);
+  const failedLoop = device.syncFailedLoopId ? extra.loopNames.get(device.syncFailedLoopId) : undefined;
 
   return {
     id: device.id,
@@ -634,7 +717,7 @@ function buildCabSummary(
     driverName: device.driverName,
     group: input.group,
     status,
-    playerStatus: online ? normalizePlayerStatus(latest?.playerStatus) : "unknown",
+    playerStatus: online ? normalizePlayerStatus(reported?.playerStatus) : "unknown",
     lastSeenAt: device.lastHeartbeatAt?.toISOString() ?? null,
     playing:
       device.currentLoopId && !builtIn
@@ -650,8 +733,8 @@ function buildCabSummary(
     expectedSource: resolution.source,
     isUpToDate: Boolean(expectedLoop && device.currentLoopId === expectedLoop.id),
     uptimeSeconds:
-      online && latest?.uptimeSeconds != null
-        ? latest.uptimeSeconds + Math.max(0, Math.round((now.getTime() - latest.receivedAt.getTime()) / 1000))
+      online && reported?.uptimeSeconds != null
+        ? reported.uptimeSeconds + Math.max(0, Math.round((now.getTime() - reported.at.getTime()) / 1000))
         : null,
     onlineSince: onlineSince?.toISOString() ?? null,
     hoursOnlineToday: Math.round((secondsToday / 3600) * 10) / 10,
@@ -664,9 +747,20 @@ function buildCabSummary(
     fleetPaused: context.fleetDisabled,
     changeLagMinutes: changeLagMinutesFor(device.firmwareVersion, context.lagSettings),
     playingBuiltIn: builtIn,
-    positionReporting: positionReportingFrom(latest),
+    positionReporting: device.locationSource === "gps" ? "gps" : device.locationAt && device.locationSource ? "cell" : positionReportingFrom(latest),
     playbackTrigger,
     reportsJourneys: reportsJourneysFor(playbackTrigger, extra.hasReportedJourney),
+    playerState: online ? device.playerState ?? null : null,
+    sync: {
+      state: sync.state,
+      error: sync.error,
+      since: sync.since?.toISOString() ?? null,
+      nextRetryAt: sync.nextRetryAt?.toISOString() ?? null,
+      lastSyncedAt: sync.lastSyncedAt?.toISOString() ?? null,
+      failedLoop: device.syncFailedLoopId
+        ? { id: device.syncFailedLoopId, name: failedLoop?.name ?? "a video that’s no longer in the library" }
+        : null,
+    },
   };
 }
 
@@ -699,15 +793,23 @@ async function summarizeCabs(inputs: CabInput[], context: CabContext) {
   const runStartRequests = inputs
     .filter((_, index) => firstPass[index].needsRunStart)
     .map((input) => ({ id: input.device.id, windowStart: input.windowStart }));
-  const seenInWindow = new Set(inputs.filter((input) => input.heartbeatStatuses.some(isJourneyStatus)).map((input) => input.device.id));
+  // Journey evidence is only needed for cabs that report no trigger (firmware before 1.2.0).
+  const untriggered = inputs.filter((input) => !parsePlaybackTrigger(input.device.playbackTrigger));
+  const seenInWindow = new Set(
+    untriggered
+      .filter((input) => isJourneyStatus(input.device.playerStatus) || input.heartbeatStatuses.some(isJourneyStatus))
+      .map((input) => input.device.id),
+  );
   const [runStarts, journeys, loopNames] = await Promise.all([
     runStartRequests.length ? findRunStarts(runStartRequests, context.thresholdMs, context.now) : Promise.resolve(new Map<string, Date>()),
-    journeyEvidence(
-      inputs.map((input) => input.device.id),
-      seenInWindow,
-      context.now,
-    ),
-    loopNamesFor(inputs.map((input) => input.device.currentLoopId), context.snapshot),
+    untriggered.length
+      ? journeyEvidence(
+          untriggered.map((input) => input.device.id),
+          seenInWindow,
+          context.now,
+        )
+      : Promise.resolve(new Set<string>()),
+    loopNamesFor(inputs.flatMap((input) => [input.device.currentLoopId, input.device.syncFailedLoopId]), context.snapshot),
   ]);
   const cabs = inputs.map((input, index) =>
     buildCabSummary(input, context, {
@@ -735,7 +837,7 @@ export async function listCabSummaries(snapshot: LoopRoutingSnapshot, groups: Ar
       },
     },
   });
-  const latest = await latestHeartbeats(devices.map((device) => device.id));
+  const latest = await latestHeartbeats(devices.filter(needsLatestHeartbeat).map((device) => device.id));
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const { cabs } = await summarizeCabs(
     devices.map((device) => ({
@@ -801,7 +903,6 @@ export async function getCabDetail(deviceId: string) {
     select: {
       ...cabDeviceSelect,
       group: { select: { id: true, name: true } },
-      storageFreeMb: true,
       notes: true,
       heartbeats: {
         where: { receivedAt: { gte: loadFrom } },
@@ -859,20 +960,24 @@ export async function getCabDetail(deviceId: string) {
 
   const overrideNames = device.overrideLoopId ? await loopNamesFor([device.overrideLoopId], context.snapshot) : new Map<string, LoopName>();
   const overrideLoop = device.overrideLoopId ? overrideNames.get(device.overrideLoopId) : undefined;
-  const signal = splitSignal(latest?.signalStrength ?? null, latest?.signalPercent ?? null);
+  const reported = reportedState(device, latest);
 
   return {
     ...summary,
-    signalStrength: latest?.signalStrength ?? null,
+    // Kept for older clients: dBm when known, else the percentage (as cabs used to send it).
+    signalStrength: reported?.signalDbm ?? reported?.signalPercent ?? latest?.signalStrength ?? null,
     /** Additive: the signal as a 0-100 quality figure when that is what the cab reports. */
-    signalPercent: signal.signalPercent,
-    networkType: latest?.networkType ?? null,
+    signalPercent: reported?.signalPercent ?? null,
+    /** Additive: the signal in dBm when the cab's modem reports it. */
+    signalDbm: reported?.signalDbm ?? null,
+    networkType: reported?.networkType ?? null,
     storageFreeMb: device.storageFreeMb ?? latest?.storageFreeMb ?? null,
+    // Not kept on the Device row: from the newest heartbeat.
     cpuTemp: latest?.cpuTemp ?? null,
     firmwareVersion: device.firmwareVersion,
     notes: device.notes,
     /** Additive: when the technical figures (signal, storage, temperature) were reported. */
-    reportedAt: latest?.receivedAt.toISOString() ?? null,
+    reportedAt: (reported?.at ?? latest?.receivedAt)?.toISOString() ?? null,
     override: device.overrideLoopId
       ? { id: device.overrideLoopId, name: overrideLoop?.name ?? "Deleted loop" }
       : null,
@@ -907,10 +1012,11 @@ const latestHeartbeatSelect = {
  * what they did; the phone app does not show it).
  *
  * Query budget (independent of the number of cabs): routing snapshot (3), settings, fleet
- * control, groups, devices + their heartbeats since the window start (2), latest heartbeat of
- * every cab (1), the fleet video (1); plus, only when needed, run starts reaching past the window
- * (1, then reused), journey evidence (1, reused for 10 minutes), names of reported videos that are
- * not published (1) and the activity feed for a signed-in user (1).
+ * control, groups, devices (with their latest reported state) + their heartbeats since the window
+ * start (2), the fleet video (1); plus, only when needed: the newest heartbeat of cabs whose Device
+ * row has no reported state yet or that have no position (1), run starts reaching past the window
+ * (1, then reused), journey evidence for cabs that report no trigger (1, reused for 10 minutes),
+ * names of reported videos that are not published (1) and the activity feed for a signed-in user (1).
  */
 export async function getMobileOverview(user: { id: string; name: string; email: string | null; role: string; anonymous?: boolean }) {
   const snapshot = await getLoopRoutingSnapshot();

@@ -34,6 +34,8 @@ export type PublishProgress = {
   total?: number;
   startedAt: string;
   userId?: string | null;
+  /** The server process running the job (a fresh id per process start). */
+  bootId?: string;
   /** Storage keys this job has written but not yet swapped in (removed if it is interrupted). */
   pendingKeys?: string[];
 };
@@ -59,6 +61,7 @@ export function parsePublishProgress(value: unknown): PublishProgress | null {
     total: typeof record.total === "number" ? record.total : undefined,
     startedAt: typeof record.startedAt === "string" ? record.startedAt : new Date(0).toISOString(),
     userId: typeof record.userId === "string" ? record.userId : null,
+    bootId: typeof record.bootId === "string" ? record.bootId : undefined,
     pendingKeys: Array.isArray(record.pendingKeys)
       ? record.pendingKeys.filter((key): key is string => typeof key === "string")
       : undefined,
@@ -71,10 +74,16 @@ export function isHeartbeatStale(at: Date | string | null | undefined, now = new
   return !Number.isFinite(time) || now.getTime() - time > staleMs;
 }
 
-export function publishJobView(columns: PublishJobColumns, now = new Date()): PublishJobView {
+/**
+ * `currentBootId`: the id of the process asking. A job started by another process start (the
+ * server restarted) whose heartbeat has missed two beats is interrupted at once instead of after
+ * PUBLISH_STALE_MS; a job alive in another process keeps beating and is never mistaken for dead.
+ */
+export function publishJobView(columns: PublishJobColumns, now = new Date(), currentBootId?: string): PublishJobView {
   if (!columns.publishJobId) return { kind: "idle" };
   const progress = parsePublishProgress(columns.publishProgress);
-  if (isHeartbeatStale(columns.publishHeartbeatAt, now)) {
+  const otherProcess = Boolean(currentBootId && progress?.bootId && progress.bootId !== currentBootId);
+  if (isHeartbeatStale(columns.publishHeartbeatAt, now) || (otherProcess && isHeartbeatStale(columns.publishHeartbeatAt, now, PUBLISH_HEARTBEAT_MS * 2))) {
     return { kind: "interrupted", jobId: columns.publishJobId, progress };
   }
   const at = columns.publishHeartbeatAt!;

@@ -31,6 +31,15 @@ describe("publish job state", () => {
     assert.equal(publishJobView({ publishJobId: "j1", publishHeartbeatAt: null, publishProgress: null }, now).kind, "interrupted");
   });
 
+  it("treats a job from an earlier server process as interrupted once it misses two beats", () => {
+    const progress = { stage: "encoding", startedAt: ago(60_000).toISOString(), bootId: "old-process" };
+    const columns = { publishJobId: "j1", publishHeartbeatAt: ago(25_000), publishProgress: progress };
+    assert.equal(publishJobView(columns, now).kind, "running");
+    assert.equal(publishJobView(columns, now, "old-process").kind, "running");
+    assert.equal(publishJobView(columns, now, "new-process").kind, "interrupted");
+    assert.equal(publishJobView({ ...columns, publishHeartbeatAt: ago(5_000) }, now, "new-process").kind, "running");
+  });
+
   it("refuses pause, delete and target changes only while running", () => {
     const running = publishJobView({ publishJobId: "j1", publishHeartbeatAt: ago(1_000), publishProgress: null }, now);
     assert.match(blockedByPublish(running, "delete")!, /being published.*delete it/);

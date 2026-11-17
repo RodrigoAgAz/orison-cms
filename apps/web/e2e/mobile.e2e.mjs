@@ -28,7 +28,7 @@
 // rolling hour by default), so up to about six runs an hour fit.
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -129,6 +129,19 @@ async function manifestFor(serial, base = BASE) {
   return body;
 }
 
+/** page.request as an (url, init) -> { status, body } function, signed in as the page is. */
+function pageRequest(page, base = BASE) {
+  return async (url, init = {}) => {
+    const response = await page.request.fetch(`${base}${url}`, {
+      method: init.method ?? "GET",
+      headers: { Accept: "application/json", ...(init.json !== undefined ? { "Content-Type": "application/json" } : {}), ...(init.headers ?? {}) },
+      data: init.json !== undefined ? JSON.stringify(init.json) : init.body,
+      timeout: 120_000,
+    });
+    return { status: response.status(), body: await response.json().catch(() => null) };
+  };
+}
+
 async function apiJson(page, url, init) {
   const target = url.startsWith("http") ? url : `${BASE}${url}`;
   const response = init ? await page.request.fetch(target, init) : await page.request.get(target);
@@ -183,6 +196,18 @@ async function makeVideo(file, seconds = 3, size = "1280x720") {
   return file;
 }
 
+/** A real video of about `megabytes` MB (high bitrate), for uploads that span several pieces. */
+async function makeBigVideo(file, megabytes, seconds = 10) {
+  const kbps = Math.round((megabytes * 8 * 1024) / seconds);
+  await run("ffmpeg", [
+    "-y", "-v", "error",
+    "-f", "lavfi", "-i", `testsrc2=size=1280x720:rate=30:duration=${seconds}`,
+    "-c:v", "libx264", "-preset", "ultrafast", "-b:v", `${kbps}k`, "-minrate", `${kbps}k`, "-maxrate", `${kbps}k`, "-bufsize", `${kbps}k`,
+    "-pix_fmt", "yuv420p", "-f", "mov", file,
+  ]);
+  return file;
+}
+
 async function newPhoneContext(browser, device = devices["iPhone 14"], extra = {}, base = BASE) {
   const context = await browser.newContext({ ...device, deviceScaleFactor: 2, locale: "en-GB", timezoneId: "Europe/London", ...extra });
   // Block every external host (map tiles, web fonts): the app must still work.
@@ -224,22 +249,28 @@ async function activitySince(types) {
 }
 
 /**
- * Start an extra `next dev` from this checkout on `port` with `env`, run `fn(base)`, stop it.
+ * Start an extra `next dev` from this checkout on `port` with `env`, run `fn(base, server)`, stop it.
  * Uses its own build folder (removed afterwards) and restores the files `next dev` may rewrite.
+ * `server.restart(moreEnv)` stops it and starts it again (same build folder, so it comes back
+ * quickly), like a deploy or a crash would.
  */
 async function withExtraServer(port, env, fn) {
   const distDir = `.next-e2e-${port}`;
   const touched = ["tsconfig.json", "next-env.d.ts"].map((name) => path.join(webDir, name));
   const before = touched.map((file) => (existsSync(file) ? readFileSync(file, "utf8") : null));
   const logFile = path.join(workDir, `server-${port}.log`);
-  const child = spawn(process.execPath, [path.join(repoRoot, "node_modules/next/dist/bin/next"), "dev", "-p", String(port)], {
-    cwd: webDir,
-    env: { ...process.env, ...env, NEXT_DIST_DIR: distDir, NEXT_TELEMETRY_DISABLED: "1" },
-    stdio: ["ignore", openSync(logFile, "a"), openSync(logFile, "a")],
-    detached: true,
-  });
   const base = `http://localhost:${port}`;
-  try {
+  let child = null;
+  let currentEnv = { ...env };
+
+  const startServer = async () => {
+    child = spawn(process.execPath, [path.join(repoRoot, "node_modules/next/dist/bin/next"), "dev", "-p", String(port)], {
+      cwd: webDir,
+      env: { ...process.env, ...currentEnv, NEXT_DIST_DIR: distDir, NEXT_TELEMETRY_DISABLED: "1" },
+      stdio: ["ignore", openSync(logFile, "a"), openSync(logFile, "a")],
+      detached: true,
+    });
+    const started = child;
     const deadline = Date.now() + 180_000;
     for (;;) {
       try {
@@ -248,37 +279,81 @@ async function withExtraServer(port, env, fn) {
       } catch {
         // not up yet
       }
-      if (child.exitCode !== null) throw new Error(`server on ${port} exited; see ${logFile}`);
+      if (started.exitCode !== null) throw new Error(`server on ${port} exited; see ${logFile}`);
       if (Date.now() > deadline) throw new Error(`server on ${port} did not start; see ${logFile}`);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    return await fn(base);
-  } finally {
+  };
+  const stopServer = async () => {
+    const running = child;
+    if (!running) return;
     try {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-running.pid, "SIGTERM");
     } catch {
       // already gone
     }
     await new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve();
+      if (running.exitCode !== null) return resolve();
       const timer = setTimeout(() => {
         try {
-          process.kill(-child.pid, "SIGKILL");
+          process.kill(-running.pid, "SIGKILL");
         } catch {
           // gone
         }
         resolve();
       }, 10_000);
-      child.once("exit", () => {
+      running.once("exit", () => {
         clearTimeout(timer);
         resolve();
       });
     });
+    child = null;
+  };
+  const server = {
+    async restart(moreEnv = {}) {
+      await stopServer();
+      currentEnv = { ...currentEnv, ...moreEnv };
+      await startServer();
+    },
+  };
+  try {
+    await startServer();
+    return await fn(base, server);
+  } finally {
+    await stopServer();
     rmSync(path.join(webDir, distDir), { recursive: true, force: true });
     touched.forEach((file, index) => {
       if (before[index] !== null && readFileSync(file, "utf8") !== before[index]) writeFileSync(file, before[index]);
     });
   }
+}
+
+/**
+ * Upload a file from Node through the phone app's piece protocol (as the app does). `request` is
+ * like `anon`/`admin` (url, init) -> { status, body }. Returns the final answer of each step.
+ */
+async function uploadInPieces(request, file, { name, target = null, fingerprint = null }) {
+  const bytes = readFileSync(file);
+  const opened = await request("/api/m/uploads", {
+    method: "POST",
+    json: { name, fileName: path.basename(file), size: bytes.length, fingerprint: fingerprint ?? `e2e:${RUN_ID}:${name}:${bytes.length}`, target },
+  });
+  if (opened.status >= 300) return { opened };
+  const { uploadId, pieceBytes, pieceCount, received } = opened.body;
+  let largest = 0;
+  for (let index = 0; index < pieceCount; index += 1) {
+    if (received.includes(index)) continue;
+    const piece = bytes.subarray(index * pieceBytes, Math.min(bytes.length, (index + 1) * pieceBytes));
+    largest = Math.max(largest, piece.length);
+    const put = await request(`/api/m/uploads/${uploadId}/pieces/${index}`, {
+      method: "PUT",
+      body: piece,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+    if (put.status !== 200) return { opened, piece: put, index };
+  }
+  const completed = await request(`/api/m/uploads/${uploadId}/complete`, { method: "POST" });
+  return { opened, completed, largest, pieceCount };
 }
 
 // ------------------------------------------------------------------------------------------ test
@@ -460,7 +535,8 @@ async function productionShapeSuite(browser) {
     await check("production shape: build it in its own schema (1 cab, empty group, 12 videos)", async () => {
       shape = await buildProductionShape(schema);
     });
-    await withExtraServer(EXTRA_PORT + 2, { DATABASE_URL: shape.url, PHONE_APP_REQUIRE_SIGN_IN: "false" }, async (base) => {
+    const sessionsDir = (name) => path.join(workDir, `upload-sessions-${name}`);
+    await withExtraServer(EXTRA_PORT + 2, { DATABASE_URL: shape.url, PHONE_APP_REQUIRE_SIGN_IN: "false", UPLOAD_SESSIONS_DIR: sessionsDir("first") }, async (base, server) => {
       // Warm up the routes so a first compile isn't mistaken for a slow server.
       for (const url of ["/m", "/m/map", "/m/videos", "/m/upload", "/m/change", `/m/videos/${shape.sayNow.id}`, `/m/cabs/${shape.device.id}`, "/api/m/overview", "/api/m/loops", `/api/m/loops/${shape.sayNow.id}`, `/api/m/cabs/${shape.device.id}`]) await fetch(`${base}${url}`).catch(() => undefined);
       const context = await newPhoneContext(browser, devices["iPhone 14"], {}, base);
@@ -479,6 +555,7 @@ async function productionShapeSuite(browser) {
       const dazn = shape.loops[1];
       try {
         await productionScreens(page, go, base, shape, dazn);
+        await pieceUploadChecks(page, go, base, server, sessionsDir);
       } finally {
         await context.close();
       }
@@ -492,6 +569,109 @@ async function productionShapeSuite(browser) {
       for (const id of ids) rmSync(path.join(webDir, "tmp/storage/loops", id), { recursive: true, force: true });
     }
   }
+}
+
+/** Wait until the page has had `count` more pieces confirmed by the server. */
+function piecesConfirmed(page, count) {
+  return new Promise((resolve) => {
+    let seen = 0;
+    const onResponse = (response) => {
+      if (response.request().method() === "PUT" && /\/pieces\/\d+$/.test(response.url()) && response.status() === 200) {
+        seen += 1;
+        if (seen >= count) {
+          page.off("response", onResponse);
+          resolve();
+        }
+      }
+    };
+    page.on("response", onResponse);
+  });
+}
+
+async function startUploadInPage(page, go, file, name) {
+  await go("/m/upload");
+  await page.waitForLoadState("networkidle");
+  const dismiss = page.getByRole("button", { name: /Upload another|Choose a video again|Forget it/ });
+  if (await dismiss.count()) {
+    await dismiss.first().click();
+  }
+  await page.getByTestId("upload-file").setInputFiles(file);
+  await page.getByTestId("upload-name").fill(name);
+  await page.waitForTimeout(800);
+  await page.getByTestId("upload-submit").click();
+}
+
+/**
+ * Uploads in pieces, on the production-shaped server: a dropped connection, a reload (the same file
+ * picked again), a server restart that loses the pieces. Upload speed is throttled so each spans
+ * several pieces.
+ */
+async function pieceUploadChecks(page, go, base, server, sessionsDir) {
+  const cdp = await page.context().newCDPSession(page);
+  const throttle = (bytesPerSecond) =>
+    cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 40, downloadThroughput: 4_000_000, uploadThroughput: bytesPerSecond });
+  const pieceIndexes = [];
+  page.on("request", (request) => {
+    const match = /\/pieces\/(\d+)$/.exec(request.url());
+    if (request.method() === "PUT" && match) pieceIndexes.push(Number(match[1]));
+  });
+
+  await check("upload in pieces: the connection drops mid-way and it carries on by itself", async () => {
+    const file = await makeBigVideo(path.join(workDir, "drop.mov"), 14);
+    await throttle(1_500_000);
+    pieceIndexes.length = 0;
+    const firstPiece = piecesConfirmed(page, 1);
+    await startUploadInPage(page, go, file, `Dropped connection ${RUN_ID}`);
+    await firstPiece;
+    // Through the same CDP session as the throttle (Playwright's setOffline would be overridden by it).
+    await cdp.send("Network.emulateNetworkConditions", { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await page.getByTestId("upload-waiting").waitFor({ timeout: 60_000 });
+    const percentWhileDown = await page.getByTestId("upload-percent").textContent();
+    await shot(page, "pieces-connection-lost");
+    await page.waitForTimeout(4000);
+    await throttle(1_500_000);
+    await page.locator('[data-testid="upload-job"][data-phase="processing"], [data-testid="upload-job"][data-phase="ready"]').first().waitFor({ timeout: 120_000 });
+    const sent = [...pieceIndexes];
+    assert(sent.length >= 4, `several pieces: ${sent}`);
+    assert(new Set(sent).size === Math.max(...sent) + 1, `every piece sent: ${sent}`);
+    assert(sent.filter((index) => index === 0).length === 1, `the confirmed first piece was not sent again: ${sent}`);
+    assert(parseInt(percentWhileDown, 10) > 0, `progress kept while offline: ${percentWhileDown}`);
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
+  });
+
+  await check("upload in pieces: after a reload, picking the same file carries on from the pieces already sent", async () => {
+    const file = await makeBigVideo(path.join(workDir, "reload.mov"), 14);
+    await throttle(1_000_000);
+    pieceIndexes.length = 0;
+    const twoPieces = piecesConfirmed(page, 2);
+    await startUploadInPage(page, go, file, `Reloaded ${RUN_ID}`);
+    await twoPieces;
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByTestId("upload-needs-file").waitFor();
+    await shot(page, "pieces-reopened-needs-file");
+    const before = pieceIndexes.length;
+    await page.getByTestId("upload-resume-file").setInputFiles(file);
+    await page.locator('[data-testid="upload-job"][data-phase="processing"], [data-testid="upload-job"][data-phase="ready"]').first().waitFor({ timeout: 120_000 });
+    const afterReload = pieceIndexes.slice(before);
+    assert(!afterReload.includes(0) && !afterReload.includes(1), `pieces 0 and 1 were not sent again: ${afterReload}`);
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
+  });
+
+  await check("upload in pieces: a server restart that loses the pieces starts the video again by itself", async () => {
+    const file = await makeBigVideo(path.join(workDir, "restart.mov"), 14);
+    await throttle(1_000_000);
+    const twoPieces = piecesConfirmed(page, 2);
+    await startUploadInPage(page, go, file, `Server restarted ${RUN_ID}`);
+    await twoPieces;
+    // A deploy: the new instance has an empty disk.
+    await server.restart({ UPLOAD_SESSIONS_DIR: sessionsDir("after-restart") });
+    await page.getByTestId("upload-restarted").waitFor({ timeout: 180_000 });
+    await shot(page, "pieces-server-restarted");
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 240_000 });
+    await throttle(-1);
+  });
+  await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
 }
 
 async function productionScreens(page, go, base, shape, dazn) {
@@ -643,6 +823,52 @@ async function productionScreens(page, go, base, shape, dazn) {
     await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
   });
 
+  await check("a cab whose update keeps failing says why and when it retries (cab screen and 'needs a look')", async () => {
+    const at = new Date(Date.now() - 60_000);
+    const retry = new Date(Date.now() + 25 * 60_000);
+    await prisma.deviceHeartbeat.create({ data: prodHeartbeat(device.id, at, sayNow.id) });
+    await prisma.device.update({
+      where: { id: device.id },
+      data: {
+        lastHeartbeatAt: at,
+        currentLoopId: shape.loops[5].id,
+        firmwareVersion: "1.2.0",
+        playbackTrigger: "always",
+        playerStatus: "playing",
+        playerState: "JOURNEY",
+        statusReportedAt: at,
+        syncState: "failed",
+        syncError: "Not enough free space for the new video",
+        syncFailedLoopId: sayNow.id,
+        syncStateSince: new Date(Date.now() - 3600_000),
+        syncNextRetryAt: retry,
+      },
+    });
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-update-failing").waitFor();
+    const notice = await page.getByTestId("cab-update-failing").innerText();
+    assert(/Not enough free space/.test(notice) && /tries again today at/.test(notice), `failing notice: ${notice}`);
+    assert((await page.locator('[data-testid="cab-head"] [data-sync="failing"]').innerText()).includes("update failing"), "badge says so, not 'switching'");
+    assert(/Playing the video continuously/.test(await page.getByTestId("cab-head").innerText()), "always mode wording");
+    await shot(page, "prod-cab-update-failing", { fullPage: true });
+    await go("/m");
+    await page.getByTestId("attention").waitFor();
+    const attention = await page.getByTestId("attention").innerText();
+    assert(/RodrigoCab: update failing/.test(attention) && /Not enough free space/.test(attention), `needs a look: ${attention}`);
+    assert(!/switching/i.test(await page.getByTestId("cab-list").innerText()), "the row doesn't read as switching");
+    await shot(page, "prod-home-update-failing", { fullPage: true });
+    // Merely downloading reads as that; the safety message says so.
+    await prisma.device.update({ where: { id: device.id }, data: { syncState: "downloading", syncError: null, syncFailedLoopId: null, playerState: "SAFETY", playbackTrigger: "gpio" } });
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    const head = await page.getByTestId("cab-head").innerText();
+    assert(/downloading/i.test(head) && /Safety message playing/.test(head), `downloading + safety: ${head}`);
+    await prisma.device.update({
+      where: { id: device.id },
+      data: { firmwareVersion: "1.0.0", playbackTrigger: null, playerStatus: "idle", playerState: null, syncState: null, syncNextRetryAt: null, syncStateSince: null, currentLoopId: sayNow.id },
+    });
+  });
+
   await check("production shape: a cab just switched on, playing its built-in video", async () => {
     const at = new Date(Date.now() - 60_000);
     await prisma.deviceHeartbeat.create({ data: prodHeartbeat(device.id, at, "fallback") });
@@ -792,7 +1018,7 @@ async function openSuite(browser) {
   });
 
   await check("search engines: noindex on /m pages and their API, robots.txt disallows, manifest and icons unaffected", async () => {
-    for (const url of ["/m", "/m/account", "/api/m/overview", "/api/m/loops", "/api/auth/me", "/api/m/upload?name=x&filename=a.mov"]) {
+    for (const url of ["/m", "/m/account", "/api/m/overview", "/api/m/loops", "/api/auth/me", "/api/m/uploads/00000000000000000000000000000000"]) {
       const response = await anon(url);
       assert((response.headers.get("x-robots-tag") ?? "").includes("noindex"), `${url} X-Robots-Tag: ${response.headers.get("x-robots-tag")}`);
     }
@@ -1241,17 +1467,10 @@ async function openSuite(browser) {
     const slow = await makeVideo(path.join(workDir, "slow.mov"), 60, "1920x1080");
     const quick = await makeVideo(path.join(workDir, "quick.mov"), 3);
     const post = async (name, file, target) => {
-      const query = new URLSearchParams({ name, filename: path.basename(file) });
-      if (target) query.set("target", JSON.stringify(target));
-      const response = await page.request.post(`${BASE}/api/m/upload?${query}`, {
-        data: readFileSync(file),
-        headers: { "Content-Type": "video/quicktime" },
-        timeout: 120_000,
-      });
-      const body = await response.json();
-      assert(response.status() === 202, `upload ${name}: ${response.status()} ${JSON.stringify(body)}`);
-      created.loops.add(body.loopId);
-      return body.loopId;
+      const result = await uploadInPieces(pageRequest(page), file, { name, target });
+      assert(result.completed?.status === 202, `upload ${name}: ${JSON.stringify(result)}`);
+      created.loops.add(result.completed.body.loopId);
+      return result.completed.body.loopId;
     };
     const firstId = await post(`E2E first in line ${RUN_ID}`, slow, null);
     const secondId = await post(`E2E superseded ${RUN_ID}`, quick, { type: "group", groupId: city.id });
@@ -1445,26 +1664,39 @@ async function openSuite(browser) {
 
 async function uploadCeilingSuite(browser, base) {
   assert((await serverMode(base)) === "open", "extra server is open");
-  const query = (name) => `/api/m/upload?${new URLSearchParams({ name, filename: "clip.mov" })}`;
-  const notAVideo = "definitely not a video\n".repeat(50);
+  const anonymous = (url, init) => anon(url, init, base);
+  const opening = (name, size = 10, fingerprint = `e2e-ceiling-${RUN_ID}-${name}`) =>
+    anonymous("/api/m/uploads", { method: "POST", json: { name, fileName: "clip.mov", size, fingerprint } });
 
-  await check("anonymous upload ceiling: 3 per hour on the test server, then a clear refusal", async () => {
-    assert((await anon(query("E2E ceiling"), {}, base)).status === 200, "preflight allowed at first");
-    // Each POST counts as soon as the server starts receiving it (these are refused as not-a-video).
-    for (let i = 0; i < 3; i += 1) {
-      const response = await anon(query(`E2E ceiling ${i}`), { method: "POST", body: notAVideo, headers: { "Content-Type": "video/quicktime" } }, base);
-      assert(response.status === 415, `upload ${i}: ${response.status} ${JSON.stringify(response.body)}`);
-    }
-    const refused = await anon(query("E2E ceiling 4"), { method: "POST", body: notAVideo, headers: { "Content-Type": "video/quicktime" } }, base);
-    assert(refused.status === 429, `4th upload ${refused.status}`);
+  await check("uploads in pieces: the size limit is enforced before anything is sent, and per piece", async () => {
+    const tooBig = await opening("E2E too big", 500 * 1024 * 1024 + 1, `e2e-too-big-${RUN_ID}`);
+    assert(tooBig.status === 413 && /500MB/.test(tooBig.body.error), `too big: ${tooBig.status} ${JSON.stringify(tooBig.body)}`);
+    const notMov = await anonymous("/api/m/uploads", { method: "POST", json: { name: "E2E text", fileName: "notes.txt", size: 10, fingerprint: `e2e-txt-${RUN_ID}` } });
+    assert(notMov.status === 400, `wrong type: ${notMov.status}`);
+  });
+
+  await check("anonymous upload ceiling: a video sent in several pieces counts once; 3 per hour, then a clear refusal", async () => {
+    // One real video, sent in several pieces, and opened twice (carrying on with the same file).
+    const file = await makeBigVideo(path.join(workDir, "ceiling-multi.mov"), 10);
+    const first = await uploadInPieces(anonymous, file, { name: `E2E ceiling multi ${RUN_ID}`, fingerprint: `e2e-ceiling-multi-${RUN_ID}` });
+    assert(first.completed?.status === 202 && first.pieceCount >= 3, `multi-piece upload: ${JSON.stringify({ status: first.completed?.status, pieces: first.pieceCount })}`);
+    const again = await opening(`E2E ceiling multi ${RUN_ID}`, statSync(file).size, `e2e-ceiling-multi-other-${RUN_ID}`);
+    assert(again.status === 201, `second video allowed: ${again.status}`);
+    // Carrying on with that same (unfinished) file does not count again.
+    const resumed = await opening(`E2E ceiling multi ${RUN_ID}`, statSync(file).size, `e2e-ceiling-multi-other-${RUN_ID}`);
+    assert(resumed.status === 200 && resumed.body.resumed === true, `resumed: ${resumed.status}`);
+    const third = await opening("E2E ceiling 3");
+    assert(third.status === 201, `third video allowed: ${third.status} ${JSON.stringify(third.body)}`);
+    const refused = await opening("E2E ceiling 4");
+    assert(refused.status === 429, `4th video ${refused.status}`);
     assert(/3 video uploads in the last hour/.test(refused.body.error) && /Try again in \d+ minutes?/.test(refused.body.error), refused.body.error);
-    const preflight = await anon(query("E2E ceiling 5"), {}, base);
-    assert(preflight.status === 429, `preflight refused too: ${preflight.status}`);
     // Signed-in users are not limited.
     const admin = await adminSession(base);
-    assert((await admin(query("E2E ceiling admin"), {})).status === 200, "admin preflight allowed");
-    const adminPost = await admin(query("E2E ceiling admin"), { method: "POST", body: notAVideo, headers: { "Content-Type": "video/quicktime" } });
-    assert(adminPost.status === 415, `admin upload reaches the file check: ${adminPost.status}`);
+    const adminOpen = await admin("/api/m/uploads", { method: "POST", json: { name: "E2E ceiling admin", fileName: "clip.mov", size: 10, fingerprint: `e2e-ceiling-admin-${RUN_ID}` } });
+    assert(adminOpen.status === 201, `admin allowed: ${adminOpen.status}`);
+    // A file that isn't a video is refused at its first piece, not after all of it.
+    const piece = await admin(`/api/m/uploads/${adminOpen.body.uploadId}/pieces/0`, { method: "PUT", body: Buffer.from("not a video"), headers: { "Content-Type": "application/octet-stream" } });
+    assert(piece.status === 400 || piece.status === 415, `a 10-byte piece of text: ${piece.status}`);
   });
 
   await check("anonymous upload ceiling: the phone says so before sending anything", async () => {
@@ -1475,7 +1707,7 @@ async function uploadCeilingSuite(browser, base) {
       const file = await makeVideo(path.join(workDir, "ceiling.mov"));
       let posted = false;
       page.on("request", (request) => {
-        if (request.method() === "POST" && request.url().includes("/api/m/upload")) posted = true;
+        if (request.method() === "PUT" && request.url().includes("/pieces/")) posted = true;
       });
       await goto(page, "/m/upload", base);
       // A fresh dev server may reload a page it has just compiled; let that settle first.
@@ -1507,7 +1739,10 @@ async function signInRequiredSuite(browser, base) {
     assert((await anon("/api/auth/me", {}, base)).status === 401, "me 401");
     assert((await anon("/api/m/loops", {}, base)).status === 401, "loops 401");
     assert((await anon("/api/m/assign", { method: "POST", json: { loopId: null, target: { type: "fleet" } } }, base)).status === 401, "assign 401");
-    assert((await anon("/api/m/upload?name=xx&filename=a.mov", {}, base)).status === 401, "upload preflight 401");
+    assert(
+      (await anon("/api/m/uploads", { method: "POST", json: { name: "xx", fileName: "a.mov", size: 10, fingerprint: "e2e-signin-401" } }, base)).status === 401,
+      "starting an upload needs sign-in",
+    );
     const admin = await adminSession(base);
     const cab = (await admin("/api/m/overview")).body.cabs[0];
     assert((await anon(`/api/devices/${cab.id}/disable`, { method: "POST", json: { reason: "x" } }, base)).status === 401, "pause 401");

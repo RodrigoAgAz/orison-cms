@@ -1,4 +1,4 @@
-// Client-side shapes of the mobile JSON API (/api/m/*). Mirrors src/lib/mobile.ts (CONTRACT.md).
+// Client-side shapes of the mobile JSON API (/api/m/*). Mirrors the types in src/lib/mobile.ts.
 
 export type LoopRef = { id: string; name: string; posterUrl: string | null };
 
@@ -68,6 +68,17 @@ export type CabSummary = {
   playbackTrigger?: "gpio" | "keyboard" | "always" | null;
   /** The cab plays for passenger journeys, so passenger wording applies. */
   reportsJourneys?: boolean;
+  /** Fine-grained player state (firmware 1.2.0+): "SAFETY" while the safety message plays. */
+  playerState?: string | null;
+  /** How its content update stands. "failing"/"downloading" come from firmware 1.2.0+. */
+  sync?: {
+    state: "failing" | "downloading" | "waiting" | "current" | "unknown";
+    error: string | null;
+    since: string | null;
+    nextRetryAt: string | null;
+    lastSyncedAt: string | null;
+    failedLoop: { id: string; name: string } | null;
+  };
 };
 
 export type CabDetail = CabSummary & {
@@ -75,6 +86,8 @@ export type CabDetail = CabSummary & {
   signalStrength: number | null;
   /** 0-100 signal quality, when that is what the cab reports. */
   signalPercent?: number | null;
+  /** dBm, when the cab's modem reports it. */
+  signalDbm?: number | null;
   /** When the technical figures were reported. */
   reportedAt?: string | null;
   networkType: string | null;

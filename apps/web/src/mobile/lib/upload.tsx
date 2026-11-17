@@ -1,24 +1,24 @@
 "use client";
 
 // Upload manager. Lives in the app shell so an upload keeps going while the user moves between
-// screens. The file is sent with XHR (for real progress); once the server has it, the server
-// keeps processing on its own and we poll the video until it is ready or has failed. The
-// in-progress job is remembered in localStorage so it reappears after the app is reopened.
+// screens. The file goes up in pieces of a few MB (lib/piece-sender.ts): the hosting proxy cuts
+// off any request whose body takes more than 5 minutes, so one long request can't carry a video
+// over a phone connection. A dropped connection only pauses the upload; it carries on by itself.
+// Once the server has every piece it prepares the video on its own and we poll it until it is
+// ready or has failed. The job is remembered in localStorage: a video still being prepared
+// reappears after the app is reopened, and an upload that was cut short asks for the same file
+// again and carries on from the pieces the server already has.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, ApiFailure, sendToLogin } from "./api";
+import { fileFingerprint, sendInPieces, UploadCancelled, UploadRefused } from "./piece-sender";
 import { invalidate } from "./store";
 import type { AssignTarget, LoopSummary } from "./types";
 
 export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 export const MAX_UPLOAD_SECONDS = 14 * 60;
 export const ACCEPTED_EXTENSIONS = [".mp4", ".mov", ".m4v"];
-/**
- * The server stops a request whose body has not fully arrived within this long (REQUEST_TIMEOUT_SECONDS,
- * apps/web/scripts/server-timeouts.cjs). A proxy in front of it may be stricter.
- */
-export const UPLOAD_TIME_LIMIT_SECONDS = 30 * 60;
 
 export type UploadPhase = "uploading" | "processing" | "ready" | "failed";
 
@@ -30,23 +30,46 @@ export type UploadJob = {
   target: AssignTarget | null;
   targetLabel: string | null;
   phase: UploadPhase;
+  /** Bytes the server has confirmed. */
   loaded: number;
   startedAt: number;
-  rate: number | null; // bytes per second
+  rate: number | null; // bytes per second, from confirmed pieces
   loopId: string | null;
   error: string | null;
   /** Ready, but the server could not put it where it was asked to go. */
   warning: string | null;
-  /** Failed phase only: we could not find out whether the server received the video. */
-  uncertain?: boolean;
   /** Length of the video in seconds, read on the phone before sending (for honest waiting times). */
   seconds?: number | null;
   loop: LoopSummary | null;
+  /** The server's id for this upload, and the file's fingerprint (to carry on with the same file). */
+  uploadId?: string | null;
+  fingerprint?: string | null;
+  lastModified?: number | null;
+  piecesDone?: number;
+  pieceCount?: number;
+  /** No connection (or no answer): waiting to carry on by itself. */
+  waitingForConnection?: boolean;
+  /** The server lost the upload (restart) and it started again from the beginning. */
+  restarted?: number;
+  /** The app was reopened mid-upload: the same file must be chosen again to carry on. */
+  needsFile?: boolean;
+  /** Joining the pieces at the server. */
+  finishing?: boolean;
+};
+
+export type StartInput = {
+  file: File;
+  name: string;
+  target: AssignTarget | null;
+  targetLabel: string | null;
+  seconds?: number | null;
 };
 
 type UploadContextValue = {
   job: UploadJob | null;
-  start: (input: { file: File; name: string; target: AssignTarget | null; targetLabel: string | null; seconds?: number | null }) => void;
+  start: (input: StartInput) => void;
+  /** Carry on an interrupted upload with the file chosen again; false if it isn't the same file. */
+  resumeWith: (file: File) => Promise<boolean>;
   cancel: () => void;
   dismiss: () => void;
 };
@@ -56,7 +79,7 @@ const STORAGE_KEY = "orison.mobile.upload";
 
 function remember(job: UploadJob | null) {
   try {
-    if (job && job.phase === "processing" && job.loopId) {
+    if (job && ((job.phase === "processing" && job.loopId) || (job.phase === "uploading" && job.fingerprint))) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...job, loop: null }));
     } else {
       localStorage.removeItem(STORAGE_KEY);
@@ -66,54 +89,19 @@ function remember(job: UploadJob | null) {
   }
 }
 
-const UNCERTAIN_MESSAGE =
-  "The connection dropped just as the video finished sending, so we can't tell whether it arrived. Look in Videos in a few minutes: if it's there, it's being prepared (and goes where you chose). If it isn't, upload it again.";
-const INTERRUPTED_MESSAGE =
-  "The upload was interrupted before the whole video was sent, probably by a weak connection or the phone locking. Nothing was saved. Try again with the app open, ideally on Wi-Fi.";
-
-function uploadParams(job: Pick<UploadJob, "name" | "fileName" | "target">) {
-  const params = new URLSearchParams({ name: job.name, filename: job.fileName || "video.mov" });
-  if (job.target) params.set("target", JSON.stringify(job.target));
-  return params.toString();
-}
-
-/** The upload's row if the server created one (matched by name, created after we started). */
-async function findReceivedUpload(job: Pick<UploadJob, "name" | "startedAt">) {
-  const { items } = await api<{ items: LoopSummary[] }>("/api/m/loops");
-  return (
-    items.find(
-      (loop) =>
-        loop.name === job.name && loop.source === "upload" && new Date(loop.createdAt).getTime() >= job.startedAt - 60_000,
-    ) ?? null
-  );
-}
-
-function uploadErrorMessage(status: number, body: string) {
-  let message: string | null = null;
-  try {
-    message = (JSON.parse(body) as { error?: string }).error ?? null;
-  } catch {
-    message = null;
-  }
-  if (status === 413) return message ?? "This video is too big. Videos can be up to 500 MB.";
-  if (status === 415) return message ?? "This file isn't a video we can use. Choose an MP4 or MOV video.";
-  if (status >= 500) return "Something went wrong on our side while receiving the video. Please try again.";
-  return message ?? "The upload didn't work. Please try again.";
-}
-
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [job, setJob] = useState<UploadJob | null>(null);
-  const xhrRef = useRef<XMLHttpRequest | null>(null);
+  const sendRef = useRef<AbortController | null>(null);
   const pollRef = useRef<number | null>(null);
   // Bumped whenever polling starts or a new upload begins: a check still in flight for an earlier
   // video must not write its answer onto the current one.
   const pollTokenRef = useRef(0);
-  // Key of the upload this provider is currently sending (null once cancelled or dismissed).
-  const activeKeyRef = useRef<string | null>(null);
+  const jobRef = useRef<UploadJob | null>(null);
+  jobRef.current = job;
 
-  const update = useCallback((patch: Partial<UploadJob> | ((job: UploadJob) => Partial<UploadJob>)) => {
+  const update = useCallback((patch: Partial<UploadJob> | ((job: UploadJob) => Partial<UploadJob>), key?: string) => {
     setJob((current) => {
-      if (!current) return current;
+      if (!current || (key && current.key !== key)) return current;
       const next = { ...current, ...(typeof patch === "function" ? patch(current) : patch) };
       remember(next);
       return next;
@@ -168,15 +156,18 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     [update],
   );
 
-  // Resume a job that was still being prepared when the app was closed.
+  // Resume a job that was being prepared, or was cut short while sending, when the app was closed.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const restored = JSON.parse(saved) as UploadJob;
-        if (restored.loopId) {
+        if (restored.phase === "processing" && restored.loopId) {
           setJob({ ...restored, loop: null });
           poll(restored.loopId);
+        } else if (restored.phase === "uploading" && restored.fingerprint) {
+          // The file itself is gone with the page: ask for it again.
+          setJob({ ...restored, loop: null, needsFile: true, waitingForConnection: false, finishing: false, rate: null });
         }
       }
     } catch {
@@ -196,189 +187,180 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [job?.phase, job?.loopId, poll]);
 
-  const start = useCallback<UploadContextValue["start"]>(
-    ({ file, name, target, targetLabel, seconds }) => {
-      xhrRef.current?.abort();
+  const run = useCallback(
+    async (input: StartInput, fingerprint: string, previous?: UploadJob) => {
+      sendRef.current?.abort();
       // An earlier video still being prepared carries on at the server (it stays in Videos);
       // this screen follows the new one from now on.
       if (pollRef.current) window.clearTimeout(pollRef.current);
       pollRef.current = null;
       pollTokenRef.current += 1;
+      const controller = new AbortController();
+      sendRef.current = controller;
+      const key = `${Date.now()}`;
+      const startedAt = Date.now();
       const fresh: UploadJob = {
-        key: `${Date.now()}`,
-        name,
-        fileName: file.name,
-        size: file.size,
-        target,
-        targetLabel,
+        key,
+        name: input.name,
+        fileName: input.file.name,
+        size: input.file.size,
+        target: input.target,
+        targetLabel: input.targetLabel,
         phase: "uploading",
-        loaded: 0,
-        startedAt: Date.now(),
+        loaded: previous?.loaded ?? 0,
+        startedAt: previous?.startedAt ?? startedAt,
         rate: null,
         loopId: null,
         error: null,
         warning: null,
         loop: null,
-        seconds: seconds ?? null,
+        seconds: input.seconds ?? previous?.seconds ?? null,
+        fingerprint,
+        lastModified: input.file.lastModified,
+        uploadId: previous?.uploadId ?? null,
+        piecesDone: previous?.piecesDone,
+        pieceCount: previous?.pieceCount,
+        restarted: 0,
       };
       setJob(fresh);
-      activeKeyRef.current = fresh.key;
-
-      const query = uploadParams(fresh);
-      const fail = (error: string, extra: Partial<UploadJob> = {}) => update({ phase: "failed", error, ...extra });
-
-      // The send did not end with an answer we can read (connection dropped, proxy error, or the
-      // server refused early while we were still sending). Find out what actually happened
-      // instead of guessing.
-      const settleUnknown = async (sentAll: boolean) => {
-        try {
-          const received = await findReceivedUpload(fresh);
-          if (received) {
-            update({ phase: "processing", loaded: fresh.size, loopId: received.id, loop: received });
-            void invalidate("/api/m/loops");
-            poll(received.id);
-            return;
-          }
-        } catch {
-          // offline: fall through
-        }
-        try {
-          await api<{ ok: true }>(`/api/m/upload?${query}`);
-        } catch (error) {
-          if (error instanceof ApiFailure && !error.network && error.status !== 401) {
-            fail(`The server didn't accept this upload: ${error.message}`);
-            return;
-          }
-          if (error instanceof ApiFailure && error.status === 401) return; // sent to sign in
-        }
-        if (sentAll) {
-          fail(UNCERTAIN_MESSAGE, { uncertain: true });
-          // Keep looking for a few minutes: the server may still be receiving the last bytes.
-          let tries = 0;
-          const recheck = async () => {
-            tries += 1;
-            if (activeKeyRef.current !== fresh.key) return;
-            const received = await findReceivedUpload(fresh).catch(() => null);
-            if (received) {
-              setJob((current) =>
-                current && current.key === fresh.key && current.phase === "failed"
-                  ? { ...current, phase: "processing", error: null, uncertain: false, loaded: fresh.size, loopId: received.id, loop: received }
-                  : current,
+      remember(fresh);
+      let firstConfirmed: { bytes: number; at: number } | null = null;
+      try {
+        const { loopId } = await sendInPieces({
+          file: input.file,
+          fileName: input.file.name || "video.mov",
+          name: input.name,
+          target: input.target,
+          fingerprint,
+          signal: controller.signal,
+          events: {
+            onSession: (session) => {
+              firstConfirmed = { bytes: session.receivedBytes, at: Date.now() };
+              update(
+                {
+                  uploadId: session.uploadId,
+                  loaded: session.receivedBytes,
+                  piecesDone: session.received.length,
+                  pieceCount: session.pieceCount,
+                },
+                key,
               );
-              void invalidate("/api/m/loops");
-              poll(received.id);
-            } else if (tries < 9) {
-              window.setTimeout(() => void recheck(), 20_000);
-            }
-          };
-          window.setTimeout(() => void recheck(), 20_000);
+            },
+            onProgress: ({ confirmedBytes, piecesDone, pieceCount }) => {
+              const base = firstConfirmed ?? { bytes: 0, at: startedAt };
+              const elapsed = (Date.now() - base.at) / 1000;
+              update(
+                {
+                  loaded: confirmedBytes,
+                  piecesDone,
+                  pieceCount,
+                  rate: elapsed > 1 ? (confirmedBytes - base.bytes) / elapsed : null,
+                  waitingForConnection: false,
+                },
+                key,
+              );
+            },
+            onConnection: (state) => update({ waitingForConnection: state === "waiting" }, key),
+            onRestart: (count) => {
+              firstConfirmed = null;
+              update({ restarted: count, loaded: 0, piecesDone: 0, rate: null, waitingForConnection: false }, key);
+            },
+            onFinishing: () => update({ finishing: true, loaded: input.file.size }, key),
+          },
+        });
+        if (controller.signal.aborted) return;
+        update({ phase: "processing", loaded: input.file.size, loopId, finishing: false, waitingForConnection: false }, key);
+        void invalidate("/api/m/loops");
+        poll(loopId);
+      } catch (error) {
+        if (error instanceof UploadCancelled || controller.signal.aborted) return;
+        if (error instanceof UploadRefused && error.status === 401) {
+          sendToLogin();
           return;
         }
-        fail(INTERRUPTED_MESSAGE);
-      };
-
-      const send = () => {
-        const xhr = new XMLHttpRequest();
-        xhrRef.current = xhr;
-        let loaded = 0;
-        xhr.open("POST", `/api/m/upload?${query}`);
-        xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-        xhr.setRequestHeader("Accept", "application/json");
-        xhr.upload.onprogress = (event) => {
-          loaded = event.loaded;
-          const elapsed = (Date.now() - fresh.startedAt) / 1000;
-          update({ loaded: event.loaded, rate: elapsed > 1 ? event.loaded / elapsed : null });
-        };
-        xhr.upload.onload = () => {
-          loaded = fresh.size;
-        };
-        // Within 2% of the end, the last progress event may simply not have fired.
-        const sentAll = () => loaded >= fresh.size * 0.98;
-        xhr.onload = () => {
-          xhrRef.current = null;
-          if (xhr.status === 401) {
-            sendToLogin();
-            return;
-          }
-          if (xhr.status === 202 || xhr.status === 200) {
-            let loopId: string | null = null;
-            try {
-              loopId = (JSON.parse(xhr.responseText) as { loopId?: string }).loopId ?? null;
-            } catch {
-              loopId = null;
-            }
-            if (!loopId) {
-              void settleUnknown(true);
-              return;
-            }
-            update({ phase: "processing", loaded: fresh.size, loopId });
-            void invalidate("/api/m/loops");
-            poll(loopId);
-            return;
-          }
-          if (xhr.status === 0 || xhr.status >= 500) {
-            // A proxy error or timeout: the server may have the video even though we got no answer.
-            void settleUnknown(sentAll());
-            return;
-          }
-          fail(uploadErrorMessage(xhr.status, xhr.responseText));
-        };
-        xhr.onerror = () => {
-          xhrRef.current = null;
-          void settleUnknown(sentAll());
-        };
-        xhr.onabort = () => {
-          xhrRef.current = null;
-        };
-        xhr.send(file);
-      };
-
-      // Check the details first (signed in, name, target still exists) so a refusal is reported
-      // as such rather than as a dropped connection half-way through sending.
-      void api<{ ok: true }>(`/api/m/upload?${query}`)
-        .then(() => {
-          if (activeKeyRef.current === fresh.key) send();
-        })
-        .catch((error) => {
-          if (error instanceof ApiFailure && error.status === 401) return;
-          fail(
-            error instanceof ApiFailure && error.network
-              ? "No connection, so the upload didn't start. Nothing was sent. Try again when you have a signal."
-              : `The upload didn't start: ${error instanceof Error ? error.message : "please try again"}`,
-          );
-        });
+        update(
+          {
+            phase: "failed",
+            finishing: false,
+            waitingForConnection: false,
+            error:
+              error instanceof UploadRefused
+                ? error.message
+                : "Something went wrong while sending the video. Please try again.",
+          },
+          key,
+        );
+      } finally {
+        if (sendRef.current === controller) sendRef.current = null;
+      }
     },
     [poll, update],
   );
 
+  const start = useCallback<UploadContextValue["start"]>(
+    (input) => {
+      void (async () => {
+        let fingerprint: string;
+        try {
+          fingerprint = await fileFingerprint(input.file);
+        } catch {
+          fingerprint = `v0:${input.file.size}:${input.file.lastModified}:${encodeURIComponent(input.file.name).slice(0, 80)}`;
+        }
+        await run(input, fingerprint);
+      })();
+    },
+    [run],
+  );
+
+  const resumeWith = useCallback(
+    async (file: File) => {
+      const current = jobRef.current;
+      if (!current || !current.fingerprint) return false;
+      const fingerprint = await fileFingerprint(file).catch(() => null);
+      if (!fingerprint || fingerprint !== current.fingerprint || file.size !== current.size) return false;
+      void run(
+        { file, name: current.name, target: current.target, targetLabel: current.targetLabel, seconds: current.seconds },
+        fingerprint,
+        current,
+      );
+      return true;
+    },
+    [run],
+  );
+
   const cancel = useCallback(() => {
-    activeKeyRef.current = null;
-    xhrRef.current?.abort();
-    xhrRef.current = null;
+    sendRef.current?.abort();
+    sendRef.current = null;
+    const uploadId = jobRef.current?.uploadId;
+    if (uploadId) {
+      // Free the pieces at the server (if this fails they are cleaned up after a day).
+      void api(`/api/m/uploads/${uploadId}`, { method: "DELETE" }).catch(() => undefined);
+    }
     setJob(null);
     remember(null);
   }, []);
 
   const dismiss = useCallback(() => {
-    activeKeyRef.current = null;
+    sendRef.current?.abort();
+    sendRef.current = null;
     pollTokenRef.current += 1;
     if (pollRef.current) window.clearTimeout(pollRef.current);
     setJob(null);
     remember(null);
   }, []);
 
-  // Warn before closing the page while bytes are still being sent.
+  // Warn before closing the page while pieces are still being sent.
   useEffect(() => {
-    if (job?.phase !== "uploading") return;
+    if (job?.phase !== "uploading" || job.needsFile) return;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [job?.phase]);
+  }, [job?.phase, job?.needsFile]);
 
-  const value = useMemo(() => ({ job, start, cancel, dismiss }), [job, start, cancel, dismiss]);
+  const value = useMemo(() => ({ job, start, resumeWith, cancel, dismiss }), [job, start, resumeWith, cancel, dismiss]);
   return <UploadContext.Provider value={value}>{children}</UploadContext.Provider>;
 }
 

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { clockTime, ago } from "../lib/format";
-import { cabTone, toneWord, type Tone } from "../lib/status";
+import { cabTone, statusWord, updateFailing, type Tone } from "../lib/status";
 import type { CabSummary } from "../lib/types";
 import { oldestVisibleUpdate, useConnection } from "../lib/store";
 import { AlertIcon, BackIcon, CloseIcon, InfoIcon, OfflineIcon, PauseIcon, RefreshIcon, SwitchIcon, VideosIcon } from "./icons";
@@ -37,12 +37,19 @@ export function StatusShape({ tone, size = 12 }: { tone: Tone; size?: number }) 
   return <span className={`m-shape m-shape-${tone}`} style={{ width: size, height: size }} aria-hidden="true" />;
 }
 
-export function StatusBadge({ cab, size = "md" }: { cab: Pick<CabSummary, "status">; size?: "md" | "lg" }) {
+export function StatusBadge({ cab, size = "md" }: { cab: Pick<CabSummary, "status" | "sync">; size?: "md" | "lg" }) {
   const tone = cabTone(cab);
+  const failing = updateFailing(cab);
   return (
-    <span className={`m-status m-status-${tone} m-status-${size}`} data-status={cab.status}>
-      <StatusShape tone={tone} size={size === "lg" ? 14 : 11} />
-      <span>{toneWord[tone]}</span>
+    <span className={`m-status m-status-${failing ? "failing" : tone} m-status-${size}`} data-status={cab.status} data-sync={cab.sync?.state}>
+      {failing ? (
+        <span className="m-shape m-shape-failing" aria-hidden="true">
+          <AlertIcon size={size === "lg" ? 15 : 12} />
+        </span>
+      ) : (
+        <StatusShape tone={tone} size={size === "lg" ? 14 : 11} />
+      )}
+      <span>{statusWord(cab)}</span>
     </span>
   );
 }

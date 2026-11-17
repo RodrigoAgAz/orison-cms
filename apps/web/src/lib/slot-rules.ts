@@ -86,17 +86,18 @@ export function formatSeconds(ms: number) {
 /** Plain-words warning for an item whose file does not match its time, or null. */
 export function fitWarning(content: Pick<RuleContent, "durationMs" | "contentType"> & { asset?: RuleAsset | null }) {
   const fit = fitOf(content.asset, content.durationMs);
+  const fileMs = roundToStep(content.asset?.durationMs ?? 0);
   const what = content.contentType === "ADVERTISEMENT" ? "advert" : "filler";
   const name = content.asset?.filename ? `"${content.asset.filename}"` : `This ${what}`;
   if (fit.kind === "cut") {
-    return `${name} is ${formatSeconds(content.asset!.durationMs!)} long but has ${formatSeconds(
-      content.durationMs,
-    )}: the last ${formatSeconds(fit.byMs)} will be cut off.`;
+    return `${name} is ${formatSeconds(fileMs)} long but has ${formatSeconds(content.durationMs)}: the last ${formatSeconds(
+      roundToStep(fit.byMs),
+    )} will be cut off.`;
   }
   if (fit.kind === "held") {
-    return `${name} is only ${formatSeconds(content.asset!.durationMs!)} long but has ${formatSeconds(
+    return `${name} is only ${formatSeconds(fileMs)} long but has ${formatSeconds(
       content.durationMs,
-    )}: its last frame will be held, silent, for ${formatSeconds(fit.byMs)}.`;
+    )}: its last frame will be held, silent, for ${formatSeconds(roundToStep(fit.byMs))}.`;
   }
   if (fit.kind === "unknown" && content.asset) {
     return `The length of ${name} is not known, so it may be cut off or held on its last frame.`;

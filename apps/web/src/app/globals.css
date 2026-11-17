@@ -2967,3 +2967,7 @@ textarea {
   border: 1px solid var(--border-subtle);
 }
 .lb-still-fallback img { width: 34%; max-width: 90px; opacity: 0.95; }
+.ll-table .button { padding: 6px 12px; font-size: 0.82rem; }
+.ll-table th, .ll-table td { padding-left: 10px; padding-right: 10px; }
+.ll-table td:nth-child(3), .ll-table td:nth-child(4) { min-width: 120px; }
+.ll-table td:nth-child(6) { white-space: nowrap; }

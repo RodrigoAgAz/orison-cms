@@ -66,7 +66,7 @@ export async function pauseLoop(loopId: string, actor: Actor, token?: string | n
       needsConfirmation: true,
       effect,
       token: expected,
-      message: `"${loop.name}" is live. Pausing it changes what these cabs play:`,
+      message: `"${loop.name}" is on air. Taking it off air changes what these cabs play — here is what plays instead:`,
     };
   }
 

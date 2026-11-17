@@ -22,6 +22,12 @@ const kindLabels: Record<LoopStateView["kind"], string> = {
   phone: "Phone upload",
 };
 
+function shortLiveOn(liveOn: LoopStateView["liveOn"]) {
+  const where = liveOn.fleet ? ["All cabs"] : liveOn.groups.map((group) => group.name);
+  const cabs = `${liveOn.cabCount} cab${liveOn.cabCount === 1 ? "" : "s"}`;
+  return where.length ? `${where.join(", ")} · ${cabs}` : cabs;
+}
+
 export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
   const router = useRouter();
   const { toast } = useToast();
@@ -113,15 +119,12 @@ export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
                     ) : null}
                   </div>
                 </td>
-                <td className={loop.live ? "ll-live" : "muted"}>{loop.live ? loop.liveLabel : "Not on air"}</td>
+                <td className={loop.live ? "ll-live" : "muted"}>{loop.live ? shortLiveOn(loop.liveOn) : "Not on air"}</td>
                 <td>{loop.kind === "phone" ? <span className="muted">Phone app</span> : loop.targetLabel}</td>
                 <td>{loop.kind === "builder" ? `${loop.readySlots} of ${loop.slotCount}` : <span className="muted">—</span>}</td>
                 <td>{formatWhen(loop.publishedAt)}</td>
                 <td>
                   <div className="button-row table-actions">
-                    <Link className="button button-secondary" href={`/loops/${loop.id}`}>
-                      Open
-                    </Link>
                     {loop.kind === "builder" ? (
                       <button className="button button-secondary" disabled={busyId === loop.id} onClick={() => void duplicate(loop)} type="button">
                         Duplicate

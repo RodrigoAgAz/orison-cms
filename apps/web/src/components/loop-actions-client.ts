@@ -28,7 +28,7 @@ export async function requestPause(
   if (body.needsConfirmation) {
     ask({
       title: "Take this loop off air?",
-      message: `${body.message} What plays instead:`,
+      message: body.message ?? "",
       lines: body.lines,
       confirmLabel: "Pause it",
       danger: true,

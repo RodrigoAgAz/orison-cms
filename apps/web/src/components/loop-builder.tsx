@@ -439,7 +439,7 @@ export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTe
       if (body.needsConfirmation) {
         setConfirm({
           title: "Take this loop off air?",
-          message: `${body.message} What plays instead:`,
+          message: body.message ?? "",
           lines: body.lines,
           confirmLabel: "Pause it",
           danger: true,

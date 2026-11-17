@@ -17,6 +17,8 @@ import {
   passengerLine,
   placeWords,
   signalWords,
+  statusWord,
+  updateFailureText,
 } from "../src/mobile/lib/status";
 import { fetchResource, readResource, retryDelay } from "../src/mobile/lib/store";
 import type { CabSummary, Overview } from "../src/mobile/lib/types";
@@ -268,5 +270,29 @@ describe("upload helpers", () => {
     assert.match(preparingWords(60_000), /minute or two/);
     assert.match(preparingWords(600_000), /5 minutes or more/);
     assert.match(preparingWords(null), /5 minutes or more/);
+  });
+});
+
+describe("update state and screen activity (firmware 1.2.0 fields)", () => {
+  const failing = {
+    state: "failing" as const,
+    error: "Not enough free space",
+    since: "2026-11-17T09:00:00Z",
+    nextRetryAt: "2026-11-17T10:30:00Z",
+    lastSyncedAt: null,
+    failedLoop: { id: "A", name: "DAZN 26 Oct rotation (ad in journey)" },
+  };
+  it("a failing update reads as failing, with the reason and the next try, not as switching", () => {
+    assert.equal(statusWord({ status: "updating", sync: failing }), "On · update failing");
+    assert.equal(statusWord({ status: "updating", sync: { ...failing, state: "downloading", error: null } }), "On · downloading");
+    assert.equal(statusWord({ status: "updating", sync: { ...failing, state: "waiting", error: null } }), "On · switching");
+    assert.equal(statusWord({ status: "updating" }), "On · switching");
+    const text = updateFailureText({ sync: failing, expected: B }, new Date("2026-11-17T10:00:00Z"));
+    assert.match(text, /Couldn’t fetch “DAZN 26 Oct rotation \(ad in journey\)”: Not enough free space\. It tries again today at 10:30\./);
+  });
+  it("always mode plays continuously; the safety message says so", () => {
+    assert.equal(passengerLine({ status: "online", playerStatus: "journey", reportsJourneys: false, playbackTrigger: "always" }), "Playing the video continuously");
+    assert.equal(passengerLine({ status: "online", playerStatus: "journey", reportsJourneys: true, playerState: "SAFETY" }), "Safety message playing");
+    assert.equal(reportsJourneysFor("always", true), false);
   });
 });

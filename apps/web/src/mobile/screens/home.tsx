@@ -21,7 +21,7 @@ import {
   StatusShape,
 } from "../components/ui";
 import { plural, quoted, videoLength, when } from "../lib/format";
-import { cabCount, isSwitchedOn, lagPhrase } from "../lib/status";
+import { cabCount, isSwitchedOn, lagPhrase, updateFailureText } from "../lib/status";
 import { useResource } from "../lib/store";
 import type { LoopSummary, Overview } from "../lib/types";
 
@@ -88,6 +88,16 @@ export function HomeScreen() {
       title: `${cab.label}: screen paused`,
       text: cab.pausedReason ? `Reason: ${cab.pausedReason}` : "No videos play until it\u2019s resumed.",
     })),
+    // Cabs that report their update keeps failing (firmware 1.2.0+), with the reason and the next try.
+    ...data.cabs
+      .filter((cab) => cab.sync?.state === "failing" && cab.status !== "inactive")
+      .map((cab) => ({
+        key: `u-${cab.id}`,
+        tone: "warn" as const,
+        to: `/m/cabs/${cab.id}`,
+        title: `${cab.label}: update failing`,
+        text: updateFailureText(cab),
+      })),
     ...failedUploads.map((loop) => ({
       key: `f-${loop.id}`,
       tone: "warn" as const,
@@ -118,6 +128,8 @@ export function HomeScreen() {
     { key: "paused", count: data.counts.paused, tone: "paused" as const },
   ];
   const shown = lists[filter];
+  // Cabs reported as downloading or failing say so on their own badge.
+  const switchingCabs = data.cabs.filter((cab) => cab.status === "updating" && (!cab.sync || cab.sync.state === "waiting"));
 
   return (
     <Screen>
@@ -286,10 +298,10 @@ export function HomeScreen() {
             ))}
           </ul>
         )}
-        {data.counts.updating > 0 ? (
+        {switchingCabs.length > 0 ? (
           <Notice tone="info">
             &ldquo;Switching&rdquo; means the cab is on and has been told to play a new video. Cabs switch{" "}
-            {lagPhrase(data.cabs.filter((cab) => cab.status === "updating"), data.changeLagMinutes)}.
+            {lagPhrase(switchingCabs, data.changeLagMinutes)}.
           </Notice>
         ) : null}
       </Section>

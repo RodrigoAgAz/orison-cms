@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import clsx from "clsx";
 
@@ -13,6 +14,10 @@ type Props = {
 };
 
 export function Modal({ children, title, eyebrow, onClose, className }: Props) {
+  // Rendered into <body>: the page-enter animation leaves a transform on the page wrapper, which
+  // would otherwise make this fixed overlay position itself against the whole (tall) page.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -24,7 +29,11 @@ export function Modal({ children, title, eyebrow, onClose, className }: Props) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  return (
+  if (!mounted) {
+    return null;
+  }
+
+  return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
       <div
         className={clsx("modal-panel", className)}
@@ -43,6 +52,7 @@ export function Modal({ children, title, eyebrow, onClose, className }: Props) {
         ) : null}
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

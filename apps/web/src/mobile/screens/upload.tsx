@@ -14,7 +14,6 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_SECONDS,
   readVideoDuration,
-  UPLOAD_TIME_LIMIT_SECONDS,
   useUpload,
   type UploadJob,
 } from "../lib/upload";
@@ -250,15 +249,14 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
       {large && !wifi && !cellular && file && !fileError ? (
         <Notice tone="info" title="A large video" testId="upload-large-note">
           It&rsquo;s {fileSize(file.size)}. If you&rsquo;re on mobile data rather than Wi-Fi, it uses that much of your allowance and can take a while. Keep
-          Orison open with the screen on until it reaches 100%.
+          Orison open with the screen on while it uploads; if the connection drops it carries on from where it stopped.
         </Notice>
       ) : null}
       {large && cellular && file && !fileError ? (
         <Notice tone="info" title="Wi-Fi recommended" testId="upload-wifi-note">
           This video is {fileSize(file.size)}. On mobile data, uploading it uses about {fileSize(file.size)} of your allowance and can take
-          a long time, because phones send much more slowly than they download. Keep Orison open with the screen on until it reaches 100%:
-          if the phone locks or you switch app, the upload stops. An upload that takes more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes is
-          stopped, so use Wi-Fi if you can.
+          a long time, because phones send much more slowly than they download. Keep Orison open with the screen on while it uploads; if the
+          connection drops or the phone locks, it carries on from where it stopped when you&rsquo;re back.
         </Notice>
       ) : null}
       {formError ? (
@@ -312,7 +310,7 @@ function UploadForm({ initialTarget }: { initialTarget: string | null }) {
         {large && cellular && file ? (
           <Notice tone="info" title="Large video">
             It&rsquo;s {fileSize(file.size)}. If you&rsquo;re not on Wi-Fi this uses {fileSize(file.size)} of mobile data and can take a long time. Keep the
-            app open with the screen on until the upload reaches 100%; an upload that takes more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes is stopped.
+            app open with the screen on while it uploads; if the connection drops it carries on from where it stopped.
           </Notice>
         ) : null}
       </Sheet>
@@ -351,13 +349,11 @@ function Radio({
 }
 
 function JobView({ job }: { job: UploadJob }) {
-  const { cancel, dismiss } = useUpload();
+  const { cancel, dismiss, resumeWith } = useUpload();
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const overview = useResource<Overview>("/api/m/overview", { refreshMs: 30_000 });
   const percent = job.size ? Math.min(100, Math.floor((job.loaded / job.size) * 100)) : 0;
   const remaining = job.rate && job.rate > 0 ? (job.size - job.loaded) / job.rate : null;
-  const elapsed = (Date.now() - job.startedAt) / 1000;
-  // At this speed the server's time limit would stop the upload before it finishes.
-  const tooSlow = remaining !== null && elapsed > 20 && elapsed + remaining > UPLOAD_TIME_LIMIT_SECONDS;
   const waiting = job.loop?.processing.waiting ?? false;
   const steps: Array<{ key: string; label: string }> = [
     { key: "uploading", label: "Upload" },
@@ -391,28 +387,73 @@ function JobView({ job }: { job: UploadJob }) {
         })}
       </ol>
 
-      {job.phase === "uploading" ? (
-        <div className="m-card m-job-card">
+      {job.phase === "uploading" && job.needsFile ? (
+        <div className="m-card m-job-card" data-testid="upload-needs-file">
           <div className="m-job-row">
-            <strong>Uploading</strong>
+            <strong>Stopped at {percent}%</strong>
+          </div>
+          <div className="m-progress" aria-hidden="true">
+            <span style={{ width: `${percent}%` }} />
+          </div>
+          <p className="m-body-text">
+            The app was closed before {quoted(job.name)} had finished uploading. Choose the same video again ({job.fileName}, {fileSize(job.size)})
+            and it carries on from where it stopped.
+          </p>
+          <label className="m-btn m-btn-primary m-btn-block" htmlFor="m-resume-file">
+            Choose {job.fileName} again
+          </label>
+          <input
+            id="m-resume-file"
+            type="file"
+            accept="video/mp4,video/quicktime,video/x-m4v,video/*,.mp4,.mov,.m4v"
+            className="m-visually-hidden"
+            data-testid="upload-resume-file"
+            onChange={(event) => {
+              const picked = event.target.files?.[0];
+              if (!picked) return;
+              setResumeError(null);
+              void resumeWith(picked).then((ok) => {
+                if (!ok) setResumeError(`That isn’t the same video. Choose ${job.fileName} (${fileSize(job.size)}), or start a new upload.`);
+              });
+            }}
+          />
+          {resumeError ? (
+            <Notice tone="warn" testId="upload-resume-error">
+              {resumeError}
+            </Notice>
+          ) : null}
+          <button type="button" className="m-btn m-btn-ghost m-btn-block" onClick={cancel} data-testid="upload-cancel">
+            Forget it and start a new upload
+          </button>
+        </div>
+      ) : null}
+
+      {job.phase === "uploading" && !job.needsFile ? (
+        <div className="m-card m-job-card" data-testid="upload-sending">
+          <div className="m-job-row">
+            <strong>{job.finishing ? "Checking the video" : job.waitingForConnection ? "Waiting for a connection" : "Uploading"}</strong>
             <strong data-testid="upload-percent">{percent}%</strong>
           </div>
           <div className="m-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="Upload progress">
             <span style={{ width: `${percent}%` }} />
           </div>
-          <p className="m-muted">
-            {fileSize(job.loaded)} of {fileSize(job.size)}
-            {remaining !== null && percent < 100 ? ` · about ${remaining < 60 ? "a few seconds" : duration(remaining)} left` : ""}
+          <p className="m-muted" data-testid="upload-progress-text">
+            {job.loaded > 0 ? `${fileSize(job.loaded)} of ${fileSize(job.size)} received` : `Nothing received yet of ${fileSize(job.size)}`}
+            {remaining !== null && percent < 100 && !job.waitingForConnection ? ` · about ${remaining < 60 ? "a few seconds" : duration(remaining)} left` : ""}
           </p>
-          {tooSlow ? (
-            <Notice tone="warn" title="This connection is too slow" testId="upload-too-slow">
-              At this speed the upload would take more than {UPLOAD_TIME_LIMIT_SECONDS / 60} minutes, and uploads that take longer are stopped. Cancel
-              it and try again on Wi-Fi, or use a shorter or smaller video.
+          {job.waitingForConnection ? (
+            <Notice tone="warn" title="Connection lost" testId="upload-waiting">
+              Nothing sent so far is lost. It carries on from {percent}% by itself as soon as the connection is back.
+            </Notice>
+          ) : null}
+          {job.restarted ? (
+            <Notice tone="info" title="Started again" testId="upload-restarted">
+              Our server restarted and lost what had been sent, so the upload started again from the beginning. Nothing for you to do.
             </Notice>
           ) : null}
           <Notice tone="info">
-            Keep Orison open with the screen on until this reaches 100%: if the phone locks or you switch app, the upload stops. After that you can
-            close it; we&rsquo;ll finish getting the video ready.
+            Keep Orison open with the screen on until this reaches 100%. If the connection drops it carries on from where it stopped; if the app is
+            closed, choose the same video again and it carries on too. After 100% you can close it; we&rsquo;ll finish getting the video ready.
           </Notice>
           <button type="button" className="m-btn m-btn-ghost m-btn-block" onClick={cancel} data-testid="upload-cancel">
             Cancel upload
@@ -486,19 +527,10 @@ function JobView({ job }: { job: UploadJob }) {
 
       {job.phase === "failed" ? (
         <div className="m-card m-job-card" data-testid="upload-failed">
-          <Notice
-            tone={job.uncertain ? "warn" : "danger"}
-            title={job.uncertain ? "We can’t tell yet if it arrived" : job.loopId ? "This video couldn’t be prepared" : "The upload didn’t work"}
-            testId="upload-failed-reason"
-          >
+          <Notice tone="danger" title={job.loopId ? "This video couldn’t be prepared" : "The upload didn’t work"} testId="upload-failed-reason">
             {job.error}
           </Notice>
           {job.loopId ? <p className="m-muted">It&rsquo;s listed in Videos so you can see what happened and remove it.</p> : null}
-          {job.uncertain ? (
-            <Link href={href("/m/videos")} className="m-btn m-btn-secondary m-btn-block" data-testid="upload-check-videos">
-              Check Videos
-            </Link>
-          ) : null}
           <button type="button" className="m-btn m-btn-primary m-btn-block" onClick={dismiss} data-testid="upload-retry">
             Choose a video again
           </button>

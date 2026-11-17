@@ -112,9 +112,20 @@ function UploadPill() {
   const percent = job.size ? Math.min(100, Math.round((job.loaded / job.size) * 100)) : 0;
   let text: React.ReactNode;
   let icon: React.ReactNode;
-  if (job.phase === "uploading") {
-    icon = <Spinner size={16} />;
+  if (job.phase === "uploading" && job.needsFile) {
+    icon = <AlertIcon size={16} />;
     text = (
+      <>
+        <strong>{job.name}</strong> stopped at {percent}%: choose it again to carry on
+      </>
+    );
+  } else if (job.phase === "uploading") {
+    icon = <Spinner size={16} />;
+    text = job.waitingForConnection ? (
+      <>
+        <strong>{job.name}</strong> · {percent}% · waiting for a connection
+      </>
+    ) : (
       <>
         Uploading <strong>{job.name}</strong> · {percent}%
       </>
@@ -137,15 +148,7 @@ function UploadPill() {
     icon = <AlertIcon size={16} />;
     text = (
       <>
-        {job.uncertain ? (
-          <>
-            Not sure <strong>{job.name}</strong> arrived
-          </>
-        ) : (
-          <>
-            <strong>{job.name}</strong> didn&rsquo;t upload
-          </>
-        )}
+        <strong>{job.name}</strong> didn&rsquo;t upload
       </>
     );
   }

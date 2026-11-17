@@ -1,4 +1,4 @@
-import { ago, plural, quoted, when } from "./format";
+import { ago, plural, quoted, when, whenLong } from "./format";
 import type { AssignTarget, CabSummary, LoopRef, Overview } from "./types";
 
 export type Tone = "on" | "switching" | "off" | "paused";
@@ -23,6 +23,20 @@ export const toneWord: Record<Tone, string> = {
   paused: "Paused",
 };
 
+/**
+ * The status badge's word, aware of the update state the cab reports (firmware 1.2.0+): a cab
+ * whose update keeps failing must not read as "switching" for ever.
+ */
+export function statusWord(cab: Pick<CabSummary, "status" | "sync">) {
+  if (cab.status === "updating" && cab.sync?.state === "failing") return "On · update failing";
+  if (cab.status === "updating" && cab.sync?.state === "downloading") return "On · downloading";
+  return toneWord[cabTone(cab)];
+}
+
+export function updateFailing(cab: Pick<CabSummary, "sync">) {
+  return cab.sync?.state === "failing";
+}
+
 export function isSwitchedOn(cab: Pick<CabSummary, "status">) {
   return cab.status === "online" || cab.status === "updating";
 }
@@ -32,9 +46,17 @@ export function isSwitchedOn(cab: Pick<CabSummary, "status">) {
  * passenger") only for a cab known to play for passenger journeys (`reportsJourneys`): a box with
  * no passenger input never has one, and between journeys every screen shows a still.
  */
-export function passengerLine(cab: Pick<CabSummary, "playerStatus" | "status" | "reportsJourneys" | "playingBuiltIn">) {
+export function passengerLine(
+  cab: Pick<CabSummary, "playerStatus" | "status" | "reportsJourneys" | "playingBuiltIn" | "playerState" | "playbackTrigger">,
+) {
   if (!isSwitchedOn(cab)) return null;
+  if (cab.playerState === "SAFETY" && cab.playerStatus !== "disabled") return "Safety message playing";
   if (cab.playingBuiltIn && cab.playerStatus !== "disabled" && cab.playerStatus !== "error") return "Showing its built-in video";
+  if (cab.playbackTrigger === "always") {
+    // No passenger detection: the loop plays continuously.
+    if (cab.playerStatus === "journey") return "Playing the video continuously";
+    if (cab.playerStatus === "silent") return "Playing the video continuously, muted";
+  }
   switch (cab.playerStatus) {
     case "fallback":
       return "Showing its built-in video";
@@ -85,6 +107,8 @@ export function contentLine(cab: CabSummary) {
     return cab.playing ? quoted(cab.playing.name) : cab.playingBuiltIn ? "Its built-in video" : "Nothing yet";
   }
   if (cab.status === "updating") {
+    if (cab.sync?.state === "failing") return `Can’t fetch ${quoted(cab.expected.name)} yet`;
+    if (cab.sync?.state === "downloading") return `Downloading ${quoted(cab.expected.name)}`;
     return cab.playingBuiltIn ? `Built-in video, fetching ${quoted(cab.expected.name)}` : `Switching to ${quoted(cab.expected.name)}`;
   }
   if (cab.status === "paused") return `${quoted(cab.expected.name)} when resumed`;
@@ -280,7 +304,8 @@ export function changeIsInPlace(overview: Overview, target: AssignTarget, loopId
  * 0-100 quality percentage through NetworkManager (positive). Firmware 1.2.0 sends `signalPercent`
  * separately.
  */
-export function signalWords(signalStrength: number | null, signalPercent?: number | null) {
+export function signalWords(signalStrength: number | null, signalPercent?: number | null, signalDbm?: number | null) {
+  if (typeof signalPercent !== "number" && typeof signalDbm === "number") signalStrength = signalDbm;
   const percent =
     typeof signalPercent === "number" ? signalPercent : signalStrength !== null && signalStrength > 0 && signalStrength <= 100 ? signalStrength : null;
   if (percent !== null) {
@@ -293,3 +318,17 @@ export function signalWords(signalStrength: number | null, signalPercent?: numbe
   return `${label} (${dbm} dBm)`;
 }
 
+
+/** "Couldn't fetch “X”: disk full. Tries again at 14:05." for a cab whose update keeps failing. */
+export function updateFailureText(cab: Pick<CabSummary, "sync" | "expected">, now = new Date()) {
+  const sync = cab.sync;
+  if (!sync) return "";
+  const what = sync.failedLoop ?? cab.expected;
+  const reason = sync.error ? `${sync.error.replace(/\.$/, "")}.` : "It gave no reason.";
+  const retry = sync.nextRetryAt
+    ? new Date(sync.nextRetryAt).getTime() > now.getTime()
+      ? ` It tries again ${whenLong(sync.nextRetryAt, now)}.`
+      : " It should try again any moment."
+    : "";
+  return `${what ? `Couldn’t fetch ${quoted(what.name)}: ` : ""}${reason}${retry}`;
+}
