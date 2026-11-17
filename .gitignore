@@ -9,7 +9,10 @@ build
 .env.*.local
 coverage
 tmp
-uploads
+# Local upload folders at the root only. A bare `uploads` here once ignored the upload API
+# routes (src/app/api/uploads), so they were never committed; keep this anchored.
+/uploads/
+/apps/web/uploads/
 *.log
 pnpm-lock.yaml
 yarn.lock
