@@ -36,7 +36,7 @@ async function disableDevice(request: Request, params: Props["params"], actor: P
     },
   });
 
-  await logActivity("DEVICE_DISABLED", `Device ${device.serialNumber} disabled by ${actor.name}`, {
+  await logActivity("DEVICE_DISABLED", `Cab ${device.serialNumber} paused by ${actor.name}`, {
     deviceId: device.id,
     serialNumber: device.serialNumber,
     reason: body.reason ?? null,

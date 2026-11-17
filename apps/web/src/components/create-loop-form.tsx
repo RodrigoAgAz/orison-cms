@@ -29,10 +29,10 @@ export function CreateLoopForm() {
 
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      const message = body?.error ?? "Unable to create loop";
+      const message = body?.error ?? "The loop could not be created.";
       setError(message);
       toast({
-        title: "Loop creation failed",
+        title: "Not created",
         message,
         tone: "error",
       });
@@ -43,7 +43,7 @@ export function CreateLoopForm() {
     const body = (await response.json()) as { id: string };
     toast({
       title: "Loop created",
-      message: `${name} is ready in the builder.`,
+      message: `"${name.trim()}" is open in the builder.`,
       tone: "success",
     });
     router.push(`/loops/${body.id}`);
@@ -51,15 +51,15 @@ export function CreateLoopForm() {
 
   return (
     <form className="inline-form" onSubmit={handleSubmit}>
-      <input name="name" placeholder="Week 12 - 2026" required />
+      <input aria-label="Name of the new loop" maxLength={120} minLength={2} name="name" placeholder="e.g. DAZN 26 Oct rotation" required />
       <button className="button button-primary" disabled={loading} type="submit">
         {loading ? (
           <span className="button-inline">
             <span aria-hidden className="button-spinner" />
-            Creating loop
+            Creating
           </span>
         ) : (
-          "Create Loop"
+          "Create loop"
         )}
       </button>
       {error ? <span className="error-text">{error}</span> : null}

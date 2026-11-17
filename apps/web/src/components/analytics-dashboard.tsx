@@ -19,6 +19,7 @@ type Props = {
       stillShowingsToday: number;
       fillerPlays: number;
       safetyPlays: number;
+      loopPasses: number;
     };
     completion: { measuredPlays: number; completedPlays: number; ratePercent: number | null };
     busiestDay: { day: string; advertPlays: number } | null;
@@ -180,6 +181,14 @@ export function AnalyticsDashboard({ analytics }: Props) {
         <StatCard hint="Times the safety message started." label="Safety message plays (30 days)" value={analytics.totals.safetyPlays} />
       </section>
 
+      <section className="stats-grid">
+        <StatCard
+          hint="Full passes of a directly uploaded loop video (firmware 1.2.0+). Counted apart from advert plays: the CMS does not know which adverts are inside such a video."
+          label="Uploaded-video passes (30 days)"
+          value={analytics.totals.loopPasses}
+        />
+      </section>
+
       <div className="card card-toolbar">
         <div>
           <span className="eyebrow">Export</span>
@@ -263,7 +272,7 @@ export function AnalyticsDashboard({ analytics }: Props) {
       </div>
 
       <div className="grid-two analytics-grid">
-        <section className="card stack">
+        <section className="card stack" style={{ alignContent: "start" }}>
           <div className="card-header">
             <div>
               <span className="eyebrow">Adverts</span>
@@ -277,12 +286,12 @@ export function AnalyticsDashboard({ analytics }: Props) {
               <p>Each advert&apos;s plays appear here.</p>
             </div>
           ) : (
-            <div className="chart-list">
+            <div className="chart-list" style={{ alignContent: "start" }}>
               {analytics.adBreakdown.map((entry) => (
                 <div className="activity-item" key={entry.assetId}>
                   <strong>{entry.label}</strong>
                   <div className="muted">
-                    {entry.plays} plays ·{" "}
+                    {entry.plays} {entry.plays === 1 ? "play" : "plays"} ·{" "}
                     {entry.completionPercent === null
                       ? "completion not measured"
                       : `${entry.completionPercent}% ran to the end (of ${entry.measuredPlays} measured)`}

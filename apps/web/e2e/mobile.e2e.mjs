@@ -692,7 +692,7 @@ async function productionScreens(page, go, base, shape, dazn) {
   await check("production shape, no cabs: home, map and the all-cabs confirmation read sensibly", async () => {
     await prisma.device.update({ where: { id: device.id }, data: { isActive: false } });
     await go("/m");
-    await page.getByText("No cabs yet").first().waitFor();
+    await page.getByRole("heading", { name: "No cabs yet" }).waitFor();
     await page.waitForTimeout(500);
     const home = await mainText(page);
     assertNoDemoAssumptions(home, "home, no cabs");

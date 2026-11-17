@@ -2617,3 +2617,7 @@ textarea {
 .cab-cell-lines .muted {
   font-size: 0.82rem;
 }
+
+.cab-group-select {
+  min-width: 150px;
+}

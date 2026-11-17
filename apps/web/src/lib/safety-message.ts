@@ -16,10 +16,32 @@ export type SafetyMessage = {
   mimeType: string;
 };
 
+/**
+ * What to tell cabs. "none": nothing is configured, so cabs must remove theirs (firmware 1.2.0
+ * treats safetyVideo: null that way). "unusable": something is configured but cannot be served
+ * right now (asset missing, still processing, wrong type): say nothing, so cabs keep what they
+ * have. "ok": serve it.
+ */
+export async function resolveSafetyMessageForCabs(
+  settings?: Awaited<ReturnType<typeof getCmsSettings>>,
+): Promise<{ state: "none" } | { state: "unusable" } | { state: "ok"; message: SafetyMessage }> {
+  const current = settings ?? (await getCmsSettings());
+  if (!current.safetyVideoAssetId) {
+    return { state: "none" };
+  }
+  const message = await loadSafetyMessage(current);
+  return message ? { state: "ok", message } : { state: "unusable" };
+}
+
+/** The configured safety message if it can be served, else null (for display). */
 export async function getConfiguredSafetyMessage(
   settings?: Awaited<ReturnType<typeof getCmsSettings>>,
 ): Promise<SafetyMessage | null> {
   const current = settings ?? (await getCmsSettings());
+  return current.safetyVideoAssetId ? loadSafetyMessage(current) : null;
+}
+
+async function loadSafetyMessage(current: Awaited<ReturnType<typeof getCmsSettings>>): Promise<SafetyMessage | null> {
   if (!current.safetyVideoAssetId) {
     return null;
   }

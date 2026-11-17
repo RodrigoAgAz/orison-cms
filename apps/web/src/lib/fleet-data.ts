@@ -74,6 +74,7 @@ const cabSelect = {
   firmwareVersion: true,
   storageFreeMb: true,
   playerStatus: true,
+  playerState: true,
   playbackTrigger: true,
   signalPercent: true,
   signalDbm: true,
@@ -132,6 +133,7 @@ function describeCabs(
       detectsPassengers: hasPassengerDetection(cab.playbackTrigger),
       // Only an online cab's player state describes "now".
       playerStatusNow: online ? cab.playerStatus ?? "unknown" : null,
+      playerStateNow: online ? cab.playerState : null,
     };
   });
 }
@@ -584,7 +586,7 @@ export async function getAnalyticsData() {
       todayKey: null,
       firstDayKey: null,
       series: [],
-      totals: { advertPlays: 0, advertPlaysToday: 0, stillShowings: 0, stillShowingsToday: 0, fillerPlays: 0, safetyPlays: 0 },
+      totals: { advertPlays: 0, advertPlaysToday: 0, stillShowings: 0, stillShowingsToday: 0, fillerPlays: 0, safetyPlays: 0, loopPasses: 0 },
       completion: { measuredPlays: 0, completedPlays: 0, ratePercent: null },
       busiestDay: null,
       adBreakdown: [],

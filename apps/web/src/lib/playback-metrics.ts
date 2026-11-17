@@ -20,6 +20,7 @@ export type PlaybackKind =
   | "filler" // a filler video, same modes
   | "still" // a still image on screen (idle or muted), counted as "still showings"
   | "safety"
+  | "loop_pass" // one full pass of a directly uploaded (slotless) loop video, firmware 1.2.0+
   | "journey_start"
   | "journey_end"
   | "other";
@@ -33,6 +34,7 @@ export type ClassifiableRow = {
 
 const SAFETY_TYPES = new Set(["SAFETY", "SAFETY_MESSAGE"]);
 const STILL_TYPES = new Set(["STATIC_IMAGE"]);
+const LOOP_PASS_TYPES = new Set(["LOOP_VIDEO"]);
 const STILL_MODES = new Set(["idle", "silent"]);
 const PLAYING_MODES = new Set(["journey", "continuous"]);
 
@@ -48,6 +50,9 @@ export function classifyPlayback(row: ClassifiableRow): PlaybackKind {
   }
   if (row.playbackType && SAFETY_TYPES.has(row.playbackType)) {
     return "safety";
+  }
+  if (row.playbackType && LOOP_PASS_TYPES.has(row.playbackType)) {
+    return "loop_pass";
   }
   if ((row.playbackType && STILL_TYPES.has(row.playbackType)) || (row.mode && STILL_MODES.has(row.mode))) {
     return "still";
@@ -71,6 +76,7 @@ export function playbackKindSql(alias?: string) {
     WHEN ${c("eventName")} = 'JOURNEY_END' THEN 'journey_end'
     WHEN ${c("eventName")} IS NOT NULL THEN 'other'
     WHEN ${c("playbackType")} IN ('SAFETY', 'SAFETY_MESSAGE') THEN 'safety'
+    WHEN ${c("playbackType")} = 'LOOP_VIDEO' THEN 'loop_pass'
     WHEN ${c("playbackType")} = 'STATIC_IMAGE' OR ${c("mode")} IN ('idle', 'silent') THEN 'still'
     WHEN ${c("mode")} IN ('journey', 'continuous') AND ${c("contentType")} = 'ADVERTISEMENT' THEN 'advert'
     WHEN ${c("mode")} IN ('journey', 'continuous') AND ${c("contentType")} = 'FILLER' THEN 'filler'
@@ -91,6 +97,7 @@ export const KIND_LABELS: Record<PlaybackKind, string> = {
   filler: "filler_play",
   still: "still_showing",
   safety: "safety_message",
+  loop_pass: "uploaded_loop_pass",
   journey_start: "journey_start",
   journey_end: "journey_end",
   other: "other",
@@ -119,6 +126,9 @@ export type PlaybackSummary = {
     stillShowingsToday: number;
     fillerPlays: number;
     safetyPlays: number;
+    /** Full passes of directly uploaded loop videos (not split into adverts: the CMS does not
+     * know what is inside such a video). */
+    loopPasses: number;
   };
   journeys: {
     today: number;
@@ -150,6 +160,7 @@ export function summarizePlayback(
     stillShowingsToday: 0,
     fillerPlays: 0,
     safetyPlays: 0,
+    loopPasses: 0,
   };
   const journeys = { today: 0, week: 0, month: 0 };
   let journeyEnds = 0;
@@ -192,6 +203,9 @@ export function summarizePlayback(
         break;
       case "safety":
         totals.safetyPlays += row.plays;
+        break;
+      case "loop_pass":
+        totals.loopPasses += row.plays;
         break;
       case "journey_end":
         journeyEnds += row.plays;

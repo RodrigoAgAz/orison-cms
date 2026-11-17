@@ -131,19 +131,9 @@ export function HomeScreen() {
             {onCount}
           </span>
           <span className="m-hero-of">
-            {data.counts.total === 0 ? (
-              <>
-                no cabs yet
-                <br />
-                they appear when first switched on
-              </>
-            ) : (
-              <>
-                of {plural(data.counts.total, "screen")}
-                <br />
-                on right now
-              </>
-            )}
+            of {plural(data.counts.total, "screen")}
+            <br />
+            on right now
           </span>
         </div>
         {data.counts.total > 0 ? (

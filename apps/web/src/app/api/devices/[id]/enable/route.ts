@@ -29,7 +29,7 @@ async function enableDevice(params: Props["params"], actor: PhoneActor) {
     },
   });
 
-  await logActivity("DEVICE_ENABLED", `Device ${device.serialNumber} enabled by ${actor.name}`, {
+  await logActivity("DEVICE_ENABLED", `Cab ${device.serialNumber} resumed by ${actor.name}`, {
     deviceId: device.id,
     serialNumber: device.serialNumber,
     ...actorMetadata(actor),

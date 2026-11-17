@@ -10,15 +10,18 @@
   "scripts": {
     "dev": "npm run dev --workspace @orison/web --",
     "dev:web": "npm run dev --workspace @orison/web --",
-    "dev:worker": "npm run dev --workspace @orison/worker --",
-    "build": "npm run build --workspace @orison/web && npm run build --workspace @orison/worker",
-    "lint": "npm run lint --workspace @orison/web && npm run lint --workspace @orison/worker",
-    "typecheck": "npm run typecheck --workspace @orison/shared && npm run typecheck --workspace @orison/db && npm run typecheck --workspace @orison/web && npm run typecheck --workspace @orison/worker",
+    "build": "npm run build --workspace @orison/web",
+    "typecheck": "npm run typecheck --workspace @orison/shared && npm run typecheck --workspace @orison/db && npm run typecheck --workspace @orison/web",
     "db:generate": "npm run prisma:generate --workspace @orison/db",
     "db:push": "npm run prisma:push --workspace @orison/db",
     "db:seed": "npm run prisma:seed --workspace @orison/db",
     "test": "node --import tsx --test apps/web/test/*.test.ts",
+    "test:device": "cd device && python3 -m unittest discover -s tests -t .",
+    "test:e2e:mobile": "node apps/web/e2e/mobile.e2e.mjs",
     "demo:seed": "node --import tsx scripts/demo/seed.ts",
     "demo:heartbeat": "node --import tsx scripts/demo/heartbeat.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1"
   }
 }

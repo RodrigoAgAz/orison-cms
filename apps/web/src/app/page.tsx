@@ -220,7 +220,7 @@ export default async function DashboardPage() {
                   <div className="ops-fleet-node-pills">
                     <StatusPill value={cab.status} />
                     <span className={activityClass(cab.playerStatusNow)}>
-                      {screenActivityLabel(cab.playerStatusNow, cab.playbackTrigger, cab.online)}
+                      {screenActivityLabel(cab.playerStatusNow, cab.playbackTrigger, cab.online, cab.playerStateNow)}
                     </span>
                     <span className="ops-mini-chip">{cab.group?.name ?? "No group"}</span>
                   </div>

@@ -102,7 +102,8 @@ function fetchBatch(from: Date, to: Date, after: { playedAt: Date; id: string } 
   return prisma.$queryRaw<ExportRow[]>`
     SELECT p.id, p."playedAt", d."serialNumber", d."cabLicenseNumber",
            ${Prisma.raw(playbackKindSql("p"))} AS kind,
-           p."loopId", l.name AS "loopName", p."slotPosition", p."contentType"::text AS "contentType",
+           p."loopId",
+           CASE WHEN p."loopId" = 'fallback' THEN 'Standby video (built into the cab)' ELSE l.name END AS "loopName", p."slotPosition", p."contentType"::text AS "contentType",
            p."playbackType", p."eventName", p."assetId", a.filename AS "assetFilename", p.mode, p."playerState",
            p."completedFull", p."durationMs", p."journeyId", p."eventId",
            CASE WHEN p."eventName" IN ('JOURNEY_START', 'JOURNEY_END') THEN p."locationData" END AS "journeyLocation"

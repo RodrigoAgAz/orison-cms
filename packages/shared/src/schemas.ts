@@ -13,7 +13,6 @@ import {
   loopStatuses,
   playbackModes,
   playerStates,
-  queueNames,
   slotContentTypes,
   userRoles,
 } from "./constants";
@@ -129,6 +128,9 @@ export const heartbeatSchema = z.object({
   location: jsonObjectSchema.nullable().optional(),
   // Firmware 1.2.0+ (all optional; older firmware sends none of them).
   playbackTrigger: lenient(z.enum(playbackTriggers)),
+  // Fine-grained player state (IDLE, SAFETY, JOURNEY, ...); diagnostics such as logQueue and
+  // display are not stored and are stripped.
+  playerState: lenient(z.string().max(32)),
   signalPercent: lenient(z.number().min(0).max(100)),
   safetyChecksum: lenient(z.string().max(128)),
   sync: lenient(heartbeatSyncSchema),
@@ -179,23 +181,6 @@ export const settingsSchema = z.object({
   safetyMessageDurationSeconds: z.number().int().min(1).max(300).default(8),
 });
 
-export const assetProcessingJobSchema = z.object({
-  assetId: z.string(),
-  tempFilePath: z.string(),
-});
-
-export const publishLoopJobSchema = z.object({
-  loopId: z.string(),
-  publishedByUserId: z.string(),
-});
-
-export const queueNameSchema = z.enum([
-  queueNames.assetProcessing,
-  queueNames.loopPublish,
-  queueNames.weatherGeneration,
-  queueNames.newsGeneration,
-]);
-
 export const deviceManifestResponseSchema = z.object({
   loopId: z.string(),
   manifestUrl: z.string().url(),
@@ -212,7 +197,8 @@ export const deviceManifestResponseSchema = z.object({
       durationMs: z.number().int().positive(),
       mimeType: z.string(),
     })
-    .nullable(),
+    .nullable()
+    .optional(),
 });
 
 export type SlotContentInput = z.infer<typeof slotContentInputSchema>;
@@ -226,6 +212,4 @@ export type DeviceHeartbeatInput = z.infer<typeof heartbeatSchema>;
 export type PlaybackLogBatchInput = z.infer<typeof playbackLogBatchSchema>;
 export type PlaybackLogEntryInput = z.infer<typeof playbackLogEntrySchema>;
 export type SettingsInput = z.infer<typeof settingsSchema>;
-export type AssetProcessingJob = z.infer<typeof assetProcessingJobSchema>;
-export type PublishLoopJob = z.infer<typeof publishLoopJobSchema>;
 export type DeviceManifestResponse = z.infer<typeof deviceManifestResponseSchema>;

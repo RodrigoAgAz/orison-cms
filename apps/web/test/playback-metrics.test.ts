@@ -51,6 +51,11 @@ describe("classifyPlayback", () => {
     assert.equal(classifyPlayback(v12.continuousAdvert), "advert");
   });
 
+  it("counts a directly uploaded loop's full pass as a loop pass, not an advert", () => {
+    assert.equal(classifyPlayback({ eventName: null, contentType: null, playbackType: "LOOP_VIDEO", mode: "continuous" }), "loop_pass");
+    assert.equal(classifyPlayback({ eventName: null, contentType: null, playbackType: "LOOP_VIDEO", mode: "journey" }), "loop_pass");
+  });
+
   it("puts anything unrecognised in 'other'", () => {
     assert.equal(classifyPlayback({ eventName: null, contentType: "ADVERTISEMENT", playbackType: null, mode: null }), "other");
     assert.equal(classifyPlayback({ eventName: "SOMETHING", contentType: "ADVERTISEMENT", playbackType: null, mode: "journey" }), "other");

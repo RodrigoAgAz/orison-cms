@@ -21,7 +21,6 @@ export const env = {
   // NextAuth) and is still read so existing deployments keep their sessions.
   sessionSecret: optionalEnv("SESSION_SECRET") ?? requiredEnv("NEXTAUTH_SECRET", "development-session-secret"),
   databaseUrl: requiredEnv("DATABASE_URL", "postgresql://orison:password@localhost:5432/orison_cms"),
-  redisUrl: optionalEnv("REDIS_URL"),
   s3Bucket: optionalEnv("S3_BUCKET"),
   s3Region: requiredEnv("S3_REGION", "eu-west-2"),
   s3Endpoint: optionalEnv("AWS_ENDPOINT"),
@@ -29,7 +28,6 @@ export const env = {
   awsAccessKeyId: optionalEnv("AWS_ACCESS_KEY_ID"),
   awsSecretAccessKey: optionalEnv("AWS_SECRET_ACCESS_KEY"),
   deviceSharedToken: requiredEnv("DEVICE_SHARED_TOKEN", "replace-with-device-shared-secret"),
-  inlineMediaJobs: requiredEnv("INLINE_MEDIA_JOBS", "true") === "true",
   // Cell tower geolocation (heartbeats without a GPS fix).
   openCellIdApiKey: optionalEnv("OPENCELLID_API_KEY"),
   cellLookupDisablePublic: requiredEnv("CELL_LOOKUP_DISABLE_PUBLIC", "false") === "true",

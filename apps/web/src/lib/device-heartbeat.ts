@@ -45,6 +45,7 @@ type DeviceFields = Partial<{
   lastHeartbeatAt: Date;
   lastSyncAt: Date;
   playerStatus: string | null;
+  playerState: string | null;
   playbackTrigger: string | null;
   signalPercent: number | null;
   signalDbm: number | null;
@@ -96,6 +97,9 @@ export function applyHeartbeat(
     fields.networkType = carried(body.networkType);
     fields.statusReportedAt = now;
   }
+  if (body.playerState !== undefined) {
+    fields.playerState = body.playerState;
+  }
   if (body.playbackTrigger !== undefined) {
     fields.playbackTrigger = body.playbackTrigger;
   }
@@ -120,7 +124,8 @@ export function applyHeartbeat(
   if (sync) {
     // Firmware 1.2.0+: the cab says how its sync is going.
     fields.syncState = sync.state;
-    fields.syncError = sync.state === "failed" ? sync.error ?? "Sync failed (no reason given)" : null;
+    // An "ok" state may carry an explanation too (firmware 1.2.0: nothing assigned to this cab).
+    fields.syncError = sync.state === "failed" ? sync.error ?? "Sync failed (no reason given)" : sync.error ?? null;
     fields.syncFailedLoopId = sync.state === "failed" ? sync.failedLoopId ?? null : null;
     fields.syncStateSince = parseTime(sync.since) ?? (previous?.syncState === sync.state ? undefined : now);
     fields.syncNextRetryAt = parseTime(sync.nextRetryAt);

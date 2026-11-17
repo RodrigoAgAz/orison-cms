@@ -49,13 +49,6 @@ export const devicePlayerStatuses = ["playing", "silent", "disabled", "idle", "f
 export const deviceNetworkTypes = ["4g", "ethernet", "wifi", "unknown"] as const;
 export const playerStates = ["IDLE", "SAFETY", "JOURNEY", "SILENT", "WIND_DOWN", "DISABLED"] as const;
 
-export const queueNames = {
-  assetProcessing: "asset-processing",
-  loopPublish: "loop-publish",
-  weatherGeneration: "weather-generation",
-  newsGeneration: "news-generation",
-} as const;
-
 export const defaultFillerTemplate = [
   {
     category: "FILLER_WEATHER",

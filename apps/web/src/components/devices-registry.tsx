@@ -38,6 +38,7 @@ type DeviceItem = {
   lastSyncAt: string | null;
   lastHeartbeatAt: string | null;
   playerStatusNow: string | null;
+  playerStateNow: string | null;
   playbackTrigger: string | null;
   signalPercent: number | null;
   signalDbm: number | null;
@@ -491,6 +492,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                       </td>
                       <td>
                         <select
+                          className="cab-group-select"
                           disabled={busyDeviceId === device.id}
                           onChange={(event) => void assignGroup(device.id, event.target.value)}
                           value={device.groupId ?? ""}
@@ -541,7 +543,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                       </td>
                       <td>
                         <div className="cab-cell-lines">
-                          <span>{screenActivityLabel(device.playerStatusNow, device.playbackTrigger, device.online)}</span>
+                          <span>{screenActivityLabel(device.playerStatusNow, device.playbackTrigger, device.online, device.playerStateNow)}</span>
                           <span className="muted">{triggerLabel(device.playbackTrigger)}</span>
                         </div>
                       </td>

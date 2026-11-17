@@ -181,10 +181,12 @@ export function summarizeSync(device: SyncDevice, expectedLoopId: string | null)
   if (expectedLoopId && device.currentLoopId !== expectedLoopId) {
     return { ...base, state: "waiting", label: "Not on the expected loop yet", error: null };
   }
+  // With state "ok" the cab may still explain itself (e.g. nothing assigned): shown as a note.
+  const note = device.syncState === "ok" && device.syncError ? ` (${device.syncError})` : "";
   if (!device.currentLoopId && !expectedLoopId) {
-    return { ...base, state: "unknown", label: "Nothing to play", error: null };
+    return { ...base, state: "unknown", label: `Nothing to play${note}`, error: null };
   }
-  return { ...base, state: "current", label: "Up to date", error: null };
+  return { ...base, state: "current", label: `Up to date${note}`, error: null };
 }
 
 /**
@@ -201,9 +203,13 @@ export function screenActivityLabel(
   playerStatus: string | null | undefined,
   playbackTrigger: string | null | undefined,
   online: boolean,
+  playerState?: string | null,
 ) {
   if (!online) {
     return "Not reporting";
+  }
+  if (playerState === "SAFETY" && playerStatus !== "disabled") {
+    return "Safety message playing";
   }
   const detects = hasPassengerDetection(playbackTrigger);
   switch (playerStatus) {

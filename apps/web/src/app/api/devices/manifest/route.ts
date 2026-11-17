@@ -8,7 +8,7 @@ import { getFleetControlState } from "@/lib/fleet-control";
 import { apiError, apiResponse, ApiError } from "@/lib/http";
 import { getLoopRoutingSnapshot, resolveDeviceLoop } from "@/lib/loop-routing";
 import { enforceDeviceRateLimit } from "@/lib/rate-limit";
-import { getConfiguredSafetyMessage } from "@/lib/safety-message";
+import { resolveSafetyMessageForCabs } from "@/lib/safety-message";
 import { rebaseStorageUrl, requestOrigin } from "@/lib/storage-urls";
 
 export async function GET(request: NextRequest) {
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
       requireDevice(request, serialNumber),
       getLoopRoutingSnapshot(),
       getFleetControlState(),
-      getConfiguredSafetyMessage(),
+      resolveSafetyMessageForCabs(),
     ]);
 
     const { loop } = resolveDeviceLoop(device, routing);
@@ -51,14 +51,20 @@ export async function GET(request: NextRequest) {
         disabledReason: device.isDisabled ? device.disabledReason : fleetControl.reason,
         // The safety message configured now, not the one frozen into the loop's manifest file
         // (firmware 1.2.0+ uses this; older firmware keeps reading the file's copy).
-        safetyVideo: safety
-          ? {
-              url: rebaseStorageUrl(safety.url, origin),
-              checksum: safety.checksum ?? "",
-              durationMs: safety.durationMs,
-              mimeType: safety.mimeType,
-            }
-          : null,
+        // Key left out (no opinion) when the configured message cannot be served right now.
+        ...(safety.state === "unusable"
+          ? {}
+          : {
+              safetyVideo:
+                safety.state === "ok"
+                  ? {
+                      url: rebaseStorageUrl(safety.message.url, origin),
+                      checksum: safety.message.checksum ?? "",
+                      durationMs: safety.message.durationMs,
+                      mimeType: safety.message.mimeType,
+                    }
+                  : null,
+            }),
       }),
     );
   } catch (error) {

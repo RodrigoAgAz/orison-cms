@@ -12,7 +12,7 @@ import { getFleetControlState } from "@/lib/fleet-control";
 import { apiError, apiResponse, parseJsonBody } from "@/lib/http";
 import { getLoopRoutingSnapshot, resolveDeviceLoop } from "@/lib/loop-routing";
 import { enforceDeviceRateLimit } from "@/lib/rate-limit";
-import { getConfiguredSafetyMessage } from "@/lib/safety-message";
+import { resolveSafetyMessageForCabs } from "@/lib/safety-message";
 
 // What firmware 1.2.0+ may adopt from the response (it clamps them itself as well).
 function clamp(value: number, min: number, max: number) {
@@ -100,6 +100,7 @@ export async function POST(request: NextRequest) {
         // Stored as sent (old firmware: a percentage); the normalised figures are on the Device.
         signalStrength: body.signalStrength,
         signalPercent: fields.signalPercent,
+        playerState: body.playerState,
         playbackTrigger: body.playbackTrigger,
         safetyChecksum: body.safetyChecksum,
         syncState: body.sync?.state,
@@ -114,7 +115,7 @@ export async function POST(request: NextRequest) {
     }
 
     const expected = resolveDeviceLoop(device, snapshot);
-    const safety = await getConfiguredSafetyMessage(settings);
+    const safety = await resolveSafetyMessageForCabs(settings);
 
     return apiResponse({
       ok: true,
@@ -122,9 +123,14 @@ export async function POST(request: NextRequest) {
       expectedLoopId: expected.loop?.id ?? null,
       expectedChecksum: expected.loop?.checksum ?? null,
       disabled: device.isDisabled || fleetControl.disabled,
-      // DEVICE_CONTRACT_V2 (firmware 1.2.0+; older firmware ignores both). The key is left out
-      // when a configured safety message has no checksum to compare with ("no opinion").
-      ...(safety && !safety.checksum ? {} : { expectedSafetyChecksum: safety?.checksum ?? null }),
+      // DEVICE_CONTRACT_V2 (firmware 1.2.0+; older firmware ignores both). null = no safety
+      // message configured. The key is left out ("no opinion") when the configured one cannot be
+      // served right now or has no checksum to compare with.
+      ...(safety.state === "none"
+        ? { expectedSafetyChecksum: null }
+        : safety.state === "ok" && safety.message.checksum
+          ? { expectedSafetyChecksum: safety.message.checksum }
+          : {}),
       config: {
         heartbeatIntervalSeconds: clamp(settings.heartbeatIntervalSeconds, 60, 3600),
         syncIntervalSeconds: clamp(settings.syncIntervalSeconds, 300, 86400),

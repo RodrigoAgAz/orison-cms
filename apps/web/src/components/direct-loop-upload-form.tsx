@@ -8,6 +8,7 @@ import {
   directLoopUploadMaxDurationMs,
 } from "@orison/shared/src/constants";
 
+import { ConfirmDialog, type ConfirmRequest } from "@/components/loop-ui";
 import { useToast } from "@/components/toast-provider";
 
 function formatFileSize(bytes: number) {
@@ -18,12 +19,15 @@ function formatFileSize(bytes: number) {
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
-export function DirectLoopUploadForm() {
+export function DirectLoopUploadForm({ deviceGroups }: { deviceGroups: Array<{ id: string; name: string }> }) {
   const router = useRouter();
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const progressTimerRef = useRef<number | null>(null);
   const [name, setName] = useState("");
+  // Where it plays once ready; by default it is kept off air until someone puts it on.
+  const [target, setTarget] = useState("library");
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,15 +76,15 @@ export function DirectLoopUploadForm() {
 
   function validateFile(file: File | null) {
     if (!file) {
-      return "Choose an MP4 file to upload.";
+      return "Choose a video file to upload.";
     }
 
-    if (!file.name.toLowerCase().endsWith(".mp4")) {
-      return "Direct loop uploads must be provided as an .mp4 file.";
+    if (!/\.(mp4|mov|m4v)$/i.test(file.name)) {
+      return "Pre-built loops must be an MP4 or MOV file.";
     }
 
     if (file.size > directLoopUploadMaxBytes) {
-      return `Direct loop uploads are limited to ${Math.round(
+      return `Pre-built loops are limited to ${Math.round(
         directLoopUploadMaxBytes / (1024 * 1024),
       )}MB.`;
     }
@@ -93,19 +97,33 @@ export function DirectLoopUploadForm() {
     setError(validateFile(file));
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!name.trim()) {
-      setError("Enter a loop name before uploading.");
+    if (name.trim().length < 2) {
+      setError("Name must be at least 2 characters.");
       return;
     }
 
     const fileError = validateFile(selectedFile);
     if (fileError || !selectedFile) {
-      setError(fileError ?? "Choose an MP4 file to upload.");
+      setError(fileError ?? "Choose a video file to upload.");
       return;
     }
+    if (target === "library") {
+      void upload(selectedFile);
+      return;
+    }
+    const where = target === "all" ? "all cabs" : `group ${deviceGroups.find((group) => group.id === target)?.name ?? "?"}`;
+    setConfirm({
+      title: `Put it on air for ${where}?`,
+      message: `As soon as it has been converted, "${name.trim()}" replaces what ${where} play${target === "all" ? "" : "s"} now. Choose "Keep it off air" to check it first.`,
+      confirmLabel: "Upload and put on air",
+      onConfirm: () => upload(selectedFile),
+    });
+  }
+
+  async function upload(selectedFile: File) {
 
     setError(null);
     setUploadState({
@@ -122,6 +140,7 @@ export function DirectLoopUploadForm() {
         const params = new URLSearchParams({
           name: name.trim(),
           filename: selectedFile.name,
+          target,
         });
 
         const parseResponseBody = () => {
@@ -136,8 +155,8 @@ export function DirectLoopUploadForm() {
             return {
               error:
                 request.status >= 500
-                  ? `The server returned an invalid ${request.status} response while processing the loop. Check Railway logs for the upstream error.`
-                  : responseText || `Upload failed with HTTP ${request.status}.`,
+                  ? "The server could not finish converting this video. Try again; if it fails again, the details are in the server log."
+                  : responseText || `Upload failed (HTTP ${request.status}).`,
             };
           }
         };
@@ -166,7 +185,7 @@ export function DirectLoopUploadForm() {
           resolve({
             ok: false,
             body: {
-              error: "Upload failed. Check the deployment logs and try again.",
+              error: "The upload was interrupted. Check the connection and try again.",
             },
           });
         };
@@ -176,7 +195,7 @@ export function DirectLoopUploadForm() {
           resolve({
             ok: false,
             body: {
-              error: "Upload canceled before the loop finished publishing.",
+              error: "The upload was cancelled.",
             },
           });
         };
@@ -200,10 +219,10 @@ export function DirectLoopUploadForm() {
         phase: "idle",
         progress: 0,
       });
-      setError(result.body.error ?? "Direct loop upload failed.");
+      setError(result.body.error ?? "The upload failed.");
       toast({
         title: "Upload failed",
-        message: result.body.error ?? "The pre-built loop could not be published.",
+        message: result.body.error ?? "The pre-built loop could not be saved.",
         tone: "error",
       });
       return;
@@ -214,8 +233,8 @@ export function DirectLoopUploadForm() {
       progress: 100,
     });
     toast({
-      title: "Loop published",
-      message: "The pre-built loop was transcoded, uploaded, and published successfully.",
+      title: target === "library" ? "Loop saved" : "Loop on air",
+      message: target === "library" ? "It is off air until you put it on." : "It was converted and is on air.",
       tone: "success",
     });
     resetForm();
@@ -226,11 +245,11 @@ export function DirectLoopUploadForm() {
   return (
     <form className="asset-upload-stack" onSubmit={handleSubmit}>
       <label className="field">
-        <span>Loop Name</span>
+        <span>Name</span>
         <input
           maxLength={120}
           onChange={(event) => setName(event.target.value)}
-          placeholder="Week 12 - Direct Master"
+          placeholder="e.g. DAZN finished edit, 10 min"
           required
           value={name}
         />
@@ -258,14 +277,14 @@ export function DirectLoopUploadForm() {
         }}
       >
         <input
-          accept=".mp4,video/mp4"
+          accept=".mp4,.mov,.m4v,video/mp4,video/quicktime"
           hidden
           onChange={(event) => handleFileSelect(event.target.files?.[0] ?? null)}
           ref={inputRef}
           type="file"
         />
-        <span className="drop-zone-kicker">Upload Pre-built Loop</span>
-        <strong>Drop a finished pre-built loop MP4 here or click to browse</strong>
+        <span className="drop-zone-kicker">Video file</span>
+        <strong>Drop the finished video here, or click to choose it</strong>
         <span className="muted">
           {selectedFile
             ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}`
@@ -279,7 +298,7 @@ export function DirectLoopUploadForm() {
         <div className="upload-progress-card">
           <div className="card-header">
             <strong>
-              {uploadState.phase === "uploading" ? "Uploading master loop" : "Transcoding and publishing"}
+              {uploadState.phase === "uploading" ? "Uploading" : "Converting to the cab format"}
             </strong>
             <span>{uploadState.progress}%</span>
           </div>
@@ -288,11 +307,24 @@ export function DirectLoopUploadForm() {
           </div>
           <span className="muted">
             {uploadState.phase === "uploading"
-              ? "The MP4 is being streamed to the CMS."
-              : "The uploaded file is being checked, normalized if needed, stored, and published to devices."}
+              ? "Keep this page open until the upload finishes."
+              : "The video is being checked and converted. This can take a few minutes for a long video."}
           </span>
         </div>
       ) : null}
+
+      <label className="field">
+        <span>When it is ready</span>
+        <select onChange={(event) => setTarget(event.target.value)} value={target}>
+          <option value="library">Keep it off air (put it on later)</option>
+          <option value="all">Put it on air for all cabs</option>
+          {deviceGroups.map((group) => (
+            <option key={group.id} value={group.id}>
+              Put it on air for group {group.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {error ? <div className="alert alert-danger">{error}</div> : null}
 
@@ -302,9 +334,10 @@ export function DirectLoopUploadForm() {
           disabled={!selectedFile || uploadState.phase !== "idle" || !name.trim()}
           type="submit"
         >
-          {uploadState.phase === "idle" ? "Upload and Publish" : "Processing..."}
+          {uploadState.phase === "idle" ? (target === "library" ? "Upload" : "Upload and put on air") : "Working…"}
         </button>
       </div>
+      {confirm ? <ConfirmDialog onClose={() => setConfirm(null)} request={confirm} /> : null}
     </form>
   );
 }

@@ -13,7 +13,7 @@ export async function PUT() {
       reason: null,
     });
 
-    await logActivity("DEVICE_ENABLED", "Entire fleet enabled", {
+    await logActivity("DEVICE_ENABLED", "All cabs resumed", {
       scope: "ALL_DEVICES",
     });
 

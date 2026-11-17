@@ -111,6 +111,26 @@ describe("applyHeartbeat", () => {
   });
 });
 
+describe("firmware 1.2.0 extras", () => {
+  it("stores playerState and keeps an ok-state explanation without raising SYNC_FAILED", () => {
+    const body = heartbeatSchema.parse({
+      serialNumber: "RodrigoCab",
+      playerStatus: "playing",
+      playerState: "SAFETY",
+      logQueue: { pending: 3 },
+      display: { connected: true },
+      sync: { state: "ok", error: "No loop is assigned to this cab (manifest 404)" },
+    });
+    const { fields, activity } = applyHeartbeat(body, previous, now);
+    assert.equal(fields.playerState, "SAFETY");
+    assert.equal(fields.syncError, "No loop is assigned to this cab (manifest 404)");
+    assert.deepEqual(activity, []);
+    assert.equal("logQueue" in body, false);
+    assert.equal(screenActivityLabel("playing", "gpio", true, "SAFETY"), "Safety message playing");
+    assert.match(summarizeSync({ currentLoopId: null, lastSyncAt: null, syncState: "ok", syncError: "nothing assigned" }, null).label, /nothing assigned/);
+  });
+});
+
 describe("status wording", () => {
   it("shows sync trouble instead of 'updating' forever", () => {
     const failing = summarizeSync(

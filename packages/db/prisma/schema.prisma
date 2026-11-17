@@ -197,6 +197,8 @@ model Device {
   // Latest state reported in heartbeats, kept here so list pages never read DeviceHeartbeat.
   // statusReportedAt is when the heartbeat that set them arrived (null: none since this existed).
   playerStatus     String?
+  // Fine-grained player state from firmware 1.2.0+ (IDLE, SAFETY, JOURNEY, SILENT, ...).
+  playerState      String?
   // How journeys start: "gpio" | "keyboard" | "always" (no passenger detection). Null: firmware
   // older than 1.2.0, which always has passenger detection.
   playbackTrigger  String?
@@ -234,6 +236,7 @@ model DeviceHeartbeat {
   // As sent: dBm when negative; old firmware sends a 0-100 quality percentage here.
   signalStrength    Int?
   signalPercent     Int?
+  playerState       String?
   playbackTrigger   String?
   safetyChecksum    String?
   syncState         String?

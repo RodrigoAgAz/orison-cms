@@ -21,7 +21,7 @@ export async function PUT(request: Request) {
       reason: body.reason ?? null,
     });
 
-    await logActivity("DEVICE_DISABLED", "Entire fleet disabled", {
+    await logActivity("DEVICE_DISABLED", "All cabs paused", {
       scope: "ALL_DEVICES",
       reason: body.reason ?? null,
     });

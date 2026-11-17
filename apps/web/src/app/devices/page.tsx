@@ -66,6 +66,7 @@ export default async function DevicesPage({ searchParams }: Props) {
           lastSyncAt: iso(cab.lastSyncAt),
           lastHeartbeatAt: iso(cab.lastHeartbeatAt),
           playerStatusNow: cab.playerStatusNow,
+          playerStateNow: cab.playerStateNow,
           playbackTrigger: cab.playbackTrigger,
           signalPercent: cab.signalPercent,
           signalDbm: cab.signalDbm,

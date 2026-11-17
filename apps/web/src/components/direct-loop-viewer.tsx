@@ -1,189 +1,160 @@
 "use client";
 
-import Link from "next/link";
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-import { StatusPill } from "@/components/status-pill";
+import { requestDelete, requestPause } from "@/components/loop-actions-client";
+import { ConfirmDialog, LoopStatusBadge, formatDuration, formatWhen, readError, type ConfirmRequest, type LoopStateView } from "@/components/loop-ui";
 import { useToast } from "@/components/toast-provider";
 
 type Props = {
   loop: {
     id: string;
     name: string;
-    status: string;
-    compiledVideoUrl: string | null;
+    videoUrl: string | null;
     manifestUrl: string | null;
-    publishedAt: string | null;
-    updatedAt: string;
+    durationMs: number | null;
+    targetGroupId: string | null;
   };
+  state: LoopStateView;
+  deviceGroups: Array<{ id: string; name: string }>;
 };
 
-export function DirectLoopViewer({ loop }: Props) {
+/** A pre-built loop: one uploaded video, no slots. */
+export function DirectLoopViewer({ loop, state, deviceGroups }: Props) {
   const router = useRouter();
   const { toast } = useToast();
-  const [status, setStatus] = useState(loop.status);
-  const [processing, setProcessing] = useState<"archive" | "delete" | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  const [busy, setBusy] = useState(false);
+  const phone = state.kind === "phone";
 
-  async function archiveLoop() {
-    const confirmed = window.confirm(`Pause published loop "${loop.name}"?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setProcessing("archive");
-
+  async function changeTarget(nextId: string, token?: string) {
+    setBusy(true);
     try {
-      const response = await fetch(`/api/loops/${loop.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ status: "ARCHIVED" }),
+      const response = await fetch(`/api/loops/${loop.id}/target`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetGroupId: nextId || null, token: token ?? null }),
       });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to pause loop");
+      if (!response.ok) throw new Error(await readError(response, "The target could not be changed."));
+      const body = (await response.json()) as { needsConfirmation?: boolean; message?: string; lines: string[]; token?: string };
+      if (body.needsConfirmation) {
+        setConfirm({
+          title: "Change where this loop plays?",
+          message: body.message ?? "",
+          lines: body.lines.length ? body.lines : ["No cab plays anything different right now."],
+          confirmLabel: "Move it now",
+          onConfirm: () => changeTarget(nextId, body.token),
+        });
+        return;
       }
-
-      setStatus("ARCHIVED");
-      toast({
-        title: "Loop paused",
-        message: `${loop.name} was archived and is no longer active.`,
-        tone: "success",
-      });
+      toast({ title: "Target changed", message: "Saved.", tone: "success" });
       router.refresh();
     } catch (error) {
-      toast({
-        title: "Pause failed",
-        message: error instanceof Error ? error.message : "Unable to pause loop",
-        tone: "error",
-      });
+      toast({ title: "Not changed", message: error instanceof Error ? error.message : "", tone: "error" });
     } finally {
-      setProcessing(null);
+      setBusy(false);
     }
   }
 
-  async function deleteLoop() {
-    const confirmed = window.confirm(`Delete loop "${loop.name}"?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setProcessing("delete");
-
-    try {
-      const response = await fetch(`/api/loops/${loop.id}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to delete loop");
-      }
-
-      toast({
-        title: "Loop deleted",
-        message: `${loop.name} was removed.`,
-        tone: "success",
-      });
-      router.push("/loops");
-      router.refresh();
-    } catch (error) {
-      toast({
-        title: "Delete failed",
-        message: error instanceof Error ? error.message : "Unable to delete loop",
-        tone: "error",
-      });
-    } finally {
-      setProcessing(null);
-    }
+  function putOnAir() {
+    setConfirm({
+      title: `Put "${loop.name}" on air?`,
+      message: `It starts playing on ${state.targetLabel.toLowerCase()} straight away (its video is ready, nothing needs compiling).`,
+      confirmLabel: "Put on air",
+      onConfirm: async () => {
+        const response = await fetch(`/api/loops/${loop.id}/publish`, { method: "POST" });
+        if (!response.ok) {
+          toast({ title: "Not on air", message: await readError(response, "It could not be put on air."), tone: "error" });
+          return;
+        }
+        toast({ title: "On air", message: `"${loop.name}" is on air.`, tone: "success" });
+        router.refresh();
+      },
+    });
   }
 
   return (
-    <div className="stack-lg">
-      <div className="card stack">
-        <div className="loop-builder-header">
-          <div className="stack-sm">
-            <span className="eyebrow">Direct Loop Upload</span>
-            <div className="loop-title-row">
-              <h1 className="direct-loop-title">{loop.name}</h1>
-              <StatusPill value={status} />
+    <div className="lb">
+      <header className="lb-head card">
+        <div className="lb-head-main">
+          <Link className="lb-back" href="/loops">
+            ← Loops
+          </Link>
+          <div className="lb-title-row">
+            <h1 className="lb-name-static">{loop.name}</h1>
+            <LoopStatusBadge state={state} />
+          </div>
+          <dl className="lb-facts">
+            <div>
+              <dt>On air</dt>
+              <dd>{state.live ? state.liveLabel : "No"}</dd>
             </div>
-            <p className="muted direct-loop-copy">
-              This programme was published from a single pre-built MP4. Slot programming and slot-level
-              validation are bypassed for this loop.
-            </p>
-          </div>
+            <div>
+              <dt>Plays on</dt>
+              <dd>
+                {phone ? (
+                  "Chosen in the phone app"
+                ) : (
+                  <select aria-label="Plays on" disabled={busy} onChange={(event) => void changeTarget(event.target.value)} value={loop.targetGroupId ?? ""}>
+                    <option value="">All cabs</option>
+                    {deviceGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        Group {group.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>Length</dt>
+              <dd>{formatDuration(loop.durationMs)}</dd>
+            </div>
+            <div>
+              <dt>Published</dt>
+              <dd>{formatWhen(state.publishedAt)}</dd>
+            </div>
+          </dl>
+          <p className="muted">
+            {phone
+              ? "Uploaded from the phone app as one finished video. Where it plays is chosen in the phone app."
+              : "Uploaded as one finished video: it has no slots, so the cab plays it from start to end."}
+          </p>
+        </div>
+        <div className="lb-actions">
           <div className="button-row">
-            <Link className="button button-secondary" href="/loops">
-              Back to loops
-            </Link>
-            {status === "PUBLISHED" ? (
-              <button
-                className="button button-secondary"
-                disabled={processing !== null}
-                onClick={() => void archiveLoop()}
-                type="button"
-              >
-                {processing === "archive" ? "Pausing..." : "Pause"}
+            {state.status === "PUBLISHED" ? (
+              <button className="button button-secondary" disabled={busy} onClick={() => void requestPause(loop, setConfirm, toast, () => router.refresh())} type="button">
+                Pause
               </button>
-            ) : null}
-            {status !== "PUBLISHED" ? (
-              <button
-                className="button button-danger"
-                disabled={processing !== null}
-                onClick={() => void deleteLoop()}
-                type="button"
-              >
-                {processing === "delete" ? "Deleting..." : "Delete"}
-              </button>
-            ) : null}
-            {loop.compiledVideoUrl ? (
-              <a
-                className="button button-primary"
-                href={loop.compiledVideoUrl}
-                rel="noreferrer"
-                target="_blank"
-              >
-                Open Video File
-              </a>
-            ) : null}
+            ) : (
+              <>
+                {!phone ? (
+                  <button className="button button-primary" disabled={busy} onClick={putOnAir} type="button">
+                    Put on air
+                  </button>
+                ) : null}
+                <button className="button button-danger" disabled={busy} onClick={() => requestDelete(loop, setConfirm, toast, () => router.push("/loops"))} type="button">
+                  Delete
+                </button>
+              </>
+            )}
           </div>
         </div>
-      </div>
+      </header>
+      {state.publishError ? <div className="alert alert-warning">{state.publishError}</div> : null}
 
-      <div className="card stack direct-loop-viewer-card">
-        <div className="card-header">
-          <div>
-            <span className="eyebrow">Published Output</span>
-            <h2>Master Loop Preview</h2>
-          </div>
-        </div>
-
-        {loop.compiledVideoUrl ? (
+      <section className="card stack">
+        {loop.videoUrl ? (
           <div className="direct-loop-frame">
-            <video controls src={loop.compiledVideoUrl} />
+            <video controls preload="metadata" src={loop.videoUrl} />
           </div>
-        ) : (
-          <div className="empty-state compact">
-            <strong>No compiled video available</strong>
-            <p>The published loop file could not be resolved.</p>
-          </div>
-        )}
+        ) : null}
+      </section>
 
-        <div className="meta-grid">
-          <span>Published</span>
-          <span>{loop.publishedAt ? new Date(loop.publishedAt).toLocaleString() : "Not recorded"}</span>
-          <span>Last updated</span>
-          <span>{new Date(loop.updatedAt).toLocaleString()}</span>
-          <span>Manifest</span>
-          <span>{loop.manifestUrl ? "Generated and available to devices" : "Unavailable"}</span>
-          <span>Mode</span>
-          <span>Direct upload</span>
-        </div>
-      </div>
+      {confirm ? <ConfirmDialog onClose={() => setConfirm(null)} request={confirm} /> : null}
     </div>
   );
 }

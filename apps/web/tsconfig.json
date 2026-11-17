@@ -18,7 +18,8 @@
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts",
-    ".next-phonefix/types/**/*.ts"
+    ".next-phonefix/types/**/*.ts",
+    ".next-e2e-3303/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

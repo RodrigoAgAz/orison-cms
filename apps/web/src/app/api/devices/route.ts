@@ -28,7 +28,7 @@ export async function POST(request: Request) {
       },
     });
 
-    await logActivity("DEVICE_REGISTERED", `Device ${device.serialNumber} registered`, {
+    await logActivity("DEVICE_REGISTERED", `Cab ${device.serialNumber} registered by hand`, {
       deviceId: device.id,
       serialNumber: device.serialNumber,
     });
