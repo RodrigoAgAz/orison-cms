@@ -8,7 +8,9 @@ import {
   directLoopUploadMaxDurationMs,
 } from "@orison/shared/src/constants";
 
+import { ConfirmDialog, type ConfirmRequest } from "@/components/loop-ui";
 import { useToast } from "@/components/toast-provider";
+import { fileFingerprint, sendFileInPieces, UploadCancelled, UploadRefused } from "@/lib/piece-sender";
 
 function formatFileSize(bytes: number) {
   if (bytes < 1_000_000) {
@@ -18,44 +20,27 @@ function formatFileSize(bytes: number) {
   return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
-export function DirectLoopUploadForm() {
+export function DirectLoopUploadForm({ deviceGroups }: { deviceGroups: Array<{ id: string; name: string }> }) {
   const router = useRouter();
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const progressTimerRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const uploadIdRef = useRef<string | null>(null);
+  const [waiting, setWaiting] = useState(false);
   const [name, setName] = useState("");
+  // Where it plays once ready; by default it is kept off air until someone puts it on.
+  const [target, setTarget] = useState("library");
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadState, setUploadState] = useState<{
-    phase: "idle" | "uploading" | "processing";
+    phase: "idle" | "uploading" | "finishing";
     progress: number;
   }>({
     phase: "idle",
     progress: 0,
   });
-
-  function stopProgressTimer() {
-    if (progressTimerRef.current) {
-      window.clearInterval(progressTimerRef.current);
-      progressTimerRef.current = null;
-    }
-  }
-
-  function startProcessingProgress() {
-    stopProgressTimer();
-    setUploadState((current) => ({
-      phase: "processing",
-      progress: Math.max(current.progress, 76),
-    }));
-
-    progressTimerRef.current = window.setInterval(() => {
-      setUploadState((current) => ({
-        ...current,
-        progress: Math.min(current.progress + 2, 96),
-      }));
-    }, 300);
-  }
 
   function resetForm() {
     setName("");
@@ -72,15 +57,15 @@ export function DirectLoopUploadForm() {
 
   function validateFile(file: File | null) {
     if (!file) {
-      return "Choose an MP4 file to upload.";
+      return "Choose a video file to upload.";
     }
 
-    if (!file.name.toLowerCase().endsWith(".mp4")) {
-      return "Direct loop uploads must be provided as an .mp4 file.";
+    if (!/\.(mp4|mov|m4v)$/i.test(file.name)) {
+      return "Pre-built loops must be an MP4 or MOV file.";
     }
 
     if (file.size > directLoopUploadMaxBytes) {
-      return `Direct loop uploads are limited to ${Math.round(
+      return `Pre-built loops are limited to ${Math.round(
         directLoopUploadMaxBytes / (1024 * 1024),
       )}MB.`;
     }
@@ -93,144 +78,102 @@ export function DirectLoopUploadForm() {
     setError(validateFile(file));
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!name.trim()) {
-      setError("Enter a loop name before uploading.");
+    if (name.trim().length < 2) {
+      setError("Name must be at least 2 characters.");
       return;
     }
 
     const fileError = validateFile(selectedFile);
     if (fileError || !selectedFile) {
-      setError(fileError ?? "Choose an MP4 file to upload.");
+      setError(fileError ?? "Choose a video file to upload.");
       return;
     }
-
-    setError(null);
-    setUploadState({
-      phase: "uploading",
-      progress: 6,
-    });
-
-    const result = await new Promise<{
-      ok: boolean;
-      body: { error?: string; loopId?: string };
-    }>(
-      (resolve) => {
-        const request = new XMLHttpRequest();
-        const params = new URLSearchParams({
-          name: name.trim(),
-          filename: selectedFile.name,
-        });
-
-        const parseResponseBody = () => {
-          if (!request.responseText) {
-            return {};
-          }
-
-          try {
-            return JSON.parse(request.responseText) as { error?: string; loopId?: string };
-          } catch {
-            const responseText = request.responseText.trim();
-            return {
-              error:
-                request.status >= 500
-                  ? `The server returned an invalid ${request.status} response while processing the loop. Check Railway logs for the upstream error.`
-                  : responseText || `Upload failed with HTTP ${request.status}.`,
-            };
-          }
-        };
-
-        request.open("POST", `/api/loops/direct-upload?${params.toString()}`);
-        request.setRequestHeader("Content-Type", selectedFile.type || "video/mp4");
-
-        request.upload.onprogress = (progressEvent) => {
-          if (!progressEvent.lengthComputable) {
-            return;
-          }
-
-          const next = 10 + Math.round((progressEvent.loaded / progressEvent.total) * 64);
-          setUploadState({
-            phase: "uploading",
-            progress: next,
-          });
-        };
-
-        request.upload.onload = () => {
-          startProcessingProgress();
-        };
-
-        request.onerror = () => {
-          stopProgressTimer();
-          resolve({
-            ok: false,
-            body: {
-              error: "Upload failed. Check the deployment logs and try again.",
-            },
-          });
-        };
-
-        request.onabort = () => {
-          stopProgressTimer();
-          resolve({
-            ok: false,
-            body: {
-              error: "Upload canceled before the loop finished publishing.",
-            },
-          });
-        };
-
-        request.onload = () => {
-          stopProgressTimer();
-          const body = parseResponseBody();
-
-          resolve({
-            ok: request.status >= 200 && request.status < 300,
-            body,
-          });
-        };
-
-        request.send(selectedFile);
+    if (target === "library") {
+      void upload(selectedFile);
+      return;
+    }
+    const where = target === "all" ? "all cabs" : `group ${deviceGroups.find((group) => group.id === target)?.name ?? "?"}`;
+    setConfirm({
+      title: `Put it on air for ${where}?`,
+      message: `As soon as it has been converted, "${name.trim()}" replaces what ${where} play${target === "all" ? "" : "s"} now. Choose "Keep it off air" to check it first.`,
+      confirmLabel: "Upload and put on air",
+      // Not awaited: the dialog closes at once and the progress card below shows the upload.
+      onConfirm: () => {
+        void upload(selectedFile);
       },
-    );
+    });
+  }
 
-    if (!result.ok || !result.body.loopId) {
-      setUploadState({
-        phase: "idle",
-        progress: 0,
+  async function upload(file: File) {
+    setError(null);
+    setUploadState({ phase: "uploading", progress: 0 });
+    const controller = new AbortController();
+    abortRef.current = controller;
+    uploadIdRef.current = null;
+    try {
+      // In pieces of a few MB (lib/piece-sender.ts): the hosting proxy cuts off any request whose
+      // body takes more than 5 minutes, and a dropped connection only pauses the upload.
+      const result = await sendFileInPieces({
+        baseUrl: "/api/uploads",
+        open: { kind: "loop", name: name.trim(), target },
+        file,
+        fileName: file.name,
+        fingerprint: await fileFingerprint(file),
+        signal: controller.signal,
+        events: {
+          onSession: (session) => {
+            uploadIdRef.current = session.uploadId;
+            setUploadState({ phase: "uploading", progress: Math.floor((session.receivedBytes / file.size) * 100) });
+          },
+          onProgress: ({ confirmedBytes }) => setUploadState({ phase: "uploading", progress: Math.floor((confirmedBytes / file.size) * 100) }),
+          onConnection: (state) => setWaiting(state === "waiting"),
+          onFinishing: () => setUploadState({ phase: "finishing", progress: 100 }),
+        },
       });
-      setError(result.body.error ?? "Direct loop upload failed.");
+      const loopId = typeof result.loopId === "string" ? result.loopId : null;
       toast({
-        title: "Upload failed",
-        message: result.body.error ?? "The pre-built loop could not be published.",
-        tone: "error",
+        title: "Uploaded",
+        message:
+          target === "library"
+            ? "It is being converted, then kept off air until you put it on."
+            : "It is being converted and goes on air as soon as it is ready.",
+        tone: "success",
       });
-      return;
+      resetForm();
+      if (loopId) router.push(`/loops/${loopId}`);
+      router.refresh();
+    } catch (failure) {
+      setUploadState({ phase: "idle", progress: 0 });
+      if (failure instanceof UploadCancelled) {
+        // Delete the pieces already sent (otherwise kept a day so the same file can carry on).
+        if (uploadIdRef.current) void fetch(`/api/uploads/${uploadIdRef.current}`, { method: "DELETE" }).catch(() => undefined);
+        toast({ title: "Upload cancelled", message: "Nothing was saved.", tone: "info" });
+        return;
+      }
+      const message = failure instanceof UploadRefused ? failure.message : "The upload failed. Try again.";
+      setError(message);
+      toast({ title: "Upload failed", message, tone: "error" });
+    } finally {
+      abortRef.current = null;
+      setWaiting(false);
     }
+  }
 
-    setUploadState({
-      phase: "processing",
-      progress: 100,
-    });
-    toast({
-      title: "Loop published",
-      message: "The pre-built loop was transcoded, uploaded, and published successfully.",
-      tone: "success",
-    });
-    resetForm();
-    router.push(`/loops/${result.body.loopId}`);
-    router.refresh();
+  function cancelUpload() {
+    abortRef.current?.abort();
   }
 
   return (
     <form className="asset-upload-stack" onSubmit={handleSubmit}>
       <label className="field">
-        <span>Loop Name</span>
+        <span>Name</span>
         <input
           maxLength={120}
           onChange={(event) => setName(event.target.value)}
-          placeholder="Week 12 - Direct Master"
+          placeholder="e.g. DAZN finished edit, 10 min"
           required
           value={name}
         />
@@ -258,14 +201,14 @@ export function DirectLoopUploadForm() {
         }}
       >
         <input
-          accept=".mp4,video/mp4"
+          accept=".mp4,.mov,.m4v,video/mp4,video/quicktime"
           hidden
           onChange={(event) => handleFileSelect(event.target.files?.[0] ?? null)}
           ref={inputRef}
           type="file"
         />
-        <span className="drop-zone-kicker">Upload Pre-built Loop</span>
-        <strong>Drop a finished pre-built loop MP4 here or click to browse</strong>
+        <span className="drop-zone-kicker">Video file</span>
+        <strong>Drop the finished video here, or click to choose it</strong>
         <span className="muted">
           {selectedFile
             ? `${selectedFile.name} · ${formatFileSize(selectedFile.size)}`
@@ -278,9 +221,7 @@ export function DirectLoopUploadForm() {
       {uploadState.phase !== "idle" ? (
         <div className="upload-progress-card">
           <div className="card-header">
-            <strong>
-              {uploadState.phase === "uploading" ? "Uploading master loop" : "Transcoding and publishing"}
-            </strong>
+            <strong>{uploadState.phase === "uploading" ? (waiting ? "Waiting for the connection" : "Uploading") : "Handing over for conversion"}</strong>
             <span>{uploadState.progress}%</span>
           </div>
           <div className="progress-track">
@@ -288,11 +229,33 @@ export function DirectLoopUploadForm() {
           </div>
           <span className="muted">
             {uploadState.phase === "uploading"
-              ? "The MP4 is being streamed to the CMS."
-              : "The uploaded file is being checked, normalized if needed, stored, and published to devices."}
+              ? waiting
+                ? "The connection dropped. The upload carries on by itself when it is back."
+                : "Keep this page open until the upload finishes. If it is closed, choose the same file again to carry on."
+              : "The whole file has arrived. It is converted to the cab format in the background."}
           </span>
+          {uploadState.phase === "uploading" ? (
+            <div className="button-row">
+              <button className="button button-secondary" onClick={cancelUpload} type="button">
+                Cancel upload
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
+
+      <label className="field">
+        <span>When it is ready</span>
+        <select onChange={(event) => setTarget(event.target.value)} value={target}>
+          <option value="library">Keep it off air (put it on later)</option>
+          <option value="all">Put it on air for all cabs</option>
+          {deviceGroups.map((group) => (
+            <option key={group.id} value={group.id}>
+              Put it on air for group {group.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {error ? <div className="alert alert-danger">{error}</div> : null}
 
@@ -302,9 +265,10 @@ export function DirectLoopUploadForm() {
           disabled={!selectedFile || uploadState.phase !== "idle" || !name.trim()}
           type="submit"
         >
-          {uploadState.phase === "idle" ? "Upload and Publish" : "Processing..."}
+          {uploadState.phase === "idle" ? (target === "library" ? "Upload" : "Upload and put on air") : "Working…"}
         </button>
       </div>
+      {confirm ? <ConfirmDialog onClose={() => setConfirm(null)} request={confirm} /> : null}
     </form>
   );
 }

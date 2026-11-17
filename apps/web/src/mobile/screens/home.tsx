@@ -21,7 +21,7 @@ import {
   StatusShape,
 } from "../components/ui";
 import { plural, quoted, videoLength, when } from "../lib/format";
-import { cabCount, isSwitchedOn, lagPhrase } from "../lib/status";
+import { cabCount, isSwitchedOn, lagPhrase, updateFailureText } from "../lib/status";
 import { useResource } from "../lib/store";
 import type { LoopSummary, Overview } from "../lib/types";
 
@@ -88,6 +88,16 @@ export function HomeScreen() {
       title: `${cab.label}: screen paused`,
       text: cab.pausedReason ? `Reason: ${cab.pausedReason}` : "No videos play until it\u2019s resumed.",
     })),
+    // Cabs that report their update keeps failing (firmware 1.2.0+), with the reason and the next try.
+    ...data.cabs
+      .filter((cab) => cab.sync?.state === "failing" && cab.status !== "inactive")
+      .map((cab) => ({
+        key: `u-${cab.id}`,
+        tone: "warn" as const,
+        to: `/m/cabs/${cab.id}`,
+        title: `${cab.label}: update failing`,
+        text: updateFailureText(cab),
+      })),
     ...failedUploads.map((loop) => ({
       key: `f-${loop.id}`,
       tone: "warn" as const,
@@ -111,6 +121,7 @@ export function HomeScreen() {
     })),
   ];
 
+  const failingCount = data.cabs.filter((cab) => cab.status === "updating" && cab.sync?.state === "failing").length;
   const segments = [
     { key: "online", count: data.counts.online, tone: "on" as const },
     { key: "updating", count: data.counts.updating, tone: "switching" as const },
@@ -118,13 +129,16 @@ export function HomeScreen() {
     { key: "paused", count: data.counts.paused, tone: "paused" as const },
   ];
   const shown = lists[filter];
+  // Cabs reported as downloading or failing say so on their own badge.
+  const switchingCabs = data.cabs.filter((cab) => cab.status === "updating" && (!cab.sync || cab.sync.state === "waiting"));
 
   return (
     <Screen>
       {header}
       <InstallHint />
 
-      <section className="m-hero m-card" aria-label="Screens on now" data-testid="hero">
+      {/* With no cabs at all, the empty state under Cabs says so; a big "0" adds nothing. */}
+      <section className="m-hero m-card" aria-label="Screens on now" data-testid="hero" hidden={data.counts.total === 0}>
         <div className="m-hero-figure">
           <span className="m-hero-num" data-testid="on-count">
             {onCount}
@@ -144,13 +158,19 @@ export function HomeScreen() {
             )}
           </div>
         ) : null}
+        {data.counts.total > 0 ? (
         <ul className="m-hero-legend">
           <li>
-            <StatusShape tone="on" /> <b>{data.counts.online}</b> on and playing
+            <StatusShape tone="on" /> <b>{data.counts.online}</b> on
           </li>
-          {data.counts.updating > 0 ? (
+          {data.counts.updating - failingCount > 0 ? (
             <li>
-              <StatusShape tone="switching" /> <b>{data.counts.updating}</b> switching video
+              <StatusShape tone="switching" /> <b>{data.counts.updating - failingCount}</b> switching video
+            </li>
+          ) : null}
+          {failingCount > 0 ? (
+            <li className="m-hero-failing">
+              <AlertIcon size={13} /> <b>{failingCount}</b> update failing
             </li>
           ) : null}
           <li>
@@ -162,6 +182,7 @@ export function HomeScreen() {
             </li>
           ) : null}
         </ul>
+        ) : null}
       </section>
 
       <Section title="What’s playing">
@@ -173,7 +194,16 @@ export function HomeScreen() {
               <strong>{data.fleetLoop ? data.fleetLoop.name : "Nothing chosen yet"}</strong>
               <span className="m-muted">
                 {data.fleetLoop
-                  ? [cabCount(data.fleetLoop.liveOn.cabCount), videoLength(data.fleetLoop.durationMs)].filter(Boolean).join(" · ")
+                  ? [
+                      data.counts.total === 0
+                        ? "No cabs yet"
+                        : data.fleetLoop.liveOn.cabCount === 0
+                          ? "No cab follows it right now"
+                          : `Set for ${cabCount(data.fleetLoop.liveOn.cabCount)}`,
+                      videoLength(data.fleetLoop.durationMs),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")
                   : "Choose a video to play on every cab."}
               </span>
             </div>
@@ -193,7 +223,7 @@ export function HomeScreen() {
                     <strong>{group.name}</strong>
                     <span className="m-muted">
                       {group.followsFleet ? "Same as all cabs" : group.loop ? quoted(group.loop.name) : "Nothing chosen"} ·{" "}
-                      {group.onlineCount} of {cabCount(group.cabCount)} on
+                      {group.cabCount === 0 ? "no cabs in it yet" : `${group.onlineCount} of ${cabCount(group.cabCount)} on`}
                     </span>
                   </span>
                   <span className="m-listrow-action">Change</span>
@@ -238,7 +268,7 @@ export function HomeScreen() {
       ) : null}
 
       <Section title="Cabs" id="cabs">
-        <div className="m-chips" role="tablist" aria-label="Show cabs">
+        <div className="m-chips" role="tablist" aria-label="Show cabs" hidden={data.cabs.length === 0}>
           {(
             [
               ["all", "All", lists.all.length],
@@ -274,10 +304,10 @@ export function HomeScreen() {
             ))}
           </ul>
         )}
-        {data.counts.updating > 0 ? (
+        {switchingCabs.length > 0 ? (
           <Notice tone="info">
             &ldquo;Switching&rdquo; means the cab is on and has been told to play a new video. Cabs switch{" "}
-            {lagPhrase(data.cabs.filter((cab) => cab.status === "updating"), data.changeLagMinutes)}.
+            {lagPhrase(switchingCabs, data.changeLagMinutes)}.
           </Notice>
         ) : null}
       </Section>

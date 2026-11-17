@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { formatDistanceToNowStrict } from "date-fns";
 import type { Route } from "next";
 import Link from "next/link";
@@ -5,45 +6,30 @@ import Link from "next/link";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { StatusPill } from "@/components/status-pill";
 import { requireUser } from "@/lib/auth";
-import { getDashboardData } from "@/lib/queries";
+import { formatSignal, screenActivityLabel } from "@/lib/device-status";
+import { getDashboardData } from "@/lib/fleet-data";
+import { formatLondonDateTime } from "@/lib/london-time";
 
-function formatRelativeTime(value: Date | string | null | undefined) {
+function formatRelativeTime(value: Date | string | null | undefined, never = "never") {
   if (!value) {
-    return "No heartbeat yet";
+    return never;
   }
-
   return formatDistanceToNowStrict(new Date(value), { addSuffix: true });
 }
 
-function formatDuration(valueMs: number) {
-  if (!valueMs) {
-    return "0m";
+function formatDuration(valueMs: number | null) {
+  if (valueMs === null) {
+    return "n/a";
   }
-
   const totalSeconds = Math.round(valueMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
 
-function playerStateLabel(value: string) {
-  switch (value) {
-    case "journey":
-      return "Journey";
-    case "silent":
-      return "Silent";
-    case "idle":
-      return "Idle";
-    case "disabled":
-      return "Disabled";
-    default:
-      return "Unknown";
-  }
-}
-
-function playerStateClass(value: string) {
-  switch (value) {
-    case "journey":
+function activityClass(status: string | null) {
+  switch (status) {
+    case "playing":
       return "ops-state-pill is-journey";
     case "silent":
       return "ops-state-pill is-silent";
@@ -56,54 +42,52 @@ function playerStateClass(value: string) {
   }
 }
 
+// Absolute: the root layout's title template only applies to pages below it.
+export const metadata: Metadata = { title: { absolute: "Dashboard · Orison" } };
+
 export default async function DashboardPage() {
   await requireUser();
   const {
     activity,
-    activeProgrammes,
     attentionItems,
-    devices,
+    cabs,
     error,
     fleetControl,
     fleetWideLoop,
     groupSummaries,
     journeyMetrics,
-    publishedLoop,
+    liveLoops,
+    passengerDetection,
     publishingLoops,
     safetyVideo,
     stats,
   } = await getDashboardData();
 
-  const groupProgrammes = activeProgrammes.filter((programme) => programme.audience !== "All devices");
+  const otherLiveLoops = liveLoops.filter((loop) => !loop.isFleet);
 
   return (
     <div className="page ops-dashboard">
       <section className="card ops-hero">
         <div className="ops-hero-copy">
-          <span className="eyebrow">Operations</span>
-          <h1>Orison Ops Dashboard</h1>
-          <p className="muted">
-            Live control room for fleet health, targeted programmes, safety playback, and passenger journey state.
-          </p>
+          <span className="eyebrow">Dashboard</span>
+          <h1>Orison cabs</h1>
+          <p className="muted">What every cab is playing, whether it is up to date, and what needs attention.</p>
           <div className="ops-hero-meta">
             <span>
-              Latest live programme: <strong>{publishedLoop?.name ?? "No published loop"}</strong>
+              All cabs play: <strong>{fleetWideLoop?.name ?? "no loop"}</strong>
             </span>
             <span>
-              Updated {publishedLoop?.publishedAt ? formatRelativeTime(publishedLoop.publishedAt) : "not yet published"}
+              {fleetWideLoop?.publishedAt ? `Published ${formatRelativeTime(fleetWideLoop.publishedAt)}` : "Not published yet"}
             </span>
           </div>
         </div>
 
         <div className="button-row">
           <Link className="button button-primary" href="/loops">
-            Create Loop
-          </Link>
-          <Link className="button button-secondary" href="/loops">
-            Upload Pre-built Loop
+            Open loops
           </Link>
           <Link className="button button-secondary" href="/devices">
-            Open Devices
+            Open cabs
           </Link>
         </div>
       </section>
@@ -112,52 +96,58 @@ export default async function DashboardPage() {
 
       <section className="ops-command-strip">
         <article className="ops-command-card">
-          <span className="ops-command-label">Fleet Health</span>
+          <span className="ops-command-label">Cabs online now</span>
           <strong className="ops-command-value">
-            {stats.onlineCount}/{stats.totalDevices}
+            {stats.onlineCount + stats.outdatedCount}/{stats.totalCabs}
           </strong>
           <p className="ops-command-note">
-            {stats.outdatedCount} outdated · {stats.offlineCount} offline
+            {stats.outdatedCount} updating · {stats.offlineCount} offline
+            {stats.syncFailingCount > 0 ? ` · ${stats.syncFailingCount} cannot update` : ""}
           </p>
         </article>
 
         <article className="ops-command-card">
-          <span className="ops-command-label">Active Journeys</span>
-          <strong className="ops-command-value">{stats.activeJourneys}</strong>
+          <span className="ops-command-label">On a journey now</span>
+          <strong className="ops-command-value">{passengerDetection ? stats.onJourneyNow : "n/a"}</strong>
           <p className="ops-command-note">
-            {stats.silentScreens} muted · {stats.idleScreens} idle
+            {passengerDetection
+              ? `${stats.mutedNow} muted · ${stats.idleNow} waiting for a passenger (online cabs known to detect passengers)`
+              : "No cab is known to detect passengers"}
           </p>
         </article>
 
         <article className="ops-command-card">
-          <span className="ops-command-label">Safety Message</span>
-          <strong className="ops-command-value is-copy">{safetyVideo ? "Configured" : "Missing"}</strong>
+          <span className="ops-command-label">Safety message</span>
+          <strong className="ops-command-value is-copy">{safetyVideo ? "Set" : "Missing"}</strong>
           <p className="ops-command-note">
-            {safetyVideo
-              ? `${safetyVideo.filename} · ${formatDuration(safetyVideo.durationMs ?? 0)}`
-              : "Assign an active safety clip in Settings"}
+            {safetyVideo ? `${safetyVideo.filename} · ${formatDuration(safetyVideo.durationMs)}` : "Choose one in Settings"}
           </p>
         </article>
 
         <article className="ops-command-card">
-          <span className="ops-command-label">Emergency Status</span>
-          <strong className="ops-command-value is-copy">{fleetControl.disabled ? "Disabled" : "Enabled"}</strong>
-          <p className="ops-command-note">{fleetControl.reason ?? "No remote kill-switch active"}</p>
-        </article>
-
-        <article className="ops-command-card">
-          <span className="ops-command-label">Programmes Live</span>
-          <strong className="ops-command-value">{stats.liveProgrammes}</strong>
+          <span className="ops-command-label">Pause</span>
+          <strong className="ops-command-value is-copy">{fleetControl.disabled ? "All cabs paused" : "Not paused"}</strong>
           <p className="ops-command-note">
-            {fleetWideLoop ? "Fleet-wide fallback ready" : "No fleet-wide fallback"} · {groupProgrammes.length} group targets
+            {fleetControl.disabled
+              ? fleetControl.reason ?? "No reason given"
+              : `${stats.pausedCount} cab${stats.pausedCount === 1 ? "" : "s"} paused individually`}
           </p>
         </article>
 
         <article className="ops-command-card">
-          <span className="ops-command-label">Ad Plays Today</span>
-          <strong className="ops-command-value">{stats.adPlaysToday}</strong>
+          <span className="ops-command-label">Loops live</span>
+          <strong className="ops-command-value">{liveLoops.length}</strong>
           <p className="ops-command-note">
-            {stats.journeysToday} journeys today · {stats.uptimePercent}% fleet uptime
+            {fleetWideLoop ? "1 for all cabs" : "None for all cabs"} · {otherLiveLoops.length} for groups or single cabs
+          </p>
+        </article>
+
+        <article className="ops-command-card">
+          <span className="ops-command-label">Advert plays today</span>
+          <strong className="ops-command-value">{stats.advertPlaysToday}</strong>
+          <p className="ops-command-note">
+            Video adverts played to passengers or continuously, since midnight (London) · {stats.stillShowingsToday} still
+            showings
           </p>
         </article>
       </section>
@@ -166,18 +156,13 @@ export default async function DashboardPage() {
         <section className="card ops-stage-card stack">
           <div className="card-header">
             <div>
-              <span className="eyebrow">Fleet Matrix</span>
-              <h2>Live Device State</h2>
+              <span className="eyebrow">Cabs</span>
+              <h2>What each cab is doing</h2>
             </div>
             <div className="button-row">
               <Link className="button button-secondary" href="/device-preview">
-                Device Preview
+                Screen preview
               </Link>
-              {publishedLoop ? (
-                <Link className="button button-secondary" href={`/loops/${publishedLoop.id}` as Route}>
-                  View Latest Loop
-                </Link>
-              ) : null}
             </div>
           </div>
 
@@ -187,82 +172,96 @@ export default async function DashboardPage() {
                 <div className="ops-group-top">
                   <div>
                     <strong>{group.name}</strong>
-                    <p>{group.description ?? "Targeted fleet segment overview"}</p>
+                    <p>{group.description ?? (group.id === "fleet-all" ? "Every cab" : "Group")}</p>
                   </div>
-                  <span className="ops-group-count">{group.deviceCount}</span>
+                  <span className="ops-group-count">{group.cabCount}</span>
                 </div>
                 <div className="ops-group-metrics">
                   <span>{group.onlineCount} online</span>
-                  <span>{group.outdatedCount} outdated</span>
+                  <span>{group.outdatedCount} updating</span>
                   <span>{group.offlineCount} offline</span>
-                  <span>{group.journeyCount + group.silentCount} active journeys</span>
                 </div>
                 <div className="ops-group-loop">
-                  <span className="eyebrow">Target Loop</span>
-                  <strong>{group.targetLoop?.name ?? "No loop assigned"}</strong>
+                  <span className="eyebrow">{group.id === "fleet-all" ? "Loop for all cabs" : "Group plays"}</span>
+                  <strong>{group.loop?.name ?? "No loop"}</strong>
                 </div>
               </Link>
             ))}
           </div>
 
-          {devices.length === 0 ? (
+          {cabs.length === 0 ? (
             <div className="empty-state">
-              <strong>No devices registered</strong>
-              <p>Register your first cab screen to turn this control room into a live fleet view.</p>
+              <strong>No cabs yet</strong>
+              <p>A cab appears here by itself when it sends its first heartbeat, or register one on the Cabs page.</p>
               <Link className="button button-primary" href="/devices">
-                Register First Device
+                Open cabs
               </Link>
             </div>
           ) : (
             <div className="ops-fleet-matrix">
-              {devices.map((device) => (
-                <article className={`ops-fleet-node is-${device.status}`} key={device.id}>
+              {cabs.map((cab) => (
+                <article className={`ops-fleet-node is-${cab.status}`} key={cab.id}>
                   <div className="ops-fleet-node-top">
                     <div>
-                      <strong>{device.serialNumber}</strong>
-                      <p>{device.cabLicenseNumber ?? "Unassigned cab"}</p>
+                      <strong>{cab.serialNumber}</strong>
+                      <p>{cab.cabLicenseNumber ?? "No licence number"}</p>
                     </div>
                     <span
                       className={
-                        device.status === "online"
-                          ? "dot dot-green"
-                          : device.status === "outdated"
-                            ? "dot dot-amber"
-                            : device.status === "offline"
-                              ? "dot dot-red"
-                              : "dot dot-grey"
+                        cab.sync.state === "failing"
+                          ? "dot dot-red"
+                          : cab.status === "online"
+                            ? "dot dot-green"
+                            : cab.status === "outdated"
+                              ? "dot dot-amber"
+                              : cab.status === "offline"
+                                ? "dot dot-red"
+                                : "dot dot-grey"
                       }
                     />
                   </div>
 
                   <div className="ops-fleet-node-pills">
-                    <StatusPill value={device.status} />
-                    <span className={playerStateClass(device.playerStatus)}>{playerStateLabel(device.playerStatus)}</span>
-                    <span className="ops-mini-chip">{device.group?.name ?? "Fleet-wide"}</span>
+                    <StatusPill value={cab.status} />
+                    <span className={activityClass(cab.playerStatusNow)}>
+                      {screenActivityLabel(cab.playerStatusNow, cab.reportsJourneys, cab.online, cab.playerStateNow)}
+                    </span>
+                    <span className="ops-mini-chip">{cab.group?.name ?? "No group"}</span>
                   </div>
 
                   <dl className="ops-node-meta">
                     <div>
-                      <dt>Expected loop</dt>
-                      <dd>{device.expectedLoopName ?? "No loop assigned"}</dd>
+                      <dt>Should play</dt>
+                      <dd>
+                        {cab.expectedLoopName ?? "No loop"}
+                        {cab.expectedSourceLabel ? ` (${cab.expectedSourceLabel})` : ""}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Update</dt>
+                      <dd className={cab.sync.state === "failing" ? "text-danger" : undefined}>
+                        {cab.sync.state === "failing"
+                          ? `Failing: ${cab.sync.error}`
+                          : !cab.online && cab.sync.state === "current"
+                            ? "Up to date when last seen"
+                            : cab.sync.label}
+                      </dd>
                     </div>
                     <div>
                       <dt>Last heartbeat</dt>
-                      <dd>{formatRelativeTime(device.lastHeartbeatAt)}</dd>
+                      <dd>{formatRelativeTime(cab.lastHeartbeatAt)}</dd>
                     </div>
                     <div>
                       <dt>Signal / storage</dt>
                       <dd>
-                        {device.latestHeartbeat?.signalStrength ?? "n/a"} dBm ·{" "}
-                        {typeof device.storageFreeMb === "number" ? `${device.storageFreeMb} MB free` : "storage unknown"}
+                        {formatSignal(cab.signalPercent, cab.signalDbm)} ·{" "}
+                        {typeof cab.storageFreeMb === "number" ? `${cab.storageFreeMb} MB free` : "storage unknown"}
                       </dd>
                     </div>
                   </dl>
 
-                  {device.isDisabled ? (
-                    <div className="ops-node-alert">
-                      Disabled{device.disabledReason ? `: ${device.disabledReason}` : ""}
-                    </div>
+                  {cab.isDisabled ? (
+                    <div className="ops-node-alert">Paused{cab.disabledReason ? `: ${cab.disabledReason}` : ""}</div>
                   ) : null}
                 </article>
               ))}
@@ -274,15 +273,15 @@ export default async function DashboardPage() {
           <section className="card stack">
             <div className="card-header">
               <div>
-                <span className="eyebrow">Attention Queue</span>
-                <h2>What Needs Action</h2>
+                <span className="eyebrow">Needs a look</span>
+                <h2>What needs action</h2>
               </div>
             </div>
 
             {attentionItems.length === 0 ? (
               <div className="empty-state compact">
-                <strong>No immediate operational issues</strong>
-                <p>The fleet is healthy, current, and ready for passenger journeys.</p>
+                <strong>Nothing needs action</strong>
+                <p>Every cab is online and up to date.</p>
               </div>
             ) : (
               <div className="ops-attention-list">
@@ -307,14 +306,14 @@ export default async function DashboardPage() {
         <section className="card stack">
           <div className="card-header">
             <div>
-              <span className="eyebrow">Programme Control</span>
-              <h2>Live Content Routing</h2>
+              <span className="eyebrow">Loops</span>
+              <h2>What is live where</h2>
             </div>
           </div>
 
           <div className="ops-programme-grid">
             <article className="ops-programme-panel">
-              <span className="eyebrow">Fleet-wide Fallback</span>
+              <span className="eyebrow">All cabs</span>
               {fleetWideLoop ? (
                 <>
                   <strong>{fleetWideLoop.name}</strong>
@@ -325,28 +324,28 @@ export default async function DashboardPage() {
                 </>
               ) : (
                 <div className="empty-state compact">
-                  <strong>No fleet-wide fallback</strong>
-                  <p>Publish a fleet-wide loop so ungrouped devices always have content.</p>
+                  <strong>No loop for all cabs</strong>
+                  <p>Cabs outside a group with its own loop have nothing to play.</p>
                 </div>
               )}
             </article>
 
             <article className="ops-programme-panel">
-              <span className="eyebrow">Group Loops</span>
-              {groupProgrammes.length === 0 ? (
+              <span className="eyebrow">Groups and single cabs</span>
+              {otherLiveLoops.length === 0 ? (
                 <div className="empty-state compact">
-                  <strong>No group-specific loops live</strong>
-                  <p>Publish targeted content to a device group to segment the fleet.</p>
+                  <strong>None</strong>
+                  <p>Every cab plays the loop for all cabs.</p>
                 </div>
               ) : (
                 <div className="ops-programme-list">
-                  {groupProgrammes.map((programme) => (
-                    <Link className="ops-programme-row" href={programme.href as Route} key={`${programme.id}-${programme.audience}`}>
+                  {otherLiveLoops.map((loop) => (
+                    <Link className="ops-programme-row" href={`/loops/${loop.id}` as Route} key={`${loop.id}-${loop.audience}`}>
                       <div>
-                        <strong>{programme.name}</strong>
-                        <p>{programme.audience}</p>
+                        <strong>{loop.name}</strong>
+                        <p>{loop.audience}</p>
                       </div>
-                      <span>{programme.publishedAt ? formatRelativeTime(programme.publishedAt) : "Live"}</span>
+                      <span>{loop.publishedAt ? formatRelativeTime(loop.publishedAt) : "Live"}</span>
                     </Link>
                   ))}
                 </div>
@@ -354,11 +353,11 @@ export default async function DashboardPage() {
             </article>
 
             <article className="ops-programme-panel">
-              <span className="eyebrow">Publishing Queue</span>
+              <span className="eyebrow">Being published</span>
               {publishingLoops.length === 0 ? (
                 <div className="empty-state compact">
-                  <strong>No active publishing jobs</strong>
-                  <p>Compiled loops and direct uploads will appear here while they go live.</p>
+                  <strong>Nothing is being published</strong>
+                  <p>Loops appear here while they compile.</p>
                 </div>
               ) : (
                 <div className="ops-programme-list">
@@ -366,7 +365,7 @@ export default async function DashboardPage() {
                     <Link className="ops-programme-row" href={`/loops/${loop.id}` as Route} key={loop.id}>
                       <div>
                         <strong>{loop.name}</strong>
-                        <p>{loop.targetGroup?.name ?? "All devices"}</p>
+                        <p>{loop.targetGroup?.name ?? "All cabs"}</p>
                       </div>
                       <span>{formatRelativeTime(loop.updatedAt)}</span>
                     </Link>
@@ -376,19 +375,16 @@ export default async function DashboardPage() {
             </article>
 
             <article className="ops-programme-panel">
-              <span className="eyebrow">Quick Actions</span>
+              <span className="eyebrow">Go to</span>
               <div className="ops-quick-actions">
-                <Link className="button button-primary" href="/loops">
-                  Create or Publish Loop
-                </Link>
                 <Link className="button button-secondary" href="/assets">
-                  Open Asset Library
+                  Assets
                 </Link>
-                <Link className="button button-secondary" href="/devices">
-                  Manage Devices
+                <Link className="button button-secondary" href="/analytics">
+                  Analytics
                 </Link>
                 <Link className="button button-secondary" href="/settings">
-                  Review Safety Settings
+                  Settings
                 </Link>
               </div>
             </article>
@@ -398,52 +394,65 @@ export default async function DashboardPage() {
         <section className="card stack">
           <div className="card-header">
             <div>
-              <span className="eyebrow">Journey Signal</span>
-              <h2>Passenger Activity</h2>
+              <span className="eyebrow">Journeys</span>
+              <h2>Passenger journeys</h2>
             </div>
           </div>
 
-          <div className="ops-journey-grid">
-            <article className="ops-metric-card">
-              <span className="ops-metric-label">Journeys Today</span>
-              <strong>{journeyMetrics.todayCount}</strong>
-            </article>
-            <article className="ops-metric-card">
-              <span className="ops-metric-label">Journeys This Week</span>
-              <strong>{journeyMetrics.weekCount}</strong>
-            </article>
-            <article className="ops-metric-card">
-              <span className="ops-metric-label">Journeys This Month</span>
-              <strong>{journeyMetrics.monthCount}</strong>
-            </article>
-            <article className="ops-metric-card">
-              <span className="ops-metric-label">Avg Journey</span>
-              <strong>{formatDuration(journeyMetrics.averageDurationMs)}</strong>
-            </article>
-            <article className="ops-metric-card">
-              <span className="ops-metric-label">Ad Plays / Journey</span>
-              <strong>{journeyMetrics.adPlaysPerJourney}</strong>
-            </article>
-            <article className="ops-metric-card">
-              <span className="ops-metric-label">Muted Cabs Right Now</span>
-              <strong>{stats.silentScreens}</strong>
-            </article>
-          </div>
+          {passengerDetection ? (
+            <div className="ops-journey-grid">
+              <article className="ops-metric-card">
+                <span className="ops-metric-label">Today</span>
+                <strong>{journeyMetrics.today}</strong>
+              </article>
+              <article className="ops-metric-card">
+                <span className="ops-metric-label">This week</span>
+                <strong>{journeyMetrics.week}</strong>
+              </article>
+              <article className="ops-metric-card">
+                <span className="ops-metric-label">This month</span>
+                <strong>{journeyMetrics.month}</strong>
+              </article>
+              <article className="ops-metric-card">
+                <span className="ops-metric-label">Average journey (30 days)</span>
+                <strong>{formatDuration(journeyMetrics.averageDurationMs)}</strong>
+              </article>
+              <article className="ops-metric-card">
+                <span className="ops-metric-label">Advert plays per journey</span>
+                <strong>{journeyMetrics.advertPlaysPerJourney ?? "n/a"}</strong>
+              </article>
+              <article className="ops-metric-card">
+                <span className="ops-metric-label">Muted cabs now</span>
+                <strong>{stats.mutedNow}</strong>
+              </article>
+            </div>
+          ) : (
+            <div className="empty-state compact">
+              <strong>No cab is known to detect passengers</strong>
+              <p>
+                Journeys are counted for cabs that start them from a passenger input: cabs that report a button/door
+                trigger, or older cabs that have reported a journey in the last 30 days. None does yet.
+              </p>
+            </div>
+          )}
+          <p className="muted small-print">
+            Days and weeks are London time (weeks start on Monday). Only cabs known to detect passengers record journeys.
+          </p>
         </section>
       </div>
 
       <section className="card stack">
         <div className="card-header">
           <div>
-            <span className="eyebrow">Recent Activity</span>
-            <h2>Operational Timeline</h2>
+            <span className="eyebrow">Recent activity</span>
+            <h2>What happened</h2>
           </div>
         </div>
 
         {activity.length === 0 ? (
           <div className="empty-state compact">
             <strong>No activity yet</strong>
-            <p>Loop publishes, device syncs, and fleet operations will appear here.</p>
+            <p>Publishes, cab updates and pauses will appear here.</p>
           </div>
         ) : (
           <div className="ops-timeline">
@@ -455,7 +464,7 @@ export default async function DashboardPage() {
                     <strong>{event.message}</strong>
                     <StatusPill value={event.type} />
                   </div>
-                  <p className="muted">{new Date(event.createdAt).toLocaleString()}</p>
+                  <p className="muted">{formatLondonDateTime(event.createdAt)}</p>
                 </div>
               </div>
             ))}

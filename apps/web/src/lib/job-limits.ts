@@ -87,3 +87,12 @@ export function processSingleton<T>(name: string, create: () => T): T {
   store[key] ??= create();
   return store[key]!;
 }
+
+/**
+ * The one limiter for heavy media work in this process (ffmpeg): phone loop uploads
+ * (upload-queue.ts), desktop asset processing and desktop loop publishes all run through it, one
+ * at a time, so compiles never run on top of each other.
+ */
+export function mediaJobLimiter(): Limiter {
+  return processSingleton("media-job-limiter", () => createLimiter(1));
+}

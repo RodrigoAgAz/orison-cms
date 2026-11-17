@@ -6,6 +6,7 @@ import { useState } from "react";
 import { useSessionUser } from "../components/shell";
 import { ChevronIcon, DesktopIcon, LockIcon, PersonIcon, SignOutIcon, TeamIcon } from "../components/icons";
 import { href, LoadingScreen, Screen, Section, Spinner, TopBar } from "../components/ui";
+import { WRITE_TIMEOUT_MS } from "../lib/api";
 import { clearAll } from "../lib/store";
 
 export function roleName(role: string) {
@@ -33,7 +34,7 @@ export function AccountScreen() {
   async function signOut() {
     setSigningOut(true);
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      await fetch("/api/auth/logout", { method: "POST", signal: AbortSignal.timeout(WRITE_TIMEOUT_MS) }).catch(() => undefined);
     } finally {
       clearAll();
       try {

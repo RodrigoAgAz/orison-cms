@@ -1,8 +1,10 @@
+import type { Metadata } from "next";
 import { assetCategories, type AssetCategory } from "@orison/shared/src/constants";
 
 import { AssetLibrary } from "@/components/asset-library";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
+import { readableAssetError } from "@/lib/loop-queries";
 import { getAssetLibraryData } from "@/lib/queries";
 
 function assetUrlForKey(key: string | null | undefined) {
@@ -40,6 +42,8 @@ function parseCategory(value: string | undefined): AssetCategory | "ALL" {
   return assetCategories.includes(value as AssetCategory) ? (value as AssetCategory) : "ALL";
 }
 
+export const metadata: Metadata = { title: "Assets" };
+
 export default async function AssetsPage({ searchParams }: Props) {
   await requireUser();
   const page = parsePage(searchParams?.page);
@@ -54,15 +58,15 @@ export default async function AssetsPage({ searchParams }: Props) {
     <div className="page">
       <div className="page-header">
         <div>
-          <span className="eyebrow">Media</span>
-          <h1>Asset Library</h1>
+          <span className="eyebrow">Assets</span>
+          <h1>Assets</h1>
           <p className="muted">
-            Upload advertisements, filler videos, branded interstitials, and image-based content.
+            The files loops are built from: adverts, fillers, still images shown between journeys, and the safety message.
           </p>
         </div>
       </div>
 
-      <PageErrorNotice message={result.error} title="Asset library unavailable" />
+      <PageErrorNotice message={result.error} title="Assets unavailable" />
 
       <AssetLibrary
         assets={result.items.map((asset) => ({
@@ -75,12 +79,16 @@ export default async function AssetsPage({ searchParams }: Props) {
           width: asset.width,
           height: asset.height,
           fileSize: asset.fileSize,
+          // Only once processed: before that the files do not exist yet.
           thumbnailUrl:
-            assetUrlForKey(asset.thumbnailKey) ??
-            (asset.mimeType.startsWith("image/") ? assetUrlForKey(asset.s3Key) : null),
+            asset.status !== "READY"
+              ? null
+              : assetUrlForKey(asset.thumbnailKey) ?? (asset.mimeType.startsWith("image/") ? assetUrlForKey(asset.s3Key) : null),
           previewUrl: `/api/assets/${asset.id}/preview`,
           metadata: normaliseMetadata(asset.metadata),
           createdAt: asset.createdAt.toISOString(),
+          errorMessage: readableAssetError(asset.errorMessage),
+          isSafetyMessage: asset.id === result.safetyVideoAssetId,
           slotUsages: [
             ...asset.slotPlacements.map((placement) => ({
               usageType: "VIDEO" as const,

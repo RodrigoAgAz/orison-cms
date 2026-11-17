@@ -19,13 +19,16 @@
 //   - open, with PHONE_APP_ANON_UPLOADS_PER_HOUR=3, to trigger the anonymous upload ceiling without
 //     using up the main server's allowance;
 //   - PHONE_APP_REQUIRE_SIGN_IN=true, where the old sign-in flow must work exactly as before.
-// E2E_SPAWN=0 skips those two (and says so).
+//   - a production-shaped fleet in a throwaway Postgres schema (port +2): one cab that is off, on
+//     old firmware, with no position and a percentage signal; an empty group; ten-minute videos;
+//     then the cab on its built-in video, then no cabs. The schema and its files are removed after.
+// E2E_SPAWN=0 skips those three (and says so). E2E_ONLY=production runs only the production pass.
 //
 // Each run uploads 3 videos without signing in on the main server (the ceiling there is 20 per
 // rolling hour by default), so up to about six runs an hour fit.
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -48,6 +51,8 @@ const RUN_ID = Date.now().toString(36);
 const RUN_STARTED = new Date();
 const SPAWN = process.env.E2E_SPAWN !== "0";
 const EXTRA_PORT = Number(process.env.E2E_EXTRA_PORT ?? 3101);
+// E2E_ONLY=production runs just the production-shaped suite (on its own extra server).
+const ONLY = process.env.E2E_ONLY ?? "";
 const SHARED_NAME = "Phone app (not signed in)";
 const SHARED_ID = "anonymous:phone-app";
 
@@ -124,6 +129,19 @@ async function manifestFor(serial, base = BASE) {
   return body;
 }
 
+/** page.request as an (url, init) -> { status, body } function, signed in as the page is. */
+function pageRequest(page, base = BASE) {
+  return async (url, init = {}) => {
+    const response = await page.request.fetch(`${base}${url}`, {
+      method: init.method ?? "GET",
+      headers: { Accept: "application/json", ...(init.json !== undefined ? { "Content-Type": "application/json" } : {}), ...(init.headers ?? {}) },
+      data: init.json !== undefined ? JSON.stringify(init.json) : init.body,
+      timeout: 120_000,
+    });
+    return { status: response.status(), body: await response.json().catch(() => null) };
+  };
+}
+
 async function apiJson(page, url, init) {
   const target = url.startsWith("http") ? url : `${BASE}${url}`;
   const response = init ? await page.request.fetch(target, init) : await page.request.get(target);
@@ -178,6 +196,18 @@ async function makeVideo(file, seconds = 3, size = "1280x720") {
   return file;
 }
 
+/** A real video of about `megabytes` MB (high bitrate), for uploads that span several pieces. */
+async function makeBigVideo(file, megabytes, seconds = 10) {
+  const kbps = Math.round((megabytes * 8 * 1024) / seconds);
+  await run("ffmpeg", [
+    "-y", "-v", "error",
+    "-f", "lavfi", "-i", `testsrc2=size=1280x720:rate=30:duration=${seconds}`,
+    "-c:v", "libx264", "-preset", "ultrafast", "-b:v", `${kbps}k`, "-minrate", `${kbps}k`, "-maxrate", `${kbps}k`, "-bufsize", `${kbps}k`,
+    "-pix_fmt", "yuv420p", "-f", "mov", file,
+  ]);
+  return file;
+}
+
 async function newPhoneContext(browser, device = devices["iPhone 14"], extra = {}, base = BASE) {
   const context = await browser.newContext({ ...device, deviceScaleFactor: 2, locale: "en-GB", timezoneId: "Europe/London", ...extra });
   // Block every external host (map tiles, web fonts): the app must still work.
@@ -219,22 +249,28 @@ async function activitySince(types) {
 }
 
 /**
- * Start an extra `next dev` from this checkout on `port` with `env`, run `fn(base)`, stop it.
+ * Start an extra `next dev` from this checkout on `port` with `env`, run `fn(base, server)`, stop it.
  * Uses its own build folder (removed afterwards) and restores the files `next dev` may rewrite.
+ * `server.restart(moreEnv)` stops it and starts it again (same build folder, so it comes back
+ * quickly), like a deploy or a crash would.
  */
 async function withExtraServer(port, env, fn) {
   const distDir = `.next-e2e-${port}`;
   const touched = ["tsconfig.json", "next-env.d.ts"].map((name) => path.join(webDir, name));
   const before = touched.map((file) => (existsSync(file) ? readFileSync(file, "utf8") : null));
   const logFile = path.join(workDir, `server-${port}.log`);
-  const child = spawn(process.execPath, [path.join(repoRoot, "node_modules/next/dist/bin/next"), "dev", "-p", String(port)], {
-    cwd: webDir,
-    env: { ...process.env, ...env, NEXT_DIST_DIR: distDir, NEXT_TELEMETRY_DISABLED: "1" },
-    stdio: ["ignore", openSync(logFile, "a"), openSync(logFile, "a")],
-    detached: true,
-  });
   const base = `http://localhost:${port}`;
-  try {
+  let child = null;
+  let currentEnv = { ...env };
+
+  const startServer = async () => {
+    child = spawn(process.execPath, [path.join(repoRoot, "node_modules/next/dist/bin/next"), "dev", "-p", String(port)], {
+      cwd: webDir,
+      env: { ...process.env, ...currentEnv, NEXT_DIST_DIR: distDir, NEXT_TELEMETRY_DISABLED: "1" },
+      stdio: ["ignore", openSync(logFile, "a"), openSync(logFile, "a")],
+      detached: true,
+    });
+    const started = child;
     const deadline = Date.now() + 180_000;
     for (;;) {
       try {
@@ -243,37 +279,81 @@ async function withExtraServer(port, env, fn) {
       } catch {
         // not up yet
       }
-      if (child.exitCode !== null) throw new Error(`server on ${port} exited; see ${logFile}`);
+      if (started.exitCode !== null) throw new Error(`server on ${port} exited; see ${logFile}`);
       if (Date.now() > deadline) throw new Error(`server on ${port} did not start; see ${logFile}`);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    return await fn(base);
-  } finally {
+  };
+  const stopServer = async () => {
+    const running = child;
+    if (!running) return;
     try {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-running.pid, "SIGTERM");
     } catch {
       // already gone
     }
     await new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve();
+      if (running.exitCode !== null) return resolve();
       const timer = setTimeout(() => {
         try {
-          process.kill(-child.pid, "SIGKILL");
+          process.kill(-running.pid, "SIGKILL");
         } catch {
           // gone
         }
         resolve();
       }, 10_000);
-      child.once("exit", () => {
+      running.once("exit", () => {
         clearTimeout(timer);
         resolve();
       });
     });
+    child = null;
+  };
+  const server = {
+    async restart(moreEnv = {}) {
+      await stopServer();
+      currentEnv = { ...currentEnv, ...moreEnv };
+      await startServer();
+    },
+  };
+  try {
+    await startServer();
+    return await fn(base, server);
+  } finally {
+    await stopServer();
     rmSync(path.join(webDir, distDir), { recursive: true, force: true });
     touched.forEach((file, index) => {
       if (before[index] !== null && readFileSync(file, "utf8") !== before[index]) writeFileSync(file, before[index]);
     });
   }
+}
+
+/**
+ * Upload a file from Node through the phone app's piece protocol (as the app does). `request` is
+ * like `anon`/`admin` (url, init) -> { status, body }. Returns the final answer of each step.
+ */
+async function uploadInPieces(request, file, { name, target = null, fingerprint = null }) {
+  const bytes = readFileSync(file);
+  const opened = await request("/api/m/uploads", {
+    method: "POST",
+    json: { name, fileName: path.basename(file), size: bytes.length, fingerprint: fingerprint ?? `e2e:${RUN_ID}:${name.replace(/[^A-Za-z0-9._-]+/g, "-")}:${bytes.length}`, target },
+  });
+  if (opened.status >= 300) return { opened };
+  const { uploadId, pieceBytes, pieceCount, received } = opened.body;
+  let largest = 0;
+  for (let index = 0; index < pieceCount; index += 1) {
+    if (received.includes(index)) continue;
+    const piece = bytes.subarray(index * pieceBytes, Math.min(bytes.length, (index + 1) * pieceBytes));
+    largest = Math.max(largest, piece.length);
+    const put = await request(`/api/m/uploads/${uploadId}/pieces/${index}`, {
+      method: "PUT",
+      body: piece,
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+    if (put.status !== 200) return { opened, piece: put, index };
+  }
+  const completed = await request(`/api/m/uploads/${uploadId}/complete`, { method: "POST" });
+  return { opened, completed, largest, pieceCount };
 }
 
 // ------------------------------------------------------------------------------------------ test
@@ -293,14 +373,18 @@ async function main() {
 
   const browser = await chromium.launch();
   try {
-    if (mode === "open") {
+    if (ONLY === "production") {
+      await productionShapeSuite(browser);
+    } else if (mode === "open") {
       await openSuite(browser);
       if (SPAWN) {
+        await productionShapeSuite(browser);
         await withExtraServer(EXTRA_PORT, { PHONE_APP_ANON_UPLOADS_PER_HOUR: "3", PHONE_APP_REQUIRE_SIGN_IN: "false" }, (base) =>
           uploadCeilingSuite(browser, base),
         );
         await withExtraServer(EXTRA_PORT + 1, { PHONE_APP_REQUIRE_SIGN_IN: "true" }, (base) => signInRequiredSuite(browser, base));
       } else {
+        skip("production-shaped fleet (extra server)", "E2E_SPAWN=0");
         skip("anonymous upload ceiling (extra server)", "E2E_SPAWN=0");
         skip("PHONE_APP_REQUIRE_SIGN_IN=true restores sign-in (extra server)", "E2E_SPAWN=0");
       }
@@ -308,11 +392,571 @@ async function main() {
       await signInRequiredSuite(browser, BASE);
       skip("open phone app (no sign-in)", "the server at BASE_URL requires sign-in; run it without PHONE_APP_REQUIRE_SIGN_IN");
     }
-    await check("icon contact sheet (every generated icon at its real sizes)", () => iconContactSheet(browser));
+    if (!ONLY) await check("icon contact sheet (every generated icon at its real sizes)", () => iconContactSheet(browser));
   } finally {
     await browser.close().catch(() => undefined);
     await cleanup();
   }
+}
+
+// ================================================================ production-shaped fleet
+//
+// The phone app was built against the lively demo fleet. Production looks nothing like it: ONE cab
+// that is usually off, on firmware 1.0.0, whose box has no modem it can read (no position, and a
+// signal figure that is a percentage from NetworkManager); one group with no cabs; twelve videos,
+// eleven of them ten-minute rotations built in the desktop loop builder with long campaign names.
+// This suite builds exactly that in a throwaway Postgres schema, runs its own server on it, and
+// walks every screen in three shapes: the cab off, the cab just switched on playing its built-in
+// video, and no cabs at all. It also checks that a request that never answers can't freeze a screen
+// and that a change whose answer is lost is checked, not reported as failed.
+
+const PROD_LOOP_NAMES = [
+  "Say Now - Say What You See EP 1920x1080",
+  "DAZN 26 Oct rotation (ad in journey)",
+  "DAZN 2 Nov rotation (ad in journey)",
+  "DAZN 9 Nov rotation (ad before journey)",
+  "Explore 1920x1080",
+  "Explore London autumn half-term rotation 1920x1080",
+  "Uber Eats lunch slot test (ad in journey) 1920x1080",
+  "Rotation A, fillers only (no adverts) 1920x1080",
+  "Rotation B, Say Now x2 + DAZN x1 1920x1080",
+  "Rotation C, Explore + Uber Eats 1920x1080",
+  "Night rotation, quiet fillers 1920x1080",
+];
+const PROD_UPLOAD_NAME = "Phone test clip";
+const PROD_SERIAL = `PROD-SHAPE-${RUN_ID}`;
+
+function schemaUrl(name) {
+  const url = new URL(process.env.DATABASE_URL);
+  url.searchParams.set("schema", name);
+  return url.toString();
+}
+
+/** Build the production shape in a fresh schema. Returns handles for the checks and cleanup. */
+async function buildProductionShape(schema) {
+  const url = schemaUrl(schema);
+  await run(process.execPath, [path.join(repoRoot, "node_modules/prisma/build/index.js"), "db", "push", "--schema", "packages/db/prisma/schema.prisma", "--skip-generate", "--accept-data-loss"], {
+    cwd: repoRoot,
+    env: { ...process.env, DATABASE_URL: url },
+    timeout: 180_000,
+  });
+  const { PrismaClient } = require("@prisma/client");
+  const prisma = new PrismaClient({ datasourceUrl: url });
+  const storageDir = path.join(webDir, "tmp/storage", `e2e-prod-${RUN_ID}`);
+  mkdirSync(storageDir, { recursive: true });
+  const now = Date.now();
+  const colors = ["0x1d3557", "0x6a040f", "0x2d6a4f", "0x7f5539", "0x3a0ca3", "0x9d0208", "0x386641", "0x5f0f40", "0x0b525b", "0x6c584c", "0x22223b", "0x14213d"];
+  const loops = [];
+  for (const [index, name] of [...PROD_LOOP_NAMES, PROD_UPLOAD_NAME].entries()) {
+    const file = path.join(storageDir, `loop-${index}.mp4`);
+    // A short stand-in for each video (the app only reads the first seconds for the still).
+    await run("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", `color=c=${colors[index]}:s=640x360:r=25:d=3`, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", file]);
+    const upload = name === PROD_UPLOAD_NAME;
+    const loop = await prisma.loop.create({
+      data: {
+        name,
+        status: "PUBLISHED",
+        autoLive: !upload,
+        manifestUrl: `e2e-prod/${index}/manifest.json`,
+        checksum: `sha256:e2e${index}`,
+        compiledVideoKey: `e2e-prod-${RUN_ID}/loop-${index}.mp4`,
+        compiledVideoUrl: `/api/storage/e2e-prod-${RUN_ID}/loop-${index}.mp4`,
+        durationMs: upload ? 60_000 : 600_000,
+        publishedAt: new Date(now - (40 - index * 3) * 24 * 3600_000),
+        createdAt: new Date(now - (41 - index * 3) * 24 * 3600_000),
+        ...(upload ? {} : { slots: { create: Array.from({ length: 10 }, (_, position) => ({ position })) } }),
+      },
+    });
+    loops.push(loop);
+  }
+  const sayNow = loops[0];
+  await prisma.systemSetting.create({
+    data: { key: "fleet-loop-assignment", value: { loopId: sayNow.id, assignedAt: new Date(now - 3 * 24 * 3600_000).toISOString(), assignedBy: null } },
+  });
+  const group = await prisma.deviceGroup.create({ data: { name: "TCR" } });
+
+  // The real cab: on for an hour or so a few times a day, last on yesterday evening.
+  const lastOn = new Date(now - 20 * 3600_000);
+  const device = await prisma.device.create({
+    data: {
+      serialNumber: PROD_SERIAL,
+      cabLicenseNumber: "RodrigoCab",
+      firmwareVersion: "1.0.0",
+      currentLoopId: sayNow.id,
+      lastHeartbeatAt: lastOn,
+      storageFreeMb: 201_000,
+      createdAt: new Date(now - 237 * 24 * 3600_000),
+    },
+  });
+  const heartbeats = [];
+  for (const endAgoHours of [20, 27, 44, 51, 70]) {
+    const end = now - endAgoHours * 3600_000;
+    for (let t = end - 70 * 60_000; t <= end; t += 5 * 60_000) heartbeats.push(prodHeartbeat(device.id, new Date(t), sayNow.id));
+  }
+  await prisma.deviceHeartbeat.createMany({ data: heartbeats });
+  return { prisma, url, storageDir, loops, sayNow, group, device };
+}
+
+/** What firmware 1.0.0 on the x86 box sends: NetworkManager location, a percentage signal, idle player. */
+function prodHeartbeat(deviceId, receivedAt, currentLoopId, playerStatus = "idle") {
+  return {
+    deviceId,
+    receivedAt,
+    firmwareVersion: "1.0.0",
+    storageFreeMb: 201_000,
+    currentLoopId,
+    cpuTemp: 54,
+    uptimeSeconds: 3600,
+    memoryUsedPercent: 38,
+    playerStatus,
+    networkType: "4g",
+    signalStrength: 62,
+    locationData: { method: "network_manager", operator: "EE", signalStrength: 62, state: "100 (connected)", networkType: "gsm", resolved: null, servingCell: null },
+  };
+}
+
+async function mainText(page) {
+  return (await page.locator("main").innerText()).replace(/\s+/g, " ");
+}
+
+/** Copy that must never appear on a production-shaped screen. */
+function assertNoDemoAssumptions(text, where) {
+  assert(!/\b0 cabs\b/.test(text), `${where}: says "0 cabs": ${text.slice(0, 300)}`);
+  assert(!/on and playing/.test(text), `${where}: "on and playing"`);
+  assert(!/Unknown loop/.test(text), `${where}: "Unknown loop"`);
+  assert(!/passenger/i.test(text), `${where}: passenger wording for a cab with no passenger input`);
+  assert(!/dBm/.test(text), `${where}: dBm for a percentage signal`);
+}
+
+async function productionShapeSuite(browser) {
+  const schema = `e2e_prod_${RUN_ID}`;
+  let shape = null;
+  try {
+    await check("production shape: build it in its own schema (1 cab, empty group, 12 videos)", async () => {
+      shape = await buildProductionShape(schema);
+    });
+    const sessionsDir = (name) => path.join(workDir, `upload-sessions-${name}`);
+    await withExtraServer(EXTRA_PORT + 2, { DATABASE_URL: shape.url, PHONE_APP_REQUIRE_SIGN_IN: "false", UPLOAD_SESSIONS_DIR: sessionsDir("first") }, async (base, server) => {
+      // Warm up the routes so a first compile isn't mistaken for a slow server.
+      for (const url of ["/m", "/m/map", "/m/videos", "/m/upload", "/m/change", `/m/videos/${shape.sayNow.id}`, `/m/cabs/${shape.device.id}`, "/api/m/overview", "/api/m/loops", `/api/m/loops/${shape.sayNow.id}`, `/api/m/cabs/${shape.device.id}`]) await fetch(`${base}${url}`).catch(() => undefined);
+      const context = await newPhoneContext(browser, devices["iPhone 14"], {}, base);
+      // An iPhone: Safari has no navigator.connection.
+      await context.addInitScript(() => {
+        try {
+          Object.defineProperty(Navigator.prototype, "connection", { get: () => undefined, configurable: true });
+        } catch {
+          // ignore
+        }
+      });
+      const page = await context.newPage();
+      page.setDefaultTimeout(45_000);
+      page.on("pageerror", (error) => console.log(`  [pageerror] ${error.message}`));
+      const go = (url) => goto(page, url, base);
+      const dazn = shape.loops[1];
+      try {
+        await productionScreens(page, go, base, shape, dazn);
+        await pieceUploadChecks(page, go, base, server, sessionsDir);
+      } finally {
+        await context.close();
+      }
+    });
+  } finally {
+    if (shape) {
+      // Every video in the throwaway schema, including the ones uploaded during the pass (their
+      // files are in the shared storage folder, so they go with it).
+      const ids = await shape.prisma.loop
+        .findMany({ select: { id: true } })
+        .then((rows) => rows.map((row) => row.id))
+        .catch(() => shape.loops.map((loop) => loop.id));
+      await shape.prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch((error) => console.log(`  could not drop ${schema}: ${error.message}`));
+      await shape.prisma.$disconnect().catch(() => undefined);
+      rmSync(shape.storageDir, { recursive: true, force: true });
+      for (const id of ids) {
+        for (const folder of ["loops", "manifests"]) rmSync(path.join(webDir, "tmp/storage", folder, id), { recursive: true, force: true });
+      }
+    }
+  }
+}
+
+/** Wait until the page has had `count` more pieces confirmed by the server. */
+function piecesConfirmed(page, count) {
+  return new Promise((resolve) => {
+    let seen = 0;
+    const onResponse = (response) => {
+      if (response.request().method() === "PUT" && /\/pieces\/\d+$/.test(response.url()) && response.status() === 200) {
+        seen += 1;
+        if (seen >= count) {
+          page.off("response", onResponse);
+          resolve();
+        }
+      }
+    };
+    page.on("response", onResponse);
+  });
+}
+
+async function startUploadInPage(page, go, file, name) {
+  await go("/m/upload");
+  await page.waitForLoadState("networkidle");
+  const dismiss = page.getByRole("button", { name: /Upload another|Choose a video again|Forget it/ });
+  if (await dismiss.count()) {
+    await dismiss.first().click();
+  }
+  await page.getByTestId("upload-file").setInputFiles(file);
+  await page.getByTestId("upload-name").fill(name);
+  await page.waitForTimeout(800);
+  await page.getByTestId("upload-submit").click();
+}
+
+/**
+ * Uploads in pieces, on the production-shaped server: a dropped connection, a reload (the same file
+ * picked again), a server restart that loses the pieces. Upload speed is throttled so each spans
+ * several pieces.
+ */
+async function pieceUploadChecks(page, go, base, server, sessionsDir) {
+  const cdp = await page.context().newCDPSession(page);
+  const throttle = (bytesPerSecond) =>
+    cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 40, downloadThroughput: 4_000_000, uploadThroughput: bytesPerSecond });
+  const pieceIndexes = [];
+  page.on("request", (request) => {
+    const match = /\/pieces\/(\d+)$/.exec(request.url());
+    if (request.method() === "PUT" && match) pieceIndexes.push(Number(match[1]));
+  });
+
+  await check("upload in pieces: the connection drops mid-way and it carries on by itself", async () => {
+    const file = await makeBigVideo(path.join(workDir, "drop.mov"), 14);
+    await throttle(1_500_000);
+    pieceIndexes.length = 0;
+    const firstPiece = piecesConfirmed(page, 1);
+    await startUploadInPage(page, go, file, `Dropped connection ${RUN_ID}`);
+    await firstPiece;
+    // Through the same CDP session as the throttle (Playwright's setOffline would be overridden by it).
+    await cdp.send("Network.emulateNetworkConditions", { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await page.getByTestId("upload-waiting").waitFor({ timeout: 60_000 });
+    const percentWhileDown = await page.getByTestId("upload-percent").textContent();
+    await shot(page, "pieces-connection-lost");
+    await page.waitForTimeout(4000);
+    await throttle(1_500_000);
+    await page.locator('[data-testid="upload-job"][data-phase="processing"], [data-testid="upload-job"][data-phase="ready"]').first().waitFor({ timeout: 120_000 });
+    const sent = [...pieceIndexes];
+    assert(sent.length >= 4, `several pieces: ${sent}`);
+    assert(new Set(sent).size === Math.max(...sent) + 1, `every piece sent: ${sent}`);
+    assert(sent.filter((index) => index === 0).length === 1, `the confirmed first piece was not sent again: ${sent}`);
+    assert(parseInt(percentWhileDown, 10) > 0, `progress kept while offline: ${percentWhileDown}`);
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
+  });
+
+  await check("upload in pieces: after a reload, picking the same file carries on from the pieces already sent", async () => {
+    const file = await makeBigVideo(path.join(workDir, "reload.mov"), 14);
+    await throttle(1_000_000);
+    pieceIndexes.length = 0;
+    const twoPieces = piecesConfirmed(page, 2);
+    await startUploadInPage(page, go, file, `Reloaded ${RUN_ID}`);
+    await twoPieces;
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByTestId("upload-needs-file").waitFor();
+    await shot(page, "pieces-reopened-needs-file");
+    const before = pieceIndexes.length;
+    await page.getByTestId("upload-resume-file").setInputFiles(file);
+    await page.locator('[data-testid="upload-job"][data-phase="processing"], [data-testid="upload-job"][data-phase="ready"]').first().waitFor({ timeout: 120_000 });
+    const afterReload = pieceIndexes.slice(before);
+    assert(!afterReload.includes(0) && !afterReload.includes(1), `pieces 0 and 1 were not sent again: ${afterReload}`);
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
+  });
+
+  await check("upload in pieces: a server restart that loses the pieces starts the video again by itself", async () => {
+    const file = await makeBigVideo(path.join(workDir, "restart.mov"), 14);
+    await throttle(1_000_000);
+    const twoPieces = piecesConfirmed(page, 2);
+    await startUploadInPage(page, go, file, `Server restarted ${RUN_ID}`);
+    await twoPieces;
+    // A deploy: the new instance has an empty disk.
+    await server.restart({ UPLOAD_SESSIONS_DIR: sessionsDir("after-restart") });
+    await page.getByTestId("upload-restarted").waitFor({ timeout: 180_000 });
+    await shot(page, "pieces-server-restarted");
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 240_000 });
+    await throttle(-1);
+  });
+  await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+}
+
+async function productionScreens(page, go, base, shape, dazn) {
+  const { prisma, device, group, sayNow } = shape;
+
+  await check("production shape, cab off: home reads true (no 0 cabs, no 'on and playing', no passenger)", async () => {
+    await go("/m");
+    await page.getByTestId("cab-list").waitFor();
+    const text = await mainText(page);
+    assertNoDemoAssumptions(text, "home");
+    assert(text.includes("RodrigoCab"), "the cab is listed");
+    assert(text.includes("no cabs in it yet"), `empty group says so: ${text}`);
+    assert((await page.locator(".m-tabbar a").count()) === 4, "no Map tab when no cab can report a position");
+    await shot(page, "prod-home", { fullPage: true });
+  });
+
+  await check("production shape: the map explains, per cab, why there is nothing to show", async () => {
+    await go("/m/map");
+    await page.getByTestId("map-empty").waitFor();
+    const text = await mainText(page);
+    assert(/doesn’t report a position/.test(text), `map wording: ${text}`);
+    assert(!/All 0|0 of/.test(text), "no zero counts");
+    await shot(page, "prod-map-deeplink");
+  });
+
+  await check("production shape: cab screen (off, no position, percentage signal, figures dated)", async () => {
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    assert((await page.getByTestId("cab-location-text").count()) === 0, "no 'Where it is' promise for a cab that can't report one");
+    await page.locator('[data-testid="tech-details"] summary').click();
+    const tech = await page.getByTestId("tech-details").innerText();
+    assert(/Good \(62%\)/.test(tech), `signal as a percentage: ${tech}`);
+    assert(/as of/.test(tech) && (await page.getByTestId("tech-stale").count()) === 1, "says how old the figures are");
+    assert(/Not reported by this cab’s equipment/.test(tech), "position row");
+    const text = await mainText(page);
+    assertNoDemoAssumptions(text, "cab");
+    assert(/Last played/.test(text), "last played");
+    await shot(page, "prod-cab-off", { fullPage: true });
+  });
+
+  await check("production shape: videos list and a ten-minute video", async () => {
+    await go("/m/videos");
+    await page.getByTestId("video-list").waitFor();
+    assert((await page.getByTestId("video-row").count()) === 12, "twelve videos");
+    await page.waitForTimeout(1500); // stills
+    assertNoDemoAssumptions(await mainText(page), "videos");
+    await shot(page, "prod-videos", { fullPage: true });
+    await go(`/m/videos/${sayNow.id}`);
+    await page.getByTestId("video-live").waitFor();
+    assertNoDemoAssumptions(await mainText(page), "video");
+    await shot(page, "prod-video", { fullPage: true });
+  });
+
+  await check("production shape: choosing what the only cab already plays says no cab changes", async () => {
+    await go(`/m/change?target=fleet&loop=${sayNow.id}`);
+    await page.getByTestId("confirm-card").waitFor();
+    const count = await page.getByTestId("impact-count").textContent();
+    assert(/No change: it’s already playing this video/.test(count), `headline: ${count}`);
+    const button = await page.getByTestId("confirm-change").textContent();
+    assert(!/\d+ cab/.test(button), `button doesn't count a cab that won't change: ${button}`);
+    await shot(page, "prod-change-same", { fullPage: true });
+  });
+
+  await check("production shape: step two counts real changes and names the empty group", async () => {
+    await go(`/m/change?loop=${dazn.id}`);
+    await page.getByTestId("choose-target-list").waitFor();
+    const text = await page.getByTestId("choose-target-list").innerText();
+    assert(/Changes 1 cab/.test(text) && /No cabs in this group yet/.test(text), `subtitles: ${text}`);
+    await shot(page, "prod-change-where");
+    await page.locator(`[data-testid="target-group"][data-group-id="${group.id}"]`).click();
+    await page.getByTestId("confirm-card").waitFor();
+    const confirm = await mainText(page);
+    assert(/no cabs in this group yet/i.test(confirm) && !/\b0 cabs\b/.test(confirm), `confirm: ${confirm}`);
+    assert((await page.getByTestId("confirm-change").textContent()).includes("Yes, set it for TCR"), "button");
+    await shot(page, "prod-change-group-confirm", { fullPage: true });
+    await page.getByTestId("confirm-change").click();
+    await page.getByTestId("change-done").waitFor();
+    const done = await page.getByTestId("done-summary").textContent();
+    assert(/no cabs in this group yet/i.test(done) && !/\b0 cabs\b/.test(done), `done: ${done}`);
+    await shot(page, "prod-change-group-done");
+  });
+
+  await check("production shape: a video chosen only for the empty group is 'set', not live, and can be removed", async () => {
+    await go("/m/videos");
+    const row = page.locator(`[data-testid="video-row"][data-loop-id="${dazn.id}"]`);
+    await row.waitFor();
+    const rowText = await row.innerText();
+    assert(/Set for TCR · no cabs in that group yet/.test(rowText), `row: ${rowText}`);
+    assert((await row.locator(".m-livedot").count()) === 0, "no green live dot");
+    await go(`/m/change?target=group:${group.id}`);
+    await page.getByTestId("choose-video-list").waitFor();
+    const list = await page.getByTestId("choose-video-list").innerText();
+    assert(/chosen there now/.test(list), `change list agrees with Videos: ${list.slice(0, 400)}`);
+    await go(`/m/videos/${dazn.id}`);
+    await page.getByTestId("video-live").waitFor();
+    const live = await page.getByTestId("video-live").innerText();
+    assert(/Not on any screen yet/.test(live) && !/\b0 cabs\b/.test(live), `video screen: ${live}`);
+    await shot(page, "prod-video-set-empty-group", { fullPage: true });
+    await page.getByTestId("remove-video").click();
+    await page.getByTestId("remove-sheet").waitFor();
+    assert(/no cabs yet, so no screen shows it/.test(await page.getByTestId("remove-sheet").innerText()), "explains and offers a way out");
+    await shot(page, "prod-remove-empty-group");
+    await page.getByTestId("remove-free-confirm").click();
+    await page.waitForURL(/\/m\/videos$/);
+    const after = await prisma.loop.findUnique({ where: { id: dazn.id } });
+    assert(after.status === "ARCHIVED", "removed");
+    const tcr = await prisma.deviceGroup.findUnique({ where: { id: group.id } });
+    assert(tcr.assignedLoopId === null && tcr.assignmentAt, "TCR back on the video for all cabs");
+  });
+
+  await check("production shape, iPhone: a large video on unknown network gets no mobile-data prompt; empty-group upload says so", async () => {
+    const big = path.join(workDir, "big-iphone.mov");
+    writeFileSync(big, Buffer.alloc(0));
+    await run("truncate", ["-s", "60M", big]);
+    await go("/m/upload");
+    // The dev server may reload a page it has just compiled; let that settle before choosing a file.
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("upload-file").setInputFiles(big);
+    await page.getByTestId("upload-name").fill("Big iPhone video");
+    await page.waitForTimeout(1500);
+    await shot(page, "prod-upload-large-iphone", { fullPage: true });
+    assert((await page.getByTestId("upload-wifi-note").count()) === 0, "no 'Wi-Fi recommended' when the phone can't tell");
+    await page.getByTestId("upload-large-note").waitFor();
+    await page.locator(".m-radio", { hasText: "TCR group" }).click();
+    const sub = await page.locator(".m-radio", { hasText: "TCR group" }).innerText();
+    assert(/No cabs in this group yet/.test(sub), `radio: ${sub}`);
+    await page.getByTestId("upload-submit").click();
+    await page.getByTestId("upload-confirm").waitFor();
+    const sheet = await page.getByTestId("upload-confirm").innerText();
+    assert(/Yes, upload it/.test(sheet) && !/\b0 cabs\b/.test(sheet) && !/mobile data/.test(sheet), `sheet: ${sheet}`);
+    await shot(page, "prod-upload-confirm-empty-group");
+    await page.keyboard.press("Escape");
+  });
+
+  await check("production shape: while a video is prepared, another can be uploaded (also after a reload)", async () => {
+    const file = await makeVideo(path.join(workDir, "prep.mov"), 45, "1920x1080");
+    await go("/m/upload");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("upload-file").setInputFiles(file);
+    await page.getByTestId("upload-name").fill(`Prepared meanwhile ${RUN_ID}`);
+    await page.waitForTimeout(800);
+    await page.getByTestId("upload-submit").click();
+    await page.locator('[data-testid="upload-job"][data-phase="processing"]').waitFor({ timeout: 120_000 });
+    await page.getByTestId("upload-another-head").waitFor();
+    assert((await page.getByTestId("upload-file").count()) === 1, "the form is there too");
+    await shot(page, "prod-upload-processing-and-another", { fullPage: true });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByTestId("upload-another-head").waitFor();
+    await page.locator('[data-testid="upload-job"][data-phase="ready"]').waitFor({ timeout: 180_000 });
+  });
+
+  await check("a cab whose update keeps failing says why and when it retries (cab screen and 'needs a look')", async () => {
+    const at = new Date(Date.now() - 60_000);
+    const retry = new Date(Date.now() + 25 * 60_000);
+    await prisma.deviceHeartbeat.create({ data: prodHeartbeat(device.id, at, sayNow.id) });
+    await prisma.device.update({
+      where: { id: device.id },
+      data: {
+        lastHeartbeatAt: at,
+        currentLoopId: shape.loops[5].id,
+        firmwareVersion: "1.2.0",
+        playbackTrigger: "always",
+        playerStatus: "playing",
+        playerState: "JOURNEY",
+        statusReportedAt: at,
+        syncState: "failed",
+        syncError: "Not enough free space for the new video",
+        syncFailedLoopId: sayNow.id,
+        syncStateSince: new Date(Date.now() - 3600_000),
+        syncNextRetryAt: retry,
+      },
+    });
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-update-failing").waitFor();
+    const notice = await page.getByTestId("cab-update-failing").innerText();
+    assert(/Not enough free space/.test(notice) && /tries again today at/.test(notice), `failing notice: ${notice}`);
+    assert((await page.locator('[data-testid="cab-head"] [data-sync="failing"]').innerText()).includes("update failing"), "badge says so, not 'switching'");
+    assert(/Playing the video continuously/.test(await page.getByTestId("cab-head").innerText()), "always mode wording");
+    await shot(page, "prod-cab-update-failing", { fullPage: true });
+    await go("/m");
+    await page.getByTestId("attention").waitFor();
+    const attention = await page.getByTestId("attention").innerText();
+    assert(/RodrigoCab: update failing/.test(attention) && /Not enough free space/.test(attention), `needs a look: ${attention}`);
+    assert(!/switching/i.test(await page.getByTestId("cab-list").innerText()), "the row doesn't read as switching");
+    await shot(page, "prod-home-update-failing", { fullPage: true });
+    // Merely downloading reads as that; the safety message says so.
+    await prisma.device.update({ where: { id: device.id }, data: { syncState: "downloading", syncError: null, syncFailedLoopId: null, playerState: "SAFETY", playbackTrigger: "gpio" } });
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    const head = await page.getByTestId("cab-head").innerText();
+    assert(/downloading/i.test(head) && /Safety message playing/.test(head), `downloading + safety: ${head}`);
+    await prisma.device.update({
+      where: { id: device.id },
+      data: { firmwareVersion: "1.0.0", playbackTrigger: null, playerStatus: "idle", playerState: null, syncState: null, syncNextRetryAt: null, syncStateSince: null, currentLoopId: sayNow.id },
+    });
+  });
+
+  await check("production shape: a cab just switched on, playing its built-in video", async () => {
+    const at = new Date(Date.now() - 60_000);
+    await prisma.deviceHeartbeat.create({ data: prodHeartbeat(device.id, at, "fallback") });
+    await prisma.device.update({ where: { id: device.id }, data: { lastHeartbeatAt: at, currentLoopId: "fallback" } });
+    await go(`/m/cabs/${device.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    const today = await page.getByTestId("on-today").textContent();
+    assert(today !== "Not yet", `on today: ${today}`);
+    await page.getByTestId("built-in-still").waitFor();
+    const text = await mainText(page);
+    assertNoDemoAssumptions(text, "cab on built-in");
+    assert(/built-in/i.test(text), "names the built-in video");
+    await shot(page, "prod-cab-on-built-in", { fullPage: true });
+    await go("/m");
+    await page.getByTestId("cab-list").waitFor();
+    const home = await mainText(page);
+    assertNoDemoAssumptions(home, "home with cab on");
+    assert(/Built-in video, fetching/.test(home), `cab row: ${home}`);
+    await shot(page, "prod-home-cab-on", { fullPage: true });
+  });
+
+  await check("a request that never answers doesn't freeze the screen: it recovers by itself", async () => {
+    await go("/m");
+    await page.getByTestId("cab-list").waitFor();
+    let hang = true;
+    let afterHang = 0;
+    const held = [];
+    await page.route("**/api/m/overview", async (route) => {
+      if (hang) {
+        held.push(route);
+        return; // never answer
+      }
+      afterHang += 1;
+      await route.continue();
+    });
+    await page.getByTestId("freshness").click();
+    await page.waitForTimeout(500);
+    hang = false; // the network is back, but the first request is still stuck
+    await page.waitForFunction(() => !document.querySelector('[data-testid="freshness"]')?.classList.contains("is-loading"), null, { timeout: 40_000 });
+    for (let i = 0; i < 40 && afterHang === 0; i += 1) await page.waitForTimeout(1000);
+    assert(afterHang > 0, "a new request went out after the stuck one timed out");
+    await page.waitForFunction(() => document.querySelector('[data-testid="freshness"]')?.textContent?.includes("just now"), null, { timeout: 30_000 });
+    await page.unroute("**/api/m/overview");
+    for (const route of held) await route.abort().catch(() => undefined);
+  });
+
+  await check("production shape, no cabs: home, map and the all-cabs confirmation read sensibly", async () => {
+    await prisma.device.update({ where: { id: device.id }, data: { isActive: false } });
+    await go("/m");
+    await page.getByRole("heading", { name: "No cabs yet" }).waitFor();
+    await page.waitForTimeout(500);
+    const home = await mainText(page);
+    assertNoDemoAssumptions(home, "home, no cabs");
+    assert(/no cabs yet/i.test(home), `home: ${home}`);
+    await shot(page, "prod-nocabs-home", { fullPage: true });
+    await go("/m/map");
+    await page.getByTestId("map-empty").waitFor();
+    assert(/No cabs yet/.test(await mainText(page)), "map");
+    await shot(page, "prod-nocabs-map");
+    const explore = shape.loops[4];
+    await go(`/m/change?target=fleet&loop=${explore.id}`);
+    await page.getByTestId("confirm-card").waitFor();
+    const confirm = await mainText(page);
+    assert(/There are no cabs yet/.test(confirm) && !/Every cab is following/.test(confirm), `confirm: ${confirm}`);
+    await shot(page, "prod-nocabs-change-fleet", { fullPage: true });
+  });
+
+  await check("a change whose answer is lost is checked, not reported as failed", async () => {
+    const explore = shape.loops[4];
+    await page.route("**/api/m/assign", async (route) => {
+      await route.fetch(); // the server applies it...
+      // ...but the answer never reaches the phone.
+    });
+    await page.getByTestId("confirm-change").click();
+    await page.getByTestId("change-done").waitFor({ timeout: 60_000 });
+    await page.getByTestId("done-confirmed").waitFor();
+    await shot(page, "prod-change-lost-answer-confirmed");
+    await page.unroute("**/api/m/assign");
+    const fleet = await prisma.systemSetting.findUnique({ where: { key: "fleet-loop-assignment" } });
+    assert(fleet.value.loopId === explore.id, "the server did apply it");
+  });
 }
 
 // ============================================================================ open (default) mode
@@ -381,7 +1025,7 @@ async function openSuite(browser) {
   });
 
   await check("search engines: noindex on /m pages and their API, robots.txt disallows, manifest and icons unaffected", async () => {
-    for (const url of ["/m", "/m/account", "/api/m/overview", "/api/m/loops", "/api/auth/me", "/api/m/upload?name=x&filename=a.mov"]) {
+    for (const url of ["/m", "/m/account", "/api/m/overview", "/api/m/loops", "/api/auth/me", "/api/m/uploads/00000000000000000000000000000000"]) {
       const response = await anon(url);
       assert((response.headers.get("x-robots-tag") ?? "").includes("noindex"), `${url} X-Robots-Tag: ${response.headers.get("x-robots-tag")}`);
     }
@@ -448,7 +1092,9 @@ async function openSuite(browser) {
       ["PUT", "/api/settings", {}],
       ["GET", "/api/loops"],
       ["POST", "/api/loops", { name: "x" }],
-      ["POST", "/api/loops/direct-upload?name=xx&filename=a.mov"],
+      ["POST", "/api/uploads", { kind: "loop", name: "xx", fileName: "a.mov", size: 10, fingerprint: "v1:0123456789", target: "library" }],
+      ["PUT", "/api/uploads/0123456789abcdef0123456789abcdef/pieces/0"],
+      ["POST", "/api/uploads/0123456789abcdef0123456789abcdef/complete"],
       ["GET", "/api/assets"],
       ["GET", "/api/analytics/overview"],
       ["GET", "/api/analytics/export"],
@@ -469,16 +1115,67 @@ async function openSuite(browser) {
   const theatre = loopsByName["Demo · Theatre week"];
   const spring = loopsByName["Demo · Spring campaign"];
   const portrait = loopsByName["Demo · Portrait phone clip"];
-  assert(theatre && spring && portrait, "demo loops exist");
+  const rotation = loopsByName["Demo · Ten-slot rotation"];
+  assert(theatre && spring && portrait && rotation, "demo loops exist (three uploads and the ten-slot rotation)");
 
-  await check("change times follow each cab's software (1.1.0: one heartbeat; older: 30 minutes)", async () => {
+  await check("change times follow each cab's software (1.1.0 and later: one heartbeat; 1.0.0: 30 minutes)", async () => {
     const lagOf = (serial) => cabBySerial[serial].changeLagMinutes;
-    assert(lagOf("DEMO-CAB-01") === 5, `1.1.0 cab lag ${lagOf("DEMO-CAB-01")}`);
-    assert(lagOf("DEMO-CAB-04") === 30 && lagOf("DEMO-CAB-02") === 30, "1.0.0 cabs lag 30");
+    for (const serial of ["DEMO-CAB-01", "DEMO-CAB-03", "DEMO-CAB-04", "DEMO-CAB-08"]) {
+      assert(lagOf(serial) === 5, `1.2.0 cab ${serial} lag ${lagOf(serial)}`);
+    }
+    assert(lagOf("DEMO-CAB-02") === 30, "the 1.0.0 cab lags 30");
     assert(overview.changeLagMinutes === 30, `fleet worst case ${overview.changeLagMinutes}`);
     assert(overview.changeLag.minMinutes === 5 && overview.changeLag.maxMinutes === 30, `range ${JSON.stringify(overview.changeLag)}`);
-    const detail = (await anon(`/api/m/cabs/${cabBySerial["DEMO-CAB-04"].id}`)).body;
-    assert(detail.firmwareVersion === "1.0.0" && detail.changeLagMinutes === 30, "detail carries firmware and lag");
+    const detail = (await anon(`/api/m/cabs/${cabBySerial["DEMO-CAB-02"].id}`)).body;
+    assert(detail.firmwareVersion === "1.0.0" && detail.changeLagMinutes === 30 && detail.playbackTrigger === null, "detail carries firmware and lag");
+  });
+
+  await check("the 1.2.0 states read right: a failing download, the safety message, an 'always' cab, the 1.0.0 cab", async () => {
+    // Failing download: says so with a readable reason and the next try, on the cab, the home list and the change flow.
+    const failing = cabBySerial["DEMO-CAB-04"];
+    assert(failing.status === "updating" && failing.sync?.state === "failing" && failing.sync.nextRetryAt, `CAB-04 sync ${JSON.stringify(failing.sync)}`);
+    await goto(page, `/m/cabs/${failing.id}`);
+    await page.getByTestId("cab-update-failing").waitFor();
+    const notice = await page.getByTestId("cab-update-failing").innerText();
+    assert(/connection closed after 18 MB of 58 MB/.test(notice) && /tries again/.test(notice), `failing notice: ${notice}`);
+    assert((await page.locator('[data-testid="cab-head"] [data-sync="failing"]').innerText()).includes("update failing"), "badge");
+    await shot(page, "demo-cab-failing-download", { fullPage: true });
+    await goto(page, "/m");
+    await page.getByTestId("attention").waitFor();
+    assert((await page.getByTestId("attention").innerText()).includes("LR68 FBN: update failing"), "home: needs a look");
+    const legend = (await page.locator(".m-hero-legend").innerText()).replace(/\s+/g, " ");
+    assert(/1 update failing/.test(legend) && !/switching/.test(legend), `hero counts it as failing, not switching: ${legend}`);
+    await goto(page, `/m/change?target=cab:${failing.id}&loop=${rotation.id}`);
+    await page.getByTestId("impact-failing").waitFor();
+    // SAFETY, and the always cab.
+    await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-03"].id}`);
+    await page.getByTestId("cab-safety-note").waitFor();
+    assert((await page.getByTestId("cab-head").innerText()).includes("Safety message playing"), "safety");
+    const always = cabBySerial["DEMO-CAB-08"];
+    assert(always.playbackTrigger === "always" && always.reportsJourneys === false, "CAB-08 always");
+    await goto(page, `/m/cabs/${always.id}`);
+    await page.getByTestId("cab-head").waitFor();
+    assert((await page.getByTestId("cab-head").innerText()).includes("Playing the video continuously"), "always wording");
+    await page.locator('[data-testid="tech-details"] summary').click();
+    const tech = await page.getByTestId("tech-details").innerText();
+    assert(/Good \(62%\)/.test(tech) && !/dBm/.test(tech) && /no passenger detection/.test(tech), `always cab tech: ${tech}`);
+    await shot(page, "demo-cab-always", { fullPage: true });
+    // The one 1.0.0 cab among 1.2.0 cabs: no passenger wording, its slower change time said.
+    await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-02"].id}`);
+    await page.getByTestId("cab-head").waitFor();
+    assert(!/passenger/i.test(await page.getByTestId("cab-head").innerText()), "no passenger wording for the 1.0.0 cab with no journeys");
+    await page.locator('[data-testid="tech-details"] summary').click();
+    const old = await page.getByTestId("tech-details").innerText();
+    assert(/1\.0\.0 · acts on a change within about 30 minutes/.test(old) && /Not reported \(older software\)/.test(old), `1.0.0 tech: ${old}`);
+    assert(!/4G/.test(old) && /Connection\s+Not reported/.test(old), `1.0.0 firmware hard-codes 4g, so no network type: ${old}`);
+    await shot(page, "demo-cab-1.0.0", { fullPage: true });
+    // A video still shown by the failing cab is not "not playing anywhere".
+    const springRow = (await anon("/api/m/loops")).body.items.find((loop) => loop.id === spring.id);
+    assert(springRow.liveOn.cabCount === 0 && springRow.liveOn.onScreens >= 1, `spring liveOn ${JSON.stringify(springRow.liveOn)}`);
+    await goto(page, "/m/videos");
+    const row = page.locator(`[data-testid="video-row"][data-loop-id="${spring.id}"]`);
+    await row.waitFor();
+    assert(/still on 1 cab until it switches/.test(await row.innerText()), `spring row: ${await row.innerText()}`);
   });
 
   await check("home shows screens on, what plays and every cab", async () => {
@@ -487,11 +1184,32 @@ async function openSuite(browser) {
     const on = Number(await page.getByTestId("on-count").textContent());
     assert(on === overview.counts.online + overview.counts.updating, `on-count ${on}`);
     assert((await page.getByTestId("cab-row").count()) === overview.cabs.length, "one row per cab");
-    assert((await page.getByTestId("fleet-loop").textContent()).includes(spring.name), "fleet plays Spring");
+    assert((await page.getByTestId("fleet-loop").textContent()).includes(rotation.name), "all cabs play the ten-slot rotation");
     await shot(page, "home-full", { fullPage: true });
     await page.getByRole("tab", { name: /^Off/ }).click();
     await shot(page, "home-filter-off");
     await page.getByRole("tab", { name: /^All/ }).click();
+  });
+
+  await check("demo fleet: videos, a video, the change steps and the upload form (screenshots for review)", async () => {
+    await goto(page, "/m/videos");
+    await page.getByTestId("video-list").waitFor();
+    await page.waitForTimeout(800);
+    await shot(page, "demo-videos", { fullPage: true });
+    await goto(page, `/m/videos/${spring.id}`);
+    await page.getByTestId("video-live").waitFor();
+    await shot(page, "demo-video", { fullPage: true });
+    await goto(page, "/m/change?target=fleet");
+    await page.getByTestId("choose-video-list").waitFor();
+    await shot(page, "demo-change-choose", { fullPage: true });
+    await goto(page, `/m/change?loop=${theatre.id}`);
+    await page.getByTestId("choose-target-list").waitFor();
+    await shot(page, "demo-change-where");
+    await goto(page, "/m/upload");
+    await page.getByTestId("upload-file").waitFor();
+    await shot(page, "demo-upload-form", { fullPage: true });
+    await goto(page, "/m");
+    await page.getByTestId("cab-list").waitFor();
   });
 
   // ---------------------------------------------------------------- cab detail
@@ -519,9 +1237,6 @@ async function openSuite(browser) {
     await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-07"].id}`);
     await page.getByTestId("cab-location-text").waitFor();
     assert((await page.getByTestId("cab-location-text").textContent()).includes("hasn’t reported"), "no position wording");
-    await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-04"].id}`);
-    await page.getByTestId("cab-pending").waitFor();
-    assert((await page.getByTestId("cab-pending").textContent()).includes("within about 30 minutes"), "old-firmware cab: 30 minutes");
     await goto(page, `/m/cabs/${cabBySerial["DEMO-CAB-06"].id}`);
     await page.getByTestId("resume-cab").waitFor();
   });
@@ -554,7 +1269,10 @@ async function openSuite(browser) {
     await page.locator(`[data-testid="choose-video"][data-loop-id="${theatre.id}"]`).click();
     await page.getByTestId("confirm-card").waitFor();
     const fresh = (await anon("/api/m/overview")).body;
-    const following = fresh.cabs.filter((cab) => cab.expectedSource === "fleet").length;
+    // Cabs that really change: following all cabs, and neither showing it already nor already set to it.
+    const following = fresh.cabs.filter(
+      (cab) => cab.expectedSource === "fleet" && cab.playing?.id !== theatre.id && cab.expected?.id !== theatre.id,
+    ).length;
     const countText = await page.getByTestId("impact-count").textContent();
     assert(countText.includes(`This changes ${following} cab`), `impact text "${countText}" vs ${following}`);
     assert((await page.getByTestId("confirm-question").textContent()).includes("all cabs"), "question names all cabs");
@@ -573,7 +1291,7 @@ async function openSuite(browser) {
     await page.getByTestId("confirm-change").click();
     await page.getByTestId("change-done").waitFor();
     assert((await page.getByTestId("done-summary").textContent()).includes(`${following} cab`), "done count from the server");
-    const served = await manifestFor("DEMO-CAB-08"); // City group, follows all cabs
+    const served = await manifestFor("DEMO-CAB-08"); // West End group, follows all cabs
     assert(served.loopId === theatre.id, `DEMO-CAB-08 served ${served.loopId}`);
     await npm("demo:heartbeat");
     await page.waitForFunction(() => /^[1-9]/.test(document.querySelector('[data-testid="done-progress"]')?.textContent ?? ""), null, { timeout: 40_000 });
@@ -606,15 +1324,18 @@ async function openSuite(browser) {
   });
 
   await check("without signing in: a group uses the same as all cabs", async () => {
-    const westEnd = overview.groups.find((group) => group.name === "Demo · West End");
+    // City has its own video (Theatre week); West End already follows all cabs.
+    const city = overview.groups.find((group) => group.name === "Demo · City");
     await goto(page, "/m");
-    await page.locator(`[data-testid="group-row"][data-group-id="${westEnd.id}"]`).click();
+    await page.locator(`[data-testid="group-row"][data-group-id="${city.id}"]`).click();
     await page.getByTestId("choose-inherit").waitFor();
     await page.getByTestId("choose-inherit").click();
     await page.getByTestId("confirm-card").waitFor();
     await page.getByTestId("confirm-change").click();
     await page.getByTestId("change-done").waitFor();
-    assert((await manifestFor("DEMO-CAB-01")).loopId === theatre.id, "West End cab follows all cabs");
+    assert((await manifestFor("DEMO-CAB-05")).loopId === theatre.id, "City cab follows all cabs (now Theatre week)");
+    const after = (await anon("/api/m/overview")).body.groups.find((group) => group.id === city.id);
+    assert(after.followsFleet === true, "City follows all cabs");
   });
 
   // ---------------------------------------------------------------- upload to a group
@@ -642,7 +1363,7 @@ async function openSuite(browser) {
     assert(loop && loop.processing.state === "ready", "uploaded loop ready");
     created.loops.add(loop.id);
     assert(loop.liveOn.groups.some((group) => group.id === city.id), "live on City group");
-    assert((await manifestFor("DEMO-CAB-08")).loopId === loop.id, "City cab is served the upload");
+    assert((await manifestFor("DEMO-CAB-05")).loopId === loop.id, "City cab is served the upload");
     await page.getByTestId("upload-see").click();
     await page.getByTestId("video-title").waitFor();
   });
@@ -650,7 +1371,8 @@ async function openSuite(browser) {
   await check("a video that is playing can't be removed (explained)", async () => {
     await page.getByTestId("remove-video").click();
     await page.getByTestId("remove-sheet").waitFor();
-    assert((await page.getByTestId("remove-sheet").textContent()).includes("Put a different video on those cabs first"), "explains why");
+    assert((await page.getByTestId("remove-sheet").textContent()).includes("Put a different video on each first"), "explains why");
+    assert((await page.locator('[data-testid="remove-places"] a').count()) > 0, "and links to where to change it");
     await page.keyboard.press("Escape");
   });
 
@@ -681,6 +1403,10 @@ async function openSuite(browser) {
     await page.getByTestId("upload-failed-reason").waitFor({ timeout: 120_000 });
     const reason = await page.getByTestId("upload-failed-reason").textContent();
     assert(reason && reason.length > 10, `reason: ${reason}`);
+    assert(
+      !/video uploads in the last hour/.test(reason),
+      `the server's anonymous upload ceiling was reached (each run uploads 3 videos without signing in; restart the server or wait): ${reason}`,
+    );
     const items = (await anon("/api/m/loops")).body.items;
     const loop = items.find((item) => item.name === `E2E broken ${RUN_ID}`);
     assert(loop && loop.processing.state === "failed", "failed loop listed");
@@ -805,17 +1531,10 @@ async function openSuite(browser) {
     const slow = await makeVideo(path.join(workDir, "slow.mov"), 60, "1920x1080");
     const quick = await makeVideo(path.join(workDir, "quick.mov"), 3);
     const post = async (name, file, target) => {
-      const query = new URLSearchParams({ name, filename: path.basename(file) });
-      if (target) query.set("target", JSON.stringify(target));
-      const response = await page.request.post(`${BASE}/api/m/upload?${query}`, {
-        data: readFileSync(file),
-        headers: { "Content-Type": "video/quicktime" },
-        timeout: 120_000,
-      });
-      const body = await response.json();
-      assert(response.status() === 202, `upload ${name}: ${response.status()} ${JSON.stringify(body)}`);
-      created.loops.add(body.loopId);
-      return body.loopId;
+      const result = await uploadInPieces(pageRequest(page), file, { name, target });
+      assert(result.completed?.status === 202, `upload ${name}: ${JSON.stringify(result)}`);
+      created.loops.add(result.completed.body.loopId);
+      return result.completed.body.loopId;
     };
     const firstId = await post(`E2E first in line ${RUN_ID}`, slow, null);
     const secondId = await post(`E2E superseded ${RUN_ID}`, quick, { type: "group", groupId: city.id });
@@ -834,7 +1553,7 @@ async function openSuite(browser) {
     assert(second.processing.state === "ready", `second ready: ${JSON.stringify(second.processing)}`);
     assert(/wasn't put on group Demo · City, because what group Demo · City plays was changed while this video was uploading/.test(second.processing.error ?? ""), `note: ${second.processing.error}`);
     assert(!second.liveOn.groups.some((group) => group.id === city.id) && second.liveOn.cabCount === 0, "not live anywhere");
-    assert((await manifestFor("DEMO-CAB-08")).loopId === spring.id, "City keeps the newer choice");
+    assert((await manifestFor("DEMO-CAB-05")).loopId === spring.id, "City keeps the newer choice");
     const first = (await apiJson(page, `/api/m/loops/${firstId}`)).body;
     assert(first.processing.state === "ready" && first.liveOn.cabCount === 0, "first upload ready, in Videos only");
   });
@@ -1009,26 +1728,50 @@ async function openSuite(browser) {
 
 async function uploadCeilingSuite(browser, base) {
   assert((await serverMode(base)) === "open", "extra server is open");
-  const query = (name) => `/api/m/upload?${new URLSearchParams({ name, filename: "clip.mov" })}`;
-  const notAVideo = "definitely not a video\n".repeat(50);
+  const anonymous = (url, init) => anon(url, init, base);
+  const opening = (name, size = 10, fingerprint = `e2e-ceiling-${RUN_ID}-${name.replace(/[^A-Za-z0-9._-]+/g, "-")}`) =>
+    anonymous("/api/m/uploads", { method: "POST", json: { name, fileName: "clip.mov", size, fingerprint } });
 
-  await check("anonymous upload ceiling: 3 per hour on the test server, then a clear refusal", async () => {
-    assert((await anon(query("E2E ceiling"), {}, base)).status === 200, "preflight allowed at first");
-    // Each POST counts as soon as the server starts receiving it (these are refused as not-a-video).
-    for (let i = 0; i < 3; i += 1) {
-      const response = await anon(query(`E2E ceiling ${i}`), { method: "POST", body: notAVideo, headers: { "Content-Type": "video/quicktime" } }, base);
-      assert(response.status === 415, `upload ${i}: ${response.status} ${JSON.stringify(response.body)}`);
+  await check("uploads in pieces: the size limit is enforced before anything is sent, and per piece", async () => {
+    const tooBig = await opening("E2E too big", 500 * 1024 * 1024 + 1, `e2e-too-big-${RUN_ID}`);
+    assert(tooBig.status === 413 && /500MB/.test(tooBig.body.error), `too big: ${tooBig.status} ${JSON.stringify(tooBig.body)}`);
+    const notMov = await anonymous("/api/m/uploads", { method: "POST", json: { name: "E2E text", fileName: "notes.txt", size: 10, fingerprint: `e2e-txt-${RUN_ID}` } });
+    assert(notMov.status === 400, `wrong type: ${notMov.status}`);
+  });
+
+  await check("anonymous upload ceiling: a video sent in several pieces counts once; 3 per hour, then a clear refusal", async () => {
+    // One real video, sent in several pieces, and opened twice (carrying on with the same file).
+    const file = await makeBigVideo(path.join(workDir, "ceiling-multi.mov"), 10);
+    const first = await uploadInPieces(anonymous, file, { name: `E2E ceiling multi ${RUN_ID}`, fingerprint: `e2e-ceiling-multi-${RUN_ID}` });
+    assert(first.completed?.status === 202 && first.pieceCount >= 3, `multi-piece upload: ${JSON.stringify({ status: first.completed?.status, pieces: first.pieceCount })}`);
+    created.loops.add(first.completed.body.loopId);
+    // Let it finish preparing before this server is stopped, so nothing is left half-made.
+    for (let i = 0; i < 90; i += 1) {
+      const state = (await anonymous(`/api/m/loops/${first.completed.body.loopId}`)).body?.processing?.state;
+      if (state && state !== "processing") break;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
-    const refused = await anon(query("E2E ceiling 4"), { method: "POST", body: notAVideo, headers: { "Content-Type": "video/quicktime" } }, base);
-    assert(refused.status === 429, `4th upload ${refused.status}`);
+    const again = await opening(`E2E ceiling multi ${RUN_ID}`, statSync(file).size, `e2e-ceiling-multi-other-${RUN_ID}`);
+    assert(again.status === 201, `second video allowed: ${again.status}`);
+    // Carrying on with that same (unfinished) file does not count again.
+    const resumed = await opening(`E2E ceiling multi ${RUN_ID}`, statSync(file).size, `e2e-ceiling-multi-other-${RUN_ID}`);
+    assert(resumed.status === 200 && resumed.body.resumed === true, `resumed: ${resumed.status}`);
+    const third = await opening(`E2E ceiling 3 ${RUN_ID}`);
+    assert(third.status === 201, `third video allowed: ${third.status} ${JSON.stringify(third.body)}`);
+    const refused = await opening(`E2E ceiling 4 ${RUN_ID}`);
+    assert(refused.status === 429, `4th video ${refused.status}`);
     assert(/3 video uploads in the last hour/.test(refused.body.error) && /Try again in \d+ minutes?/.test(refused.body.error), refused.body.error);
-    const preflight = await anon(query("E2E ceiling 5"), {}, base);
-    assert(preflight.status === 429, `preflight refused too: ${preflight.status}`);
     // Signed-in users are not limited.
     const admin = await adminSession(base);
-    assert((await admin(query("E2E ceiling admin"), {})).status === 200, "admin preflight allowed");
-    const adminPost = await admin(query("E2E ceiling admin"), { method: "POST", body: notAVideo, headers: { "Content-Type": "video/quicktime" } });
-    assert(adminPost.status === 415, `admin upload reaches the file check: ${adminPost.status}`);
+    const adminOpen = await admin("/api/m/uploads", { method: "POST", json: { name: `E2E ceiling admin ${RUN_ID}`, fileName: "clip.mov", size: 10, fingerprint: `e2e-ceiling-admin-${RUN_ID}` } });
+    assert(adminOpen.status === 201, `admin allowed: ${adminOpen.status}`);
+    // A file that isn't a video is refused at its first piece, not after all of it.
+    const pieceUrl = `/api/m/uploads/${adminOpen.body.uploadId}/pieces/0`;
+    const octets = { "Content-Type": "application/octet-stream" };
+    const tooLong = await admin(pieceUrl, { method: "PUT", body: Buffer.from("eleven byte"), headers: octets });
+    assert(tooLong.status === 413, `a piece longer than the declared file: ${tooLong.status}`);
+    const text = await admin(pieceUrl, { method: "PUT", body: Buffer.from("not video!"), headers: octets });
+    assert(text.status === 415 && /not a supported video/.test(text.body.error), `a first piece of text: ${text.status} ${JSON.stringify(text.body)}`);
   });
 
   await check("anonymous upload ceiling: the phone says so before sending anything", async () => {
@@ -1039,7 +1782,7 @@ async function uploadCeilingSuite(browser, base) {
       const file = await makeVideo(path.join(workDir, "ceiling.mov"));
       let posted = false;
       page.on("request", (request) => {
-        if (request.method() === "POST" && request.url().includes("/api/m/upload")) posted = true;
+        if (request.method() === "PUT" && request.url().includes("/pieces/")) posted = true;
       });
       await goto(page, "/m/upload", base);
       // A fresh dev server may reload a page it has just compiled; let that settle first.
@@ -1071,7 +1814,10 @@ async function signInRequiredSuite(browser, base) {
     assert((await anon("/api/auth/me", {}, base)).status === 401, "me 401");
     assert((await anon("/api/m/loops", {}, base)).status === 401, "loops 401");
     assert((await anon("/api/m/assign", { method: "POST", json: { loopId: null, target: { type: "fleet" } } }, base)).status === 401, "assign 401");
-    assert((await anon("/api/m/upload?name=xx&filename=a.mov", {}, base)).status === 401, "upload preflight 401");
+    assert(
+      (await anon("/api/m/uploads", { method: "POST", json: { name: "xx", fileName: "a.mov", size: 10, fingerprint: "e2e-signin-401" } }, base)).status === 401,
+      "starting an upload needs sign-in",
+    );
     const admin = await adminSession(base);
     const cab = (await admin("/api/m/overview")).body.cabs[0];
     assert((await anon(`/api/devices/${cab.id}/disable`, { method: "POST", json: { reason: "x" } }, base)).status === 401, "pause 401");
@@ -1202,16 +1948,42 @@ async function iconContactSheet(browser) {
   }
 }
 
+function removeEmptyDir(dir) {
+  try {
+    if (existsSync(dir) && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // leave it
+  }
+}
+
 async function cleanup() {
   console.log("- restoring demo data ...");
   try {
     await npm("demo:seed");
-    // Clear the cab override this run may have left and archive the videos it uploaded.
+    // Delete the videos this run uploaded, with their files: take each off the library (archive),
+    // then delete it through the desktop API, which removes its stored objects too.
     const admin = await adminSession();
-    const loops = (await admin("/api/m/loops")).body;
-    for (const loop of loops.items ?? []) {
-      if (loop.name.includes(RUN_ID) || created.loops.has(loop.id)) {
-        await admin(`/api/m/loops/${loop.id}/archive`, { method: "POST" });
+    const mine = await db().loop.findMany({
+      where: { OR: [{ name: { contains: RUN_ID } }, { id: { in: [...created.loops] } }] },
+      select: { id: true, name: true, status: true },
+    });
+    for (const loop of mine) {
+      if (loop.status === "PUBLISHED") await admin(`/api/m/loops/${loop.id}/archive`, { method: "POST" });
+      const deleted = await admin(`/api/loops/${loop.id}`, { method: "DELETE" });
+      if (deleted.status !== 200) console.log(`  could not delete "${loop.name}": ${deleted.status} ${JSON.stringify(deleted.body)}`);
+      // Local storage deletes the files but keeps their (now empty) folders.
+      for (const folder of ["loops", "manifests"]) removeEmptyDir(path.join(webDir, "tmp/storage", folder, loop.id));
+    }
+    // Upload sessions this run opened (pieces or, once finished, just their note).
+    const sessionsRoot = process.env.UPLOAD_SESSIONS_DIR || path.join(os.tmpdir(), "orison-upload-sessions");
+    for (const name of existsSync(sessionsRoot) ? readdirSync(sessionsRoot) : []) {
+      try {
+        const meta = JSON.parse(readFileSync(path.join(sessionsRoot, name, "meta.json"), "utf8"));
+        if ((meta.scope ?? "phone") === "phone" && (String(meta.data?.name ?? "").includes(RUN_ID) || String(meta.fingerprint).includes(RUN_ID))) {
+          rmSync(path.join(sessionsRoot, name), { recursive: true, force: true });
+        }
+      } catch {
+        // not a session, or being written: leave it
       }
     }
     const users = (await admin("/api/users")).body;

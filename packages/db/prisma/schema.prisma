@@ -55,6 +55,8 @@ model Asset {
   status         AssetStatus      @default(PROCESSING)
   metadata       Json?
   errorMessage   String?
+  // Removed from the library by staff while loops still use it: hidden, file kept for those loops.
+  hiddenAt       DateTime?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
   slotPlacements SlotContent[]
@@ -102,6 +104,20 @@ model Loop {
   // When the upload with pendingTarget was requested; null once the target has been applied or
   // skipped (a newer change to the same target wins). Non-null on a PUBLISHED loop = still applying.
   pendingTargetAt  DateTime?
+  // Desktop publish job (apps/web/src/lib/loop-publish.ts). While publishJobId is set a background
+  // compile is running; the loop keeps serving its current compiled video until the new one swaps
+  // in. publishHeartbeatAt is touched while the job runs; a stale one means it was interrupted.
+  publishJobId       String?
+  publishHeartbeatAt DateTime?
+  publishProgress    Json?
+  // Keys of what is compiled and published (lib/loop-plan.ts); null for loops published before.
+  compiledContentKey String?
+  manifestContentKey String?
+  // Key of the slots as last published (picture, sound and stills); differs from the saved slots'
+  // key when there are changes not yet published.
+  publishedDraftKey  String?
+  // Objects superseded by a newer publish, deleted after a grace period: [{ key, retiredAt }].
+  retiredObjects     Json?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 }
@@ -178,6 +194,27 @@ model Device {
   locationAccuracyM Float?
   locationSource   String?
   locationAt       DateTime?
+  // Latest state reported in heartbeats, kept here so list pages never read DeviceHeartbeat.
+  // statusReportedAt is when the heartbeat that set them arrived (null: none since this existed).
+  playerStatus     String?
+  // Fine-grained player state from firmware 1.2.0+ (IDLE, SAFETY, JOURNEY, SILENT, ...).
+  playerState      String?
+  // How journeys start: "gpio" | "keyboard" | "always" (no passenger detection). Null: firmware
+  // older than 1.2.0, which does not say; whether such a cab detects passengers is only known from
+  // the journeys it reports (lib/device-status.ts reportsJourneys).
+  playbackTrigger  String?
+  signalPercent    Int?
+  signalDbm        Int?
+  networkType      String?
+  uptimeSeconds    Int?
+  safetyChecksum   String?
+  statusReportedAt DateTime?
+  // Content sync as reported by firmware 1.2.0+: "ok" | "downloading" | "failed".
+  syncState        String?
+  syncError        String?
+  syncFailedLoopId String?
+  syncStateSince   DateTime?
+  syncNextRetryAt  DateTime?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   playbackLogs     PlaybackLog[]
@@ -197,7 +234,14 @@ model DeviceHeartbeat {
   memoryUsedPercent Float?
   playerStatus      String?
   networkType       String?
+  // As sent: dBm when negative; old firmware sends a 0-100 quality percentage here.
   signalStrength    Int?
+  signalPercent     Int?
+  playerState       String?
+  playbackTrigger   String?
+  safetyChecksum    String?
+  syncState         String?
+  syncError         String?
   locationData      Json?
   receivedAt        DateTime  @default(now())
 
@@ -221,12 +265,17 @@ model PlaybackLog {
   completedFull  Boolean         @default(true)
   durationMs     Int?
   journeyId      String?
+  // Set by firmware 1.2.0+ (unique per entry on the cab): re-sent entries are skipped, and rows
+  // with an eventId carry measured durations and completion. Null on older firmware's rows.
+  eventId        String?
+  // Only kept for journey start/end markers.
   locationData   Json?
   createdAt      DateTime        @default(now())
 
+  // Also serves the (deviceId, eventId) duplicate check, which is bounded by the batch's playedAt.
   @@index([deviceId, playedAt])
-  @@index([loopId, playedAt])
-  @@index([journeyId, playedAt])
+  // Analytics date ranges and the CSV export's keyset pagination.
+  @@index([playedAt, id])
 }
 
 model ActivityEvent {

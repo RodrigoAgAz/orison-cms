@@ -41,15 +41,13 @@ export const activityEventTypes = [
   "USER_PASSWORD_CHANGED",
 ] as const;
 
-export const playbackModes = ["journey", "silent", "idle"] as const;
+// "continuous": the unit plays the loop without passenger detection (playbackTrigger "always").
+export const playbackModes = ["journey", "silent", "idle", "continuous"] as const;
+export const playbackTriggers = ["gpio", "keyboard", "always"] as const;
+export const deviceSyncStates = ["ok", "downloading", "failed"] as const;
+export const devicePlayerStatuses = ["playing", "silent", "disabled", "idle", "fallback", "error", "unknown"] as const;
+export const deviceNetworkTypes = ["4g", "ethernet", "wifi", "unknown"] as const;
 export const playerStates = ["IDLE", "SAFETY", "JOURNEY", "SILENT", "WIND_DOWN", "DISABLED"] as const;
-
-export const queueNames = {
-  assetProcessing: "asset-processing",
-  loopPublish: "loop-publish",
-  weatherGeneration: "weather-generation",
-  newsGeneration: "news-generation",
-} as const;
 
 export const defaultFillerTemplate = [
   {
@@ -83,3 +81,5 @@ export type SlotContentType = (typeof slotContentTypes)[number];
 export type ActivityEventType = (typeof activityEventTypes)[number];
 export type PlaybackMode = (typeof playbackModes)[number];
 export type PlayerState = (typeof playerStates)[number];
+export type PlaybackTrigger = (typeof playbackTriggers)[number];
+export type DeviceSyncState = (typeof deviceSyncStates)[number];

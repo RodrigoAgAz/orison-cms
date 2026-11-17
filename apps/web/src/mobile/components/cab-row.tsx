@@ -14,6 +14,8 @@ export function runningLine(cab: CabSummary, now = new Date()) {
     return "On now";
   }
   if (cab.status === "paused") {
+    // A paused screen in a cab that is switched on still reports (onlineSince is set).
+    if (cab.onlineSince) return `Screen paused · cab on for ${duration((now.getTime() - new Date(cab.onlineSince).getTime()) / 1000)}`;
     return cab.lastSeenAt ? `Screen paused · last on ${when(cab.lastSeenAt, now)}` : "Screen paused";
   }
   if (!cab.lastSeenAt) return "Hasn’t been switched on yet";

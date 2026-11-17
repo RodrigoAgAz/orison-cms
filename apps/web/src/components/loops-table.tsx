@@ -1,114 +1,101 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
+import { requestDelete, requestPause } from "@/components/loop-actions-client";
+import {
+  ConfirmDialog,
+  LoopStatusBadge,
+  PUBLISHED_BEFORE_UPDATE_NOTE,
+  PublishProgress,
+  formatWhen,
+  readError,
+  type ConfirmRequest,
+  type LoopStateView,
+} from "@/components/loop-ui";
 import { PaginationControls } from "@/components/pagination-controls";
-import { StatusPill } from "@/components/status-pill";
 import { useToast } from "@/components/toast-provider";
 
-type LoopRow = {
-  id: string;
-  name: string;
-  status: string;
-  updatedAt: string;
-  completeSlots: number;
-  targetGroupName: string;
-  isDirectUpload: boolean;
-};
-
 type Props = {
-  loops: LoopRow[];
+  loops: LoopStateView[];
   page: number;
   pageSize: number;
   total: number;
 };
 
-export function LoopsTable({ loops, page, pageSize, total }: Props) {
+const kindLabels: Record<LoopStateView["kind"], string> = {
+  builder: "Built in slots",
+  prebuilt: "Pre-built video",
+  phone: "Phone upload",
+};
+
+function shortLiveOn(liveOn: LoopStateView["liveOn"]) {
+  const where = liveOn.fleet ? ["All cabs"] : liveOn.groups.map((group) => group.name);
+  const cabs = `${liveOn.cabCount} cab${liveOn.cabCount === 1 ? "" : "s"}`;
+  return where.length ? `${where.join(", ")} · ${cabs}` : cabs;
+}
+
+export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
   const router = useRouter();
   const { toast } = useToast();
-  const [processingLoopId, setProcessingLoopId] = useState<string | null>(null);
+  const [loops, setLoops] = useState(initial);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  useEffect(() => setLoops(initial), [initial]);
 
-  async function handlePause(loop: LoopRow) {
-    const confirmed = window.confirm(`Pause published loop "${loop.name}"?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setProcessingLoopId(loop.id);
-
-    try {
-      const response = await fetch(`/api/loops/${loop.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ status: "ARCHIVED" }),
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to pause the loop.");
+  // Live progress and outcome of publishes shown on this page.
+  const runningIds = loops.filter((loop) => loop.publish.kind === "running").map((loop) => loop.id).join(",");
+  useEffect(() => {
+    if (!runningIds) return;
+    const timer = window.setInterval(async () => {
+      const response = await fetch(`/api/loops/state?ids=${runningIds}`, { cache: "no-store" }).catch(() => null);
+      if (!response?.ok) return;
+      const body = (await response.json()) as { items: LoopStateView[] };
+      const byId = new Map(body.items.map((item) => [item.id, item]));
+      setLoops((current) => current.map((loop) => byId.get(loop.id) ?? loop));
+      for (const item of body.items) {
+        if (item.publish.kind !== "running") {
+          toast(
+            item.publishError
+              ? { title: "Publish failed", message: `${item.name}: ${item.publishError}`, tone: "error" }
+              : { title: "Published", message: `"${item.name}" is published${item.live ? ` and on air for ${item.liveLabel}` : ""}.`, tone: "success" },
+          );
+        }
       }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [runningIds, toast]);
 
-      toast({
-        title: "Loop paused",
-        message: `${loop.name} was archived and is no longer active.`,
-        tone: "success",
-      });
-      router.refresh();
-    } catch (error) {
-      toast({
-        title: "Pause failed",
-        message: error instanceof Error ? error.message : "Unable to pause the loop.",
-        tone: "error",
-      });
-    } finally {
-      setProcessingLoopId(null);
-    }
-  }
+  // Uploaded videos being converted (desktop pre-built loops and phone uploads): refresh until done.
+  const convertingIds = loops.filter((loop) => loop.status === "PUBLISHING" && !loop.publishError && loop.publish.kind !== "running").map((loop) => loop.id).join(",");
+  useEffect(() => {
+    if (!convertingIds) return;
+    const timer = window.setInterval(() => router.refresh(), 5000);
+    return () => window.clearInterval(timer);
+  }, [convertingIds, router]);
 
-  async function handleDelete(loop: LoopRow) {
-    const confirmed = window.confirm(`Delete loop "${loop.name}"?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setProcessingLoopId(loop.id);
-
+  async function duplicate(loop: LoopStateView) {
+    setBusyId(loop.id);
     try {
-      const response = await fetch(`/api/loops/${loop.id}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to delete the loop.");
-      }
-
-      toast({
-        title: "Loop deleted",
-        message: `${loop.name} was removed.`,
-        tone: "success",
-      });
-      router.refresh();
+      const response = await fetch(`/api/loops/${loop.id}/duplicate`, { method: "POST" });
+      if (!response.ok) throw new Error(await readError(response, "The loop could not be duplicated."));
+      const copy = (await response.json()) as { id: string; name: string };
+      toast({ title: "Duplicated", message: `Opened "${copy.name}".`, tone: "success" });
+      router.push(`/loops/${copy.id}`);
     } catch (error) {
-      toast({
-        title: "Delete failed",
-        message: error instanceof Error ? error.message : "Unable to delete the loop.",
-        tone: "error",
-      });
+      toast({ title: "Not duplicated", message: error instanceof Error ? error.message : "", tone: "error" });
     } finally {
-      setProcessingLoopId(null);
+      setBusyId(null);
     }
   }
 
   if (loops.length === 0) {
     return (
       <div className="empty-state">
-        <strong>No loops created yet</strong>
-        <p>Create a new slot-based loop above, or use Upload Pre-built Loop for a quick publish.</p>
+        <strong>No loops yet</strong>
+        <p>Create a loop above, or upload a pre-built one.</p>
       </div>
     );
   }
@@ -116,75 +103,75 @@ export function LoopsTable({ loops, page, pageSize, total }: Props) {
   return (
     <div className="stack">
       <div className="table-wrap">
-        <table className="data-table">
+        <table className="data-table ll-table">
           <thead>
             <tr>
-              <th>Name</th>
+              <th>Loop</th>
               <th>Status</th>
-              <th>Audience</th>
-              <th>Updated</th>
-              <th>Slot Coverage</th>
+              <th>On air for</th>
+              <th>Plays on</th>
+              <th>Last published</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {loops.map((loop) => (
               <tr key={loop.id}>
-                <td>{loop.name}</td>
                 <td>
-                  <StatusPill value={loop.status} />
+                  <Link className="ll-name" href={`/loops/${loop.id}`}>
+                    {loop.name}
+                  </Link>
+                  <span className="ll-kind">
+                    {kindLabels[loop.kind]}
+                    {loop.kind === "builder" ? ` · ${loop.readySlots} of ${loop.slotCount} slots ready` : ""}
+                  </span>
                 </td>
-                <td>{loop.targetGroupName}</td>
-                <td>{new Date(loop.updatedAt).toLocaleString()}</td>
                 <td>
-                  {loop.isDirectUpload ? (
-                    <div className="stack-sm">
-                      <strong>Direct upload</strong>
-                      <span className="muted loop-table-subtext">Published from one pre-built MP4</span>
-                    </div>
-                  ) : (
-                    `${loop.completeSlots}/10 complete`
-                  )}
+                  <div className="ll-status">
+                    <LoopStatusBadge state={loop} />
+                    {loop.unpublishedChanges ? <span className="lx-badge lx-badge-warn">Changes not yet published</span> : null}
+                    {loop.publishedBeforeUpdate && !loop.unpublishedChanges && loop.publish.kind !== "running" ? (
+                      <span className="ll-note" title={PUBLISHED_BEFORE_UPDATE_NOTE}>
+                        Published before the update · publish again to apply exact timings
+                      </span>
+                    ) : null}
+                    {loop.publish.kind === "running" ? <PublishProgress compact state={loop} /> : null}
+                    {loop.publish.kind !== "running" && loop.publishError ? (
+                      <span className="ll-error" title={loop.publishError}>
+                        {loop.status === "PUBLISHED" ? "Note" : "Failed"}: {loop.publishError}
+                      </span>
+                    ) : null}
+                  </div>
                 </td>
+                <td className={loop.live ? "ll-live" : "muted"}>{loop.live ? shortLiveOn(loop.liveOn) : "Not on air"}</td>
+                <td>{loop.kind === "phone" ? <span className="muted">Phone app</span> : loop.targetLabel}</td>
+                <td>{formatWhen(loop.publishedAt)}</td>
                 <td>
                   <div className="button-row table-actions">
-                    <Link className="button button-secondary" href={`/loops/${loop.id}`}>
-                      {loop.isDirectUpload ? "View" : "Open"}
-                    </Link>
+                    {loop.kind === "builder" ? (
+                      <button className="button button-secondary" disabled={busyId === loop.id} onClick={() => void duplicate(loop)} type="button">
+                        Duplicate
+                      </button>
+                    ) : null}
                     {loop.status === "PUBLISHED" ? (
                       <button
                         className="button button-secondary"
-                        disabled={processingLoopId === loop.id}
-                        onClick={() => void handlePause(loop)}
+                        disabled={busyId === loop.id || loop.publish.kind === "running"}
+                        onClick={() => void requestPause(loop, setConfirm, toast, () => router.refresh())}
                         type="button"
                       >
-                        {processingLoopId === loop.id ? (
-                          <span className="button-inline">
-                            <span aria-hidden className="button-spinner" />
-                            Working
-                          </span>
-                        ) : (
-                          "Pause"
-                        )}
+                        Pause
                       </button>
-                    ) : null}
-                    {loop.status !== "PUBLISHED" && loop.status !== "PUBLISHING" ? (
+                    ) : (
                       <button
                         className="button button-danger"
-                        disabled={processingLoopId === loop.id}
-                        onClick={() => void handleDelete(loop)}
+                        disabled={busyId === loop.id || loop.publish.kind === "running" || (loop.status === "PUBLISHING" && !loop.publishError)}
+                        onClick={() => requestDelete(loop, setConfirm, toast, () => router.refresh())}
                         type="button"
                       >
-                        {processingLoopId === loop.id ? (
-                          <span className="button-inline">
-                            <span aria-hidden className="button-spinner" />
-                            Deleting
-                          </span>
-                        ) : (
-                          "Delete"
-                        )}
+                        Delete
                       </button>
-                    ) : null}
+                    )}
                   </div>
                 </td>
               </tr>
@@ -194,6 +181,7 @@ export function LoopsTable({ loops, page, pageSize, total }: Props) {
       </div>
 
       <PaginationControls page={page} pageSize={pageSize} pathname="/loops" total={total} />
+      {confirm ? <ConfirmDialog onClose={() => setConfirm(null)} request={confirm} /> : null}
     </div>
   );
 }

@@ -4,18 +4,11 @@ import Link from "next/link";
 
 import { AlertIcon, ChevronIcon, UploadIcon, VideosIcon } from "../components/icons";
 import { ButtonLink, EmptyState, ErrorState, Freshness, href, LoadingScreen, Poster, Screen, Spinner, TopBar } from "../components/ui";
-import { plural, videoLength, when } from "../lib/format";
+import { videoLength, when } from "../lib/format";
+import { placeWords } from "../lib/status";
 import { useResource } from "../lib/store";
 import type { LoopSummary } from "../lib/types";
 
-export function liveWords(loop: LoopSummary) {
-  const { fleet, groups, cabCount } = loop.liveOn;
-  if (!fleet && groups.length === 0 && cabCount === 0) return null;
-  const count = plural(cabCount, "cab");
-  if (fleet) return `Playing on all cabs · ${count}`;
-  if (groups.length) return `Playing in ${groups.map((group) => group.name).join(", ")} · ${count}`;
-  return `Playing on ${count}`;
-}
 
 export function VideosScreen() {
   const loops = useResource<{ items: LoopSummary[] }>("/api/m/loops", { refreshMs: 15_000 });
@@ -65,7 +58,7 @@ export function VideosScreen() {
 }
 
 function VideoRow({ loop }: { loop: LoopSummary }) {
-  const live = liveWords(loop);
+  const live = placeWords(loop.liveOn);
   const state = loop.processing.state;
   return (
     <Link href={href(`/m/videos/${loop.id}`)} className={`m-videorow is-${state}`} data-testid="video-row" data-loop-id={loop.id} data-state={state}>
@@ -94,8 +87,8 @@ function VideoRow({ loop }: { loop: LoopSummary }) {
             Couldn&rsquo;t be used: {loop.processing.error ?? "the video couldn’t be prepared."}
           </span>
         ) : live ? (
-          <span className="m-videorow-status is-live">
-            <span className="m-livedot" aria-hidden="true" /> {live}
+          <span className={`m-videorow-status ${live.live ? "is-live" : "is-set"}`} data-testid="video-place">
+            <span className={live.live ? "m-livedot" : "m-setdot"} aria-hidden="true" /> {live.text}
           </span>
         ) : (
           <span className="m-videorow-status">Not playing anywhere</span>

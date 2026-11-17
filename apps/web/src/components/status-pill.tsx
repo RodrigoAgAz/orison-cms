@@ -7,7 +7,6 @@ type Props = {
 const toneMap: Record<string, string> = {
   PUBLISHED: "pill pill-success",
   DRAFT: "pill pill-muted",
-  REVIEW: "pill pill-warning",
   PUBLISHING: "pill pill-warning",
   ARCHIVED: "pill pill-muted",
   READY: "pill pill-success",
@@ -31,7 +30,24 @@ const toneMap: Record<string, string> = {
   inactive: "pill pill-muted",
 };
 
+// One word per thing on the desktop: cab (not device), pause (not disable), loop.
+const labelMap: Record<string, string> = {
+  DEVICE_REGISTERED: "Cab registered",
+  DEVICE_SYNCED: "Cab updated",
+  DEVICE_OFFLINE: "Cab offline",
+  DEVICE_DISABLED: "Cab paused",
+  DEVICE_ENABLED: "Cab resumed",
+  SYNC_FAILED: "Update failed",
+  DEVICE_GROUP_CREATED: "Group created",
+  DEVICE_GROUP_UPDATED: "Group changed",
+  DEVICE_GROUP_DELETED: "Group deleted",
+  outdated: "Updating",
+};
+
 function formatLabel(value: string) {
+  if (labelMap[value]) {
+    return labelMap[value];
+  }
   return value
     .split(/[_\s-]+/)
     .filter(Boolean)

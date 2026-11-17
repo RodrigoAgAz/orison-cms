@@ -1,1315 +1,1061 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-
-import {
-  advertisementDurationMs,
-  slotDurationMs,
-  type AssetCategory,
-} from "@orison/shared/src/constants";
 
 import { MediaPoster } from "@/components/media-poster";
 import { Modal } from "@/components/modal";
-import { StatusPill } from "@/components/status-pill";
 import { useToast } from "@/components/toast-provider";
+import {
+  ConfirmDialog,
+  LoopStatusBadge,
+  PublishProgress,
+  formatClock,
+  formatWhen,
+  readError,
+  useLeaveGuard,
+  useLoopState,
+  type ConfirmRequest,
+  type LoopStateView,
+  PUBLISHED_BEFORE_UPDATE_NOTE,
+} from "@/components/loop-ui";
+import {
+  DURATION_STEP_MS,
+  MIN_ITEM_DURATION_MS,
+  SLOT_DURATION_MS,
+  defaultAdvertDurationMs,
+  describeArithmetic,
+  draftSlotProblems,
+  fitOf,
+  fitTemplateDurations,
+  fitWarning,
+  formatSeconds,
+  publishSlotProblems,
+  slotArithmetic,
+  withSequentialStartTimes,
+} from "@/lib/slot-rules";
 
-type AssetOption = {
+export type AssetOption = {
   id: string;
   filename: string;
-  category: AssetCategory;
+  category: string;
   mimeType: string;
   durationMs: number | null;
   width: number | null;
   height: number | null;
-  fileSize: number;
   thumbnailUrl: string | null;
   previewUrl: string;
   metadata: Record<string, string>;
+  hidden?: boolean;
 };
 
-type SlotContentItem = {
-  id?: string;
+type Item = {
+  key: string;
   assetId: string;
   orderInSlot: number;
   startTimeMs: number;
   durationMs: number;
   contentType: "ADVERTISEMENT" | "FILLER";
-  asset?: AssetOption;
 };
 
-type SlotItem = {
-  id: string;
+type SlotState = {
   position: number;
-  staticCreativeId?: string | null;
-  staticCreative?: AssetOption | null;
-  contents: SlotContentItem[];
-};
-
-type PreviewItem = {
-  assetId: string;
-  filename: string;
-  url: string;
-  mimeType: string;
-  durationMs: number;
-  type: "ADVERTISEMENT" | "FILLER";
-  slotPosition: number;
+  updatedAt: string;
+  staticCreativeId: string | null;
+  items: Item[];
 };
 
 type Props = {
   loop: {
     id: string;
     name: string;
-    status: string;
-    publishError?: string | null;
-    targetGroupId?: string | null;
-    slots: SlotItem[];
+    updatedAt: string;
+    targetGroupId: string | null;
+    slots: Array<{
+      position: number;
+      updatedAt: string;
+      staticCreativeId: string | null;
+      contents: Array<Omit<Item, "key">>;
+    }>;
   };
-  advertisementAssets: AssetOption[];
-  deviceGroups: Array<{
-    id: string;
-    name: string;
-  }>;
-  staticCreativeAssets: AssetOption[];
-  fillerAssets: AssetOption[];
-  fillerTemplate: Array<{
-    category: AssetCategory;
-    durationMs: number;
-  }>;
+  initialState: LoopStateView;
+  assets: AssetOption[];
+  deviceGroups: Array<{ id: string; name: string }>;
+  fillerTemplate: Array<{ category: string; durationMs: number }>;
+  frame: { width: number; height: number };
 };
 
-function formatTime(ms: number) {
-  return `${Math.round(ms / 1000)}s`;
-}
+const categoryLabels: Record<string, string> = {
+  ADVERTISEMENT: "Advert",
+  STATIC_CREATIVE: "Still image",
+  FILLER_WEATHER: "Weather filler",
+  FILLER_NEWS: "News filler",
+  FILLER_BRANDED: "Branded filler",
+  FILLER_OTHER: "Other filler",
+  ANY_FILLER: "Any filler",
+};
 
-function assetMetaSummary(asset?: AssetOption) {
-  if (!asset) {
-    return "No asset selected";
-  }
+let keySeed = 0;
+const newKey = () => `item-${(keySeed += 1)}`;
 
-  const advertiser = asset.metadata.advertiserName;
-  const campaign = asset.metadata.campaignName;
-
-  if (advertiser && campaign) {
-    return `${advertiser} / ${campaign}`;
-  }
-
-  return advertiser ?? campaign ?? asset.filename;
-}
-
-function withStartTimes(contents: SlotContentItem[], assetMap: Map<string, AssetOption>) {
-  let current = 0;
-  return contents
-    .slice()
-    .sort((a, b) => a.orderInSlot - b.orderInSlot)
-    .map((content, index) => {
-      const next = {
-        ...content,
-        orderInSlot: index,
-        startTimeMs: current,
-        asset: assetMap.get(content.assetId),
-      };
-      current += next.durationMs;
-      return next;
-    });
-}
-
-function getSlotSummary(slot: SlotItem) {
-  const totalDuration = slot.contents.reduce((sum, item) => sum + item.durationMs, 0);
-  const adCount = slot.contents.filter((item) => item.contentType === "ADVERTISEMENT").length;
-  const remainingDuration = Math.max(slotDurationMs - totalDuration, 0);
-  const isValid = totalDuration === slotDurationMs && adCount === 1;
-
+function toSlotState(slot: Props["loop"]["slots"][number]): SlotState {
   return {
-    totalDuration,
-    remainingDuration,
-    adCount,
-    isValid,
+    position: slot.position,
+    updatedAt: slot.updatedAt,
+    staticCreativeId: slot.staticCreativeId,
+    items: withSequentialStartTimes(slot.contents.map((content) => ({ ...content, key: newKey() }))),
   };
 }
 
-function buildPreviewItems(slots: SlotItem[], scope: "slot" | "loop", selectedPosition: number) {
-  const visibleSlots =
-    scope === "slot" ? slots.filter((slot) => slot.position === selectedPosition) : slots;
-
-  return visibleSlots
-    .slice()
-    .sort((a, b) => a.position - b.position)
-    .flatMap((slot) =>
-      slot.contents
-        .slice()
-        .sort((a, b) => a.orderInSlot - b.orderInSlot)
-        .map((content) => {
-          if (!content.asset) {
-            return null;
-          }
-
-          return {
-            assetId: content.assetId,
-            filename: content.asset.filename,
-            url: content.asset.previewUrl,
-            mimeType: content.asset.mimeType,
-            durationMs: content.durationMs,
-            type: content.contentType,
-            slotPosition: slot.position,
-          } satisfies PreviewItem;
-        })
-        .filter((item): item is PreviewItem => Boolean(item)),
-    );
+function slotSignature(slot: SlotState) {
+  return JSON.stringify([slot.staticCreativeId, slot.items.map((item) => [item.assetId, item.durationMs, item.contentType])]);
 }
 
-export function LoopBuilder({
-  loop,
-  advertisementAssets,
-  deviceGroups,
-  staticCreativeAssets,
-  fillerAssets,
-  fillerTemplate,
-}: Props) {
+function lengthLabel(asset: AssetOption | undefined) {
+  if (!asset) return "missing file";
+  if (asset.mimeType.startsWith("image/")) return "still image";
+  return asset.durationMs ? `file ${formatSeconds(Math.round(asset.durationMs / 100) * 100)}` : "length unknown";
+}
+
+function DurationInput({ valueMs, onCommit, label }: { valueMs: number; onCommit: (ms: number) => void; label: string }) {
+  const [draft, setDraft] = useState((valueMs / 1000).toFixed(1));
+  useEffect(() => setDraft((valueMs / 1000).toFixed(1)), [valueMs]);
+  function commit() {
+    const seconds = Number.parseFloat(draft.replace(",", "."));
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      setDraft((valueMs / 1000).toFixed(1)); // an empty or invalid entry changes nothing
+      return;
+    }
+    const ms = Math.max(MIN_ITEM_DURATION_MS, Math.min(SLOT_DURATION_MS, Math.round((seconds * 1000) / DURATION_STEP_MS) * DURATION_STEP_MS));
+    setDraft((ms / 1000).toFixed(1));
+    if (ms !== valueMs) onCommit(ms);
+  }
+  return (
+    <label className="lb-duration">
+      <span className="sr-only">{label}</span>
+      <input
+        aria-label={label}
+        inputMode="decimal"
+        onBlur={commit}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+          if (event.key === "Escape") setDraft((valueMs / 1000).toFixed(1));
+        }}
+        type="text"
+        value={draft}
+      />
+      <span>s</span>
+    </label>
+  );
+}
+
+function SlotBar({ slot, assetMap, large = false }: { slot: SlotState; assetMap: Map<string, AssetOption>; large?: boolean }) {
+  const arithmetic = slotArithmetic(slot.items);
+  const scale = Math.max(SLOT_DURATION_MS, arithmetic.totalMs);
+  return (
+    <div className={`lb-bar ${large ? "is-large" : ""}`} aria-hidden>
+      {slot.items.map((item) => {
+        const asset = assetMap.get(item.assetId);
+        const fit = fitOf(asset, item.durationMs);
+        const heldPart = fit.kind === "held" ? fit.byMs / item.durationMs : 0;
+        return (
+          <span
+            className={`lb-bar-seg ${item.contentType === "ADVERTISEMENT" ? "is-ad" : fit.kind === "still" ? "is-still" : "is-filler"}`}
+            key={item.key}
+            style={{ width: `${(item.durationMs / scale) * 100}%` }}
+            title={`${asset?.filename ?? "?"}: ${formatSeconds(item.durationMs)}`}
+          >
+            {heldPart > 0 ? <span className="lb-bar-held" style={{ width: `${heldPart * 100}%` }} /> : null}
+            {large ? <em>{formatSeconds(item.durationMs)}</em> : null}
+          </span>
+        );
+      })}
+      {arithmetic.remainingMs > 0 ? <span className="lb-bar-gap" style={{ width: `${(arithmetic.remainingMs / scale) * 100}%` }} /> : null}
+    </div>
+  );
+}
+
+type PickerKind = { kind: "advert" } | { kind: "filler"; replaceKey?: string } | { kind: "still" };
+
+export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTemplate, frame }: Props) {
   const router = useRouter();
   const { toast } = useToast();
-  const allAssets = useMemo(
-    () => [...advertisementAssets, ...fillerAssets],
-    [advertisementAssets, fillerAssets],
-  );
-  const assetMap = useMemo(
-    () => new Map(allAssets.map((asset) => [asset.id, asset])),
-    [allAssets],
+  const assetMap = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
+  const adverts = assets.filter((asset) => asset.category === "ADVERTISEMENT" && !asset.hidden);
+  const fillers = assets.filter((asset) => asset.category.startsWith("FILLER_") && !asset.hidden);
+  const stills = assets.filter((asset) => asset.category === "STATIC_CREATIVE" && !asset.hidden);
+
+  const [slots, setSlots] = useState<SlotState[]>(() => loop.slots.map(toSlotState));
+  const [baseline, setBaseline] = useState<Record<number, string>>(() =>
+    Object.fromEntries(loop.slots.map((slot) => [slot.position, slotSignature(toSlotState(slot))])),
   );
   const [name, setName] = useState(loop.name);
+  const [savedName, setSavedName] = useState(loop.name);
+  const [loopUpdatedAt, setLoopUpdatedAt] = useState(loop.updatedAt);
   const [targetGroupId, setTargetGroupId] = useState(loop.targetGroupId ?? "");
-  const [status, setStatus] = useState(loop.status);
-  const [publishError, setPublishError] = useState(loop.publishError ?? null);
-  const [slots, setSlots] = useState(() =>
-    loop.slots.map((slot) => ({
-      ...slot,
-      contents: withStartTimes(slot.contents, assetMap),
-    })),
-  );
-  const [selectedPosition, setSelectedPosition] = useState(0);
-  const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
+  const [selected, setSelected] = useState(0);
+  const [picker, setPicker] = useState<PickerKind | null>(null);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState<"slot" | "loop" | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dirtySlots, setDirtySlots] = useState<number[]>([]);
-  const [dirtyName, setDirtyName] = useState(false);
-  const [dirtyTargetGroup, setDirtyTargetGroup] = useState(false);
-  const [adPickerOpen, setAdPickerOpen] = useState(false);
-  const [staticPickerOpen, setStaticPickerOpen] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewScope, setPreviewScope] = useState<"slot" | "loop">("slot");
-  const [previewIndex, setPreviewIndex] = useState(0);
-  const [deleting, setDeleting] = useState(false);
-  const [archiving, setArchiving] = useState(false);
+  const [state, setState] = useLoopState(loop.id, initialState, (settled) => {
+    if (settled.publish.kind === "idle" && !settled.publishError) {
+      toast({ title: "Published", message: `"${settled.name}" is published${settled.live ? ` and on air for ${settled.liveLabel}` : ""}.`, tone: "success" });
+    } else if (settled.publishError) {
+      toast({ title: "Publish failed", message: settled.publishError, tone: "error" });
+    }
+    router.refresh();
+  });
 
-  const selectedSlot =
-    slots.find((slot) => slot.position === selectedPosition) ??
-    slots.slice().sort((a, b) => a.position - b.position)[0];
-  const selectedAd = selectedSlot?.contents.find((item) => item.contentType === "ADVERTISEMENT");
-  const selectedStaticCreative = selectedSlot?.staticCreative ?? null;
-  const selectedFillers = selectedSlot?.contents.filter((item) => item.contentType === "FILLER") ?? [];
-  const previewItems = useMemo(
-    () => buildPreviewItems(slots, previewScope, selectedPosition),
-    [previewScope, selectedPosition, slots],
+  const dirtyPositions = slots.filter((slot) => slotSignature(slot) !== baseline[slot.position]).map((slot) => slot.position);
+  const nameDirty = name.trim() !== savedName;
+  const dirty = dirtyPositions.length > 0 || nameDirty;
+  const markSaved = useLeaveGuard(dirty);
+  const publishing = state.publish.kind === "running";
+
+  const slot = slots.find((entry) => entry.position === selected) ?? slots[0];
+  const advert = slot?.items.find((item) => item.contentType === "ADVERTISEMENT");
+  const arithmetic = slot ? slotArithmetic(slot.items) : null;
+  const readyCount = slots.filter((entry) => entry.items.length > 0 && publishSlotProblems(entry.items).length === 0).length;
+  const warnings = slots.flatMap((entry) =>
+    entry.items
+      .map((item) => ({ position: entry.position, item, text: fitWarning({ ...item, asset: assetMap.get(item.assetId) }) }))
+      .filter((warning): warning is { position: number; item: Item; text: string } => Boolean(warning.text)),
   );
-  const currentPreview = previewItems[previewIndex];
-  const validSlotCount = slots.filter((slot) => getSlotSummary(slot).isValid).length;
+  const targetLabel = targetGroupId ? `group ${deviceGroups.find((group) => group.id === targetGroupId)?.name ?? "?"}` : "all cabs";
 
-  useEffect(() => {
-    if (!previewOpen || !currentPreview || !currentPreview.mimeType.startsWith("image/")) {
+  function updateSlot(position: number, change: (slot: SlotState) => SlotState) {
+    setSlots((current) =>
+      current.map((entry) => {
+        if (entry.position !== position) return entry;
+        const next = change(entry);
+        return { ...next, items: withSequentialStartTimes(next.items) };
+      }),
+    );
+    setError(null);
+  }
+
+  function setItems(items: Item[]) {
+    updateSlot(selected, (entry) => ({ ...entry, items: items.map((item, index) => ({ ...item, orderInSlot: index })) }));
+  }
+
+  function chooseAdvert(asset: AssetOption) {
+    const durationMs = defaultAdvertDurationMs(asset);
+    const others = slot.items.filter((item) => item.contentType !== "ADVERTISEMENT");
+    setItems([{ key: newKey(), assetId: asset.id, orderInSlot: 0, startTimeMs: 0, durationMs, contentType: "ADVERTISEMENT" }, ...others]);
+    setPicker(null);
+  }
+
+  function chooseFiller(asset: AssetOption, replaceKey?: string) {
+    if (replaceKey) {
+      setItems(slot.items.map((item) => (item.key === replaceKey ? { ...item, assetId: asset.id } : item)));
+    } else {
+      const remaining = SLOT_DURATION_MS - slotArithmetic(slot.items).totalMs;
+      const natural = asset.mimeType.startsWith("image/") || !asset.durationMs ? 10_000 : Math.round(asset.durationMs / 100) * 100;
+      const durationMs = Math.max(MIN_ITEM_DURATION_MS, remaining >= MIN_ITEM_DURATION_MS ? Math.min(natural, remaining) : natural);
+      setItems([...slot.items, { key: newKey(), assetId: asset.id, orderInSlot: slot.items.length, startTimeMs: 0, durationMs, contentType: "FILLER" }]);
+    }
+    setPicker(null);
+  }
+
+  function chooseStill(asset: AssetOption | null) {
+    updateSlot(selected, (entry) => ({ ...entry, staticCreativeId: asset?.id ?? null }));
+    setPicker(null);
+  }
+
+  function moveItem(key: string, by: -1 | 1) {
+    const index = slot.items.findIndex((item) => item.key === key);
+    const target = index + by;
+    if (index < 0 || target < 0 || target >= slot.items.length) return;
+    const items = slot.items.slice();
+    [items[index], items[target]] = [items[target], items[index]];
+    setItems(items);
+  }
+
+  function fillTheRest() {
+    if (!arithmetic || arithmetic.remainingMs === 0) return;
+    const last = [...slot.items].reverse().find((item) => item.contentType === "FILLER");
+    if (!last) return;
+    const durationMs = last.durationMs + arithmetic.remainingMs;
+    if (durationMs < MIN_ITEM_DURATION_MS) {
+      setError("The last filler cannot absorb that much. Remove a filler or shorten the advert.");
       return;
     }
+    setItems(slot.items.map((item) => (item.key === last.key ? { ...item, durationMs } : item)));
+  }
 
-    const timer = window.setTimeout(() => {
-      setPreviewIndex((index) => (index + 1) % previewItems.length);
-    }, currentPreview.durationMs);
-
-    return () => window.clearTimeout(timer);
-  }, [currentPreview, previewItems.length, previewOpen]);
-
-  useEffect(() => {
-    if (status !== "PUBLISHING") {
-      return;
+  async function save(options: { quiet?: boolean } = {}) {
+    if (!dirty) return true;
+    const invalid = slots
+      .filter((entry) => dirtyPositions.includes(entry.position))
+      .map((entry) => ({ position: entry.position, problems: draftSlotProblems(entry.items) }))
+      .find((entry) => entry.problems.length > 0);
+    if (invalid) {
+      setSelected(invalid.position);
+      setError(`Slot ${invalid.position + 1}: ${invalid.problems[0]}`);
+      return false;
     }
-
-    let cancelled = false;
-
-    async function pollLoopStatus() {
-      try {
+    setBusy("save");
+    setError(null);
+    try {
+      if (nameDirty) {
         const response = await fetch(`/api/loops/${loop.id}`, {
-          cache: "no-store",
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim(), expectedUpdatedAt: loopUpdatedAt }),
         });
-
-        if (!response.ok) {
-          return;
-        }
-
-        const latest = (await response.json()) as {
-          status?: string;
-          publishError?: string | null;
-        };
-
-        if (cancelled || !latest.status || latest.status === "PUBLISHING") {
-          return;
-        }
-
-        setStatus(latest.status);
-        setPublishError(latest.publishError ?? null);
-
-        if (latest.status === "PUBLISHED") {
-          setError(null);
-          toast({
-            title: "Loop published",
-            message: "The loop manifest and compiled MP4 were generated successfully.",
-            tone: "success",
-          });
-          router.refresh();
-          return;
-        }
-
-        const message = latest.publishError ?? "Loop publish failed.";
-        setError(message);
-        toast({
-          title: "Publish failed",
-          message,
-          tone: "error",
-        });
-        router.refresh();
-      } catch {
-        // Keep polling on transient failures.
+        if (!response.ok) throw new Error(await readError(response, "The name could not be saved."));
+        const saved = (await response.json()) as { name: string; updatedAt: string };
+        setSavedName(saved.name);
+        setName(saved.name);
+        setLoopUpdatedAt(saved.updatedAt);
       }
+      if (dirtyPositions.length) {
+        const response = await fetch(`/api/loops/${loop.id}/slots`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slots: slots
+              .filter((entry) => dirtyPositions.includes(entry.position))
+              .map((entry) => ({
+                position: entry.position,
+                staticCreativeId: entry.staticCreativeId,
+                expectedUpdatedAt: entry.updatedAt,
+                contents: entry.items.map(({ key: _key, ...content }) => content),
+              })),
+          }),
+        });
+        if (!response.ok) throw new Error(await readError(response, "The slots could not be saved."));
+        const body = (await response.json()) as { slots: Array<{ position: number; updatedAt: string }>; state: LoopStateView };
+        const stamps = new Map(body.slots.map((entry) => [entry.position, entry.updatedAt]));
+        const saved = slots.map((entry) => ({ ...entry, updatedAt: stamps.get(entry.position) ?? entry.updatedAt }));
+        setSlots(saved);
+        setBaseline(Object.fromEntries(saved.map((entry) => [entry.position, slotSignature(entry)])));
+        setState(body.state);
+      }
+      markSaved();
+      if (!options.quiet) toast({ title: "Saved", message: state.status === "PUBLISHED" ? "Saved. Cabs still play the published version until you publish again." : "Your changes are saved.", tone: "success" });
+      return true;
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : "Could not save.";
+      setError(message);
+      toast({ title: "Not saved", message, tone: "error" });
+      return false;
+    } finally {
+      setBusy(null);
     }
-
-    void pollLoopStatus();
-    const intervalId = window.setInterval(() => {
-      void pollLoopStatus();
-    }, 5000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [loop.id, router, status, toast]);
-
-  function markSlotDirty(position: number) {
-    setDirtySlots((current) =>
-      current.includes(position) ? current : [...current, position].sort((a, b) => a - b),
-    );
   }
 
-  function replaceSelectedSlot(contents: SlotContentItem[]) {
-    if (!selectedSlot) {
+  function askPublish() {
+    const notReady = slots.find((entry) => entry.items.length === 0 || publishSlotProblems(entry.items).length > 0);
+    if (notReady) {
+      setSelected(notReady.position);
+      setError(`Slot ${notReady.position + 1} is not ready: ${notReady.items.length === 0 ? "it is empty." : publishSlotProblems(notReady.items)[0]}`);
       return;
     }
-
-    setSlots((current) =>
-      current.map((slot) =>
-        slot.position === selectedPosition
-          ? {
-              ...slot,
-              contents: withStartTimes(contents, assetMap),
-            }
-          : slot,
-      ),
-    );
-    markSlotDirty(selectedPosition);
+    const lines = warnings.slice(0, 8).map((warning) => `Slot ${warning.position + 1}: ${warning.text}`);
+    if (warnings.length > 8) lines.push(`…and ${warnings.length - 8} more.`);
+    setConfirm({
+      title: `Publish to ${targetLabel}?`,
+      message:
+        (state.live
+          ? `This replaces the version on air for ${state.liveLabel} once the new one is ready; until then the current version keeps playing.`
+          : `It goes on air for ${targetLabel} as soon as it is compiled (a few minutes).`) +
+        (warnings.length ? " Check what happens to files that do not match their time:" : ""),
+      lines,
+      confirmLabel: "Publish",
+      onConfirm: publish,
+    });
   }
 
-  function chooseAd(asset: AssetOption) {
-    const fillers = selectedFillers.map((content) => ({
-      ...content,
-      asset: assetMap.get(content.assetId),
-    }));
-
-    replaceSelectedSlot([
-      {
-        assetId: asset.id,
-        orderInSlot: 0,
-        startTimeMs: 0,
-        durationMs: advertisementDurationMs,
-        contentType: "ADVERTISEMENT",
-        asset,
-      },
-      ...fillers,
-    ]);
-    setAdPickerOpen(false);
-    setError(null);
-  }
-
-  function chooseStaticCreative(asset: AssetOption | null) {
-    if (!selectedSlot) {
-      return;
+  async function publish() {
+    if (!(await save({ quiet: true }))) return;
+    setBusy("publish");
+    try {
+      const response = await fetch(`/api/loops/${loop.id}/publish`, { method: "POST" });
+      if (!response.ok) throw new Error(await readError(response, "Publishing could not start."));
+      const body = (await response.json()) as { state: LoopStateView; kind: string };
+      setState(body.state);
+      if (body.state.publish.kind !== "running") {
+        toast({ title: "Published", message: "Nothing had changed, so cabs keep what they have.", tone: "success" });
+        router.refresh();
+      }
+    } catch (publishError) {
+      const message = publishError instanceof Error ? publishError.message : "Publishing could not start.";
+      setError(message);
+      toast({ title: "Not published", message, tone: "error" });
+    } finally {
+      setBusy(null);
     }
-
-    setSlots((current) =>
-      current.map((slot) =>
-        slot.position === selectedPosition
-          ? {
-              ...slot,
-              staticCreativeId: asset?.id ?? null,
-              staticCreative: asset,
-            }
-          : slot,
-      ),
-    );
-    markSlotDirty(selectedPosition);
-    setStaticPickerOpen(false);
-    setError(null);
   }
 
-  function handleAutofill() {
-    if (!selectedAd) {
-      setError("Choose an advertisement before auto-filling the remaining 48 seconds.");
-      toast({
-        title: "Advertisement required",
-        message: "Choose an ad before using the filler template.",
-        tone: "error",
+  async function changeTarget(nextId: string, token?: string) {
+    setBusy("target");
+    try {
+      const response = await fetch(`/api/loops/${loop.id}/target`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetGroupId: nextId || null, token: token ?? null }),
       });
-      return;
-    }
-
-    const fillerContents: SlotContentItem[] = [];
-
-    for (const [index, templateItem] of fillerTemplate.entries()) {
-      const asset = fillerAssets.find((entry) => entry.category === templateItem.category);
-
-      if (!asset) {
-        const message = `No ready ${templateItem.category} asset is available for the filler template.`;
-        setError(message);
-        toast({
-          title: "Filler template incomplete",
-          message,
-          tone: "error",
+      if (!response.ok) throw new Error(await readError(response, "The target could not be changed."));
+      const body = (await response.json()) as { needsConfirmation?: boolean; message?: string; lines: string[]; token?: string; live?: boolean };
+      if (body.needsConfirmation) {
+        setConfirm({
+          title: "Change where this loop plays?",
+          message: body.message ?? "",
+          lines: body.lines.length ? body.lines : ["No cab plays anything different right now."],
+          confirmLabel: "Move it now",
+          onConfirm: () => changeTarget(nextId, body.token),
         });
         return;
       }
-
-      fillerContents.push({
-        assetId: asset.id,
-        orderInSlot: index + 1,
-        startTimeMs: 0,
-        durationMs: templateItem.durationMs,
-        contentType: "FILLER",
-        asset,
-      });
-    }
-
-    replaceSelectedSlot([{ ...selectedAd, asset: selectedAd.asset }, ...fillerContents]);
-    toast({
-      title: `Slot ${selectedPosition + 1} filler applied`,
-      message: "Weather, news, and branded segments were added from settings.",
-      tone: "success",
-    });
-  }
-
-  function handleAddFiller() {
-    if (!selectedAd) {
-      setError("Choose an advertisement before adding filler segments.");
+      setTargetGroupId(nextId);
       toast({
-        title: "Advertisement required",
-        message: "Assign the 12 second ad first, then add filler around it.",
-        tone: "error",
+        title: "Where it plays changed",
+        message: body.live ? "Cabs were updated." : `It will publish to ${nextId ? `group ${deviceGroups.find((group) => group.id === nextId)?.name}` : "all cabs"}.`,
+        tone: "success",
       });
-      return;
-    }
-
-    if (fillerAssets.length === 0) {
-      setError("Upload at least one weather, news, branded, or other filler asset first.");
-      toast({
-        title: "No filler assets ready",
-        message: "Upload a filler asset in the asset library before adding filler segments.",
-        tone: "error",
-      });
-      return;
-    }
-
-    const slotSummary = getSlotSummary(selectedSlot);
-    if (slotSummary.remainingDuration <= 0) {
-      setError("This slot already totals 60 seconds. Remove or shorten a filler segment first.");
-      toast({
-        title: "Slot already full",
-        message: "Remove or shorten an existing filler segment before adding another one.",
-        tone: "error",
-      });
-      return;
-    }
-
-    const nextTemplateItem = fillerTemplate[selectedFillers.length];
-    const defaultAsset =
-      (nextTemplateItem
-        ? fillerAssets.find((asset) => asset.category === nextTemplateItem.category)
-        : null) ?? fillerAssets[0];
-    const requestedDuration = nextTemplateItem?.durationMs ?? 15_000;
-    const durationMs = Math.min(requestedDuration, slotSummary.remainingDuration);
-
-    replaceSelectedSlot([
-      { ...selectedAd, asset: selectedAd.asset },
-      ...selectedFillers,
-      {
-        assetId: defaultAsset.id,
-        orderInSlot: selectedFillers.length + 1,
-        startTimeMs: 0,
-        durationMs,
-        contentType: "FILLER",
-        asset: defaultAsset,
-      },
-    ]);
-
-    toast({
-      title: "Filler segment added",
-      message: `${defaultAsset.filename} was added to slot ${selectedPosition + 1}.`,
-      tone: "success",
-    });
-  }
-
-  function handleFillerChange(index: number, assetId: string) {
-    const nextFillers = selectedFillers.map((content, fillerIndex) =>
-      fillerIndex === index
-        ? {
-            ...content,
-            assetId,
-            asset: assetMap.get(assetId),
-          }
-        : content,
-    );
-
-    replaceSelectedSlot([...(selectedAd ? [{ ...selectedAd, asset: selectedAd.asset }] : []), ...nextFillers]);
-  }
-
-  function handleDurationChange(index: number, durationMs: number) {
-    const nextFillers = selectedFillers.map((content, fillerIndex) =>
-      fillerIndex === index
-        ? {
-            ...content,
-            durationMs: Number.isFinite(durationMs) ? Math.max(durationMs, 1000) : content.durationMs,
-          }
-        : content,
-    );
-
-    replaceSelectedSlot([...(selectedAd ? [{ ...selectedAd, asset: selectedAd.asset }] : []), ...nextFillers]);
-  }
-
-  function handleRemoveFiller(index: number) {
-    const nextFillers = selectedFillers.filter((_, fillerIndex) => fillerIndex !== index);
-    replaceSelectedSlot([...(selectedAd ? [{ ...selectedAd, asset: selectedAd.asset }] : []), ...nextFillers]);
-  }
-
-  async function saveLoopDetails() {
-    if (!dirtyName && !dirtyTargetGroup) {
-      return true;
-    }
-
-    const response = await fetch(`/api/loops/${loop.id}`, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name,
-        targetGroupId: targetGroupId || null,
-      }),
-    });
-
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(body?.error ?? "Unable to save loop details");
-    }
-
-    setDirtyName(false);
-    setDirtyTargetGroup(false);
-    return true;
-  }
-
-  async function saveDirtySlots() {
-    for (const position of dirtySlots) {
-      const slot = slots.find((item) => item.position === position);
-
-      if (!slot) {
-        continue;
-      }
-
-      const response = await fetch(`/api/loops/${loop.id}/slots/${position}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: slot.contents.map((content) => ({
-            assetId: content.assetId,
-            orderInSlot: content.orderInSlot,
-            startTimeMs: content.startTimeMs,
-            durationMs: content.durationMs,
-            contentType: content.contentType,
-          })),
-          staticCreativeId: slot.staticCreativeId ?? null,
-        }),
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? `Unable to save slot ${position + 1}`);
-      }
-    }
-
-    setDirtySlots([]);
-  }
-
-  async function persistChanges(options?: { silent?: boolean }) {
-    if (!dirtyName && !dirtyTargetGroup && dirtySlots.length === 0) {
-      return true;
-    }
-
-    setSaving(true);
-    setError(null);
-
-    try {
-      await saveLoopDetails();
-      await saveDirtySlots();
-      setPublishError(null);
-
-      if (!options?.silent) {
-        toast({
-          title: "Loop changes saved",
-          message: `Saved ${dirtySlots.length || 0} slot changes and updated loop details.`,
-          tone: "success",
-        });
-      }
-
-      return true;
-    } catch (saveError) {
-      const message =
-        saveError instanceof Error ? saveError.message : "Unable to save loop changes";
-      setError(message);
-      toast({
-        title: "Save failed",
-        message,
-        tone: "error",
-      });
-      return false;
+      router.refresh();
+    } catch (targetError) {
+      toast({ title: "Not changed", message: targetError instanceof Error ? targetError.message : "", tone: "error" });
     } finally {
-      setSaving(false);
+      setBusy(null);
     }
   }
 
-  async function publishLoop() {
-    const invalidSlot = slots.find((slot) => !getSlotSummary(slot).isValid);
-    if (invalidSlot) {
-      setSelectedPosition(invalidSlot.position);
-      const message = `Slot ${invalidSlot.position + 1} must contain one 12 second ad and total 60 seconds.`;
-      setError(message);
-      toast({
-        title: "Loop is incomplete",
-        message,
-        tone: "error",
-      });
-      return;
-    }
-
-    const targetLabel =
-      targetGroupId && deviceGroups.find((group) => group.id === targetGroupId)?.name
-        ? deviceGroups.find((group) => group.id === targetGroupId)?.name
-        : "All Devices";
-    const confirmed = window.confirm(
-      `This will compile the latest loop and publish it to ${targetLabel}. Continue?`,
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    const saved = await persistChanges({ silent: true });
-    if (!saved) {
-      return;
-    }
-
-    setPublishing(true);
-    setError(null);
-    setPublishError(null);
-
+  async function pause(token?: string) {
+    setBusy("pause");
     try {
-      const response = await fetch(`/api/loops/${loop.id}/publish`, {
+      const response = await fetch(`/api/loops/${loop.id}/pause`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: token ?? null }),
       });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to publish loop");
+      if (!response.ok) throw new Error(await readError(response, "The loop could not be paused."));
+      const body = (await response.json()) as { needsConfirmation?: boolean; message?: string; lines: string[]; token?: string };
+      if (body.needsConfirmation) {
+        setConfirm({
+          title: "Take this loop off air?",
+          message: body.message ?? "",
+          lines: body.lines,
+          confirmLabel: "Pause it",
+          danger: true,
+          onConfirm: () => pause(body.token),
+        });
+        return;
       }
-
-      setStatus("PUBLISHING");
-      toast({
-        title: "Publishing started",
-        message: "The loop is compiling in the background. This page will refresh automatically.",
-        tone: "info",
-      });
-    } catch (publishError) {
-      const message =
-        publishError instanceof Error ? publishError.message : "Unable to publish loop";
-      setError(message);
-      toast({
-        title: "Publish failed",
-        message,
-        tone: "error",
-      });
-    } finally {
-      setPublishing(false);
-    }
-  }
-
-  async function deleteLoop() {
-    const confirmed = window.confirm(`Delete loop "${name}"?`);
-    if (!confirmed) {
-      return;
-    }
-
-    setDeleting(true);
-    setError(null);
-
-    try {
-      const response = await fetch(`/api/loops/${loop.id}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to delete loop");
-      }
-
-      toast({
-        title: "Loop deleted",
-        message: `${name} was removed.`,
-        tone: "success",
-      });
-      router.push("/loops");
+      toast({ title: "Paused", message: `"${name}" is off air. Publish it again to put it back.`, tone: "success" });
       router.refresh();
-    } catch (deleteError) {
-      const message =
-        deleteError instanceof Error ? deleteError.message : "Unable to delete loop";
-      setError(message);
-      toast({
-        title: "Delete failed",
-        message,
-        tone: "error",
-      });
+    } catch (pauseError) {
+      toast({ title: "Not paused", message: pauseError instanceof Error ? pauseError.message : "", tone: "error" });
     } finally {
-      setDeleting(false);
+      setBusy(null);
     }
   }
 
-  async function archiveLoop() {
-    const confirmed = window.confirm(`Pause published loop "${name}"?`);
-    if (!confirmed) {
-      return;
-    }
+  function askDelete() {
+    setConfirm({
+      title: `Delete "${name}"?`,
+      message: "The loop, its compiled video and its files in storage are deleted for good. The adverts and fillers stay in the library.",
+      confirmLabel: "Delete loop",
+      danger: true,
+      onConfirm: async () => {
+        const response = await fetch(`/api/loops/${loop.id}`, { method: "DELETE" });
+        if (!response.ok) {
+          toast({ title: "Not deleted", message: await readError(response, "The loop could not be deleted."), tone: "error" });
+          return;
+        }
+        markSaved();
+        toast({ title: "Deleted", message: `"${name}" was deleted.`, tone: "success" });
+        router.push("/loops");
+        router.refresh();
+      },
+    });
+  }
 
-    setArchiving(true);
-    setError(null);
-
+  async function duplicate() {
+    if (dirty && !window.confirm("Duplicate the saved version? Your unsaved changes are not copied.")) return;
+    setBusy("duplicate");
     try {
-      const response = await fetch(`/api/loops/${loop.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ status: "ARCHIVED" }),
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? "Unable to pause loop");
-      }
-
-      setStatus("ARCHIVED");
-      toast({
-        title: "Loop paused",
-        message: `${name} was archived and is no longer active.`,
-        tone: "success",
-      });
-      router.refresh();
-    } catch (archiveError) {
-      const message =
-        archiveError instanceof Error ? archiveError.message : "Unable to pause loop";
-      setError(message);
-      toast({
-        title: "Pause failed",
-        message,
-        tone: "error",
-      });
+      const response = await fetch(`/api/loops/${loop.id}/duplicate`, { method: "POST" });
+      if (!response.ok) throw new Error(await readError(response, "The loop could not be duplicated."));
+      const copy = (await response.json()) as { id: string; name: string };
+      markSaved();
+      toast({ title: "Duplicated", message: `Opened "${copy.name}".`, tone: "success" });
+      router.push(`/loops/${copy.id}`);
+    } catch (duplicateError) {
+      toast({ title: "Not duplicated", message: duplicateError instanceof Error ? duplicateError.message : "", tone: "error" });
     } finally {
-      setArchiving(false);
+      setBusy(null);
     }
   }
 
-  function openPreview(scope: "slot" | "loop") {
-    const items = buildPreviewItems(slots, scope, selectedPosition);
-    if (items.length === 0) {
-      const message =
-        scope === "slot"
-          ? "The selected slot has no playable media yet."
-          : "Add content to the loop before previewing it.";
-      setError(message);
-      toast({
-        title: "Nothing to preview",
-        message,
-        tone: "error",
-      });
-      return;
-    }
-
-    setPreviewScope(scope);
-    setPreviewIndex(0);
-    setPreviewOpen(true);
-  }
-
-  if (!selectedSlot) {
+  if (!slot || !arithmetic) {
     return null;
   }
+  const slotProblems = slot.items.length ? publishSlotProblems(slot.items) : ["Choose an advert."];
+  const still = slot.staticCreativeId ? assetMap.get(slot.staticCreativeId) : undefined;
 
   return (
-    <div className="stack-lg">
-      <div className="card stack">
-        <div className="loop-builder-header">
-          <div className="stack-sm">
-            <span className="eyebrow">Loop Builder</span>
-            <div className="loop-title-row">
-              <input
-                className="loop-name-input"
-                onChange={(event) => {
-                  setName(event.target.value);
-                  setDirtyName(true);
-                }}
-                value={name}
-              />
-              <StatusPill value={status} />
-            </div>
-            <label className="field compact-field loop-target-field">
-              <span>Publish to</span>
-              <select
-                onChange={(event) => {
-                  setTargetGroupId(event.target.value);
-                  setDirtyTargetGroup(true);
-                }}
-                value={targetGroupId}
-              >
-                <option value="">All Devices</option>
-                {deviceGroups.map((group) => (
-                  <option key={group.id} value={group.id}>
-                    {group.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="muted">
-              {validSlotCount}/10 slots ready. Each slot needs one 12 second ad and 48 seconds of filler.
-            </div>
+    <div className="lb">
+      <header className="lb-head card">
+        <div className="lb-head-main">
+          <Link className="lb-back" href="/loops">
+            ← Loops
+          </Link>
+          <div className="lb-title-row">
+            <input
+              aria-label="Loop name"
+              className="lb-name"
+              maxLength={120}
+              onChange={(event) => setName(event.target.value)}
+              value={name}
+            />
+            <LoopStatusBadge state={state} />
+            {state.unpublishedChanges || (dirty && state.status === "PUBLISHED") ? (
+              <span className="lx-badge lx-badge-warn">Changes not yet published</span>
+            ) : null}
           </div>
+          <dl className="lb-facts">
+            <div>
+              <dt>On air</dt>
+              <dd>{state.live ? state.liveLabel : state.status === "PUBLISHED" ? "Not playing anywhere (something newer plays on its target)" : "No"}</dd>
+            </div>
+            <div>
+              <dt>Plays on</dt>
+              <dd>
+                <select
+                  aria-label="Plays on"
+                  disabled={busy !== null || publishing}
+                  onChange={(event) => void changeTarget(event.target.value)}
+                  value={targetGroupId}
+                >
+                  <option value="">All cabs</option>
+                  {deviceGroups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      Group {group.name}
+                    </option>
+                  ))}
+                </select>
+              </dd>
+            </div>
+            <div>
+              <dt>Last published</dt>
+              <dd>{formatWhen(state.publishedAt)}</dd>
+            </div>
+            <div>
+              <dt>Slots ready</dt>
+              <dd>
+                {readyCount} of {slots.length}
+              </dd>
+            </div>
+          </dl>
+        </div>
+        <div className="lb-actions">
           <div className="button-row">
-            {status === "PUBLISHED" ? (
-              <button
-                className="button button-secondary"
-                disabled={saving || publishing || deleting || archiving}
-                onClick={() => void archiveLoop()}
-                type="button"
-              >
-                {archiving ? "Pausing..." : "Pause"}
-              </button>
-            ) : null}
-            {status !== "PUBLISHED" && status !== "PUBLISHING" ? (
-                    <button
-                      className="button button-danger"
-                      disabled={saving || publishing || deleting || archiving}
-                      onClick={() => void deleteLoop()}
-                      type="button"
-                    >
-                {deleting ? "Deleting..." : "Delete"}
-              </button>
-            ) : null}
-            <button
-              className="button button-secondary"
-              disabled={
-                saving ||
-                publishing ||
-                archiving ||
-                status === "PUBLISHING" ||
-                (!dirtyName && !dirtyTargetGroup && dirtySlots.length === 0)
-              }
-              onClick={() => void persistChanges()}
-              type="button"
-            >
-              {saving ? "Saving..." : "Save Changes"}
-            </button>
-            <button
-              className="button button-secondary"
-              onClick={() => openPreview("slot")}
-              type="button"
-            >
+            <button className="button button-secondary" disabled={busy !== null} onClick={() => setPreviewOpen("loop")} type="button">
               Preview
             </button>
-            <button
-              className="button button-primary"
-              disabled={saving || publishing || archiving || status === "PUBLISHING"}
-              onClick={() => void publishLoop()}
-              type="button"
-            >
-              {publishing || status === "PUBLISHING" ? "Publishing..." : "Publish"}
+            <button className="button button-secondary" disabled={busy !== null} onClick={() => void duplicate()} type="button">
+              Duplicate
             </button>
-          </div>
-        </div>
-        {status === "PUBLISHING" ? (
-          <div className="alert alert-warning">
-            Publishing in the background. This page checks for status updates every 5 seconds.
-          </div>
-        ) : null}
-        {error ?? publishError ? <div className="alert alert-danger">{error ?? publishError}</div> : null}
-      </div>
-
-      <section className="card stack">
-        <div className="card-header">
-          <div>
-            <span className="eyebrow">Timeline</span>
-            <h2>Ten Slot Programme</h2>
-          </div>
-          <div className="button-row">
-            <button
-              className="button button-secondary"
-              onClick={() => openPreview("loop")}
-              type="button"
-            >
-              Preview Full Loop
-            </button>
-          </div>
-        </div>
-
-        <div className="timeline-scroll">
-          <div className="timeline-track">
-            {slots
-              .slice()
-              .sort((a, b) => a.position - b.position)
-              .map((slot) => {
-                const summary = getSlotSummary(slot);
-                const slotAd = slot.contents.find((content) => content.contentType === "ADVERTISEMENT");
-                const isActive = slot.position === selectedPosition;
-
-                return (
-                  <button
-                    className={`timeline-slot ${isActive ? "is-active" : ""}`}
-                    key={slot.id}
-                    onClick={() => setSelectedPosition(slot.position)}
-                    type="button"
-                  >
-                    <div className="timeline-slot-header">
-                      <div>
-                        <span className="eyebrow">Slot {slot.position + 1}</span>
-                        <strong>{slotAd?.asset?.filename ?? "Choose advertisement"}</strong>
-                      </div>
-                      <span
-                        className={`timeline-status ${summary.isValid ? "is-valid" : "is-invalid"}`}
-                      >
-                        {summary.isValid ? "OK" : "!"}
-                      </span>
-                    </div>
-
-                    <MediaPoster
-                      alt={slotAd?.asset?.filename ?? `Slot ${slot.position + 1}`}
-                      className="timeline-poster"
-                      label="No ad assigned"
-                      src={slotAd?.asset?.thumbnailUrl}
-                    />
-
-                    <div className="slot-bar">
-                      {slot.contents.length > 0 ? (
-                        slot.contents.map((content) => (
-                          <span
-                            className={
-                              content.contentType === "ADVERTISEMENT"
-                                ? "segment segment-ad"
-                                : "segment segment-filler"
-                            }
-                            key={`${slot.id}-${content.orderInSlot}-${content.assetId}`}
-                            style={{ width: `${(content.durationMs / slotDurationMs) * 100}%` }}
-                          />
-                        ))
-                      ) : (
-                        <span className="segment segment-empty" style={{ width: "100%" }} />
-                      )}
-                    </div>
-
-                    <div className="timeline-slot-meta">
-                      <span>{formatTime(summary.totalDuration)} programmed</span>
-                      <span>{summary.isValid ? "Ready to publish" : "Needs work"}</span>
-                    </div>
-                  </button>
-                );
-              })}
-          </div>
-        </div>
-      </section>
-
-      <section className="card stack-lg">
-        <div className="card-header">
-          <div>
-            <span className="eyebrow">Selected Slot</span>
-            <h2>Slot {selectedPosition + 1} detail</h2>
-          </div>
-          <div className="button-row">
-            <button
-              className="button button-secondary"
-              disabled={!selectedAd || fillerAssets.length === 0}
-              onClick={handleAddFiller}
-              type="button"
-            >
-              Add filler segment
-            </button>
-            <button className="button button-secondary" onClick={handleAutofill} type="button">
-              Auto-fill filler
-            </button>
-          </div>
-        </div>
-
-        <div className="selected-slot-timeline">
-          <div className="slot-bar slot-bar-large">
-            {selectedSlot.contents.length > 0 ? (
-              selectedSlot.contents.map((content) => (
-                <span
-                  className={
-                    content.contentType === "ADVERTISEMENT"
-                      ? "segment segment-ad"
-                      : "segment segment-filler"
-                  }
-                  key={`${selectedSlot.id}-${content.orderInSlot}-${content.assetId}`}
-                  style={{ width: `${(content.durationMs / slotDurationMs) * 100}%` }}
-                />
-              ))
+            {state.status === "PUBLISHED" ? (
+              <button className="button button-secondary" disabled={busy !== null || publishing} onClick={() => void pause()} type="button">
+                {busy === "pause" ? "Pausing…" : "Pause"}
+              </button>
             ) : (
-              <span className="segment segment-empty" style={{ width: "100%" }} />
+              <button className="button button-danger" disabled={busy !== null || publishing} onClick={askDelete} type="button">
+                Delete
+              </button>
             )}
           </div>
-          <div className="timeline-legend">
-            {selectedSlot.contents.map((content) => (
-              <span className="timeline-legend-item" key={`${content.orderInSlot}-${content.assetId}`}>
-                <strong>{content.contentType === "ADVERTISEMENT" ? "Ad" : "Filler"}</strong>
-                <span>
-                  {formatTime(content.startTimeMs)} - {formatTime(content.startTimeMs + content.durationMs)}
-                </span>
-              </span>
-            ))}
+          <div className="button-row">
+            <button className="button button-secondary" disabled={!dirty || busy !== null} onClick={() => void save()} type="button">
+              {busy === "save" ? "Saving…" : dirty ? "Save changes" : "Saved"}
+            </button>
+            <button className="button button-primary" disabled={busy !== null || publishing} onClick={askPublish} type="button">
+              {publishing ? "Publishing…" : state.status === "PUBLISHED" ? "Publish again" : "Publish"}
+            </button>
           </div>
         </div>
+      </header>
 
-        <div className="slot-detail-grid">
-          <div className="segment-panel segment-panel-ad">
-            <div className="segment-panel-header">
-              <div>
-                <span className="eyebrow">Advertisement</span>
-                <strong>{selectedAd?.asset?.filename ?? "No advertisement selected"}</strong>
-              </div>
-              <div className="segment-panel-meta">12 seconds</div>
-            </div>
-
-              <div className="segment-panel-body">
-              <MediaPoster
-                alt={selectedAd?.asset?.filename ?? "Advertisement slot"}
-                className="segment-poster"
-                label="Choose an ad"
-                src={selectedAd?.asset?.thumbnailUrl}
-              />
-              <div className="segment-panel-copy">
-                <strong>{assetMetaSummary(selectedAd?.asset)}</strong>
-                <p className="muted">
-                  This slot always begins with the 12 second advertisement segment.
-                </p>
-                <button
-                  className="button button-primary"
-                  disabled={advertisementAssets.length === 0}
-                  onClick={() => setAdPickerOpen(true)}
-                  type="button"
-                >
-                  Choose Ad
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="segment-panel">
-            <div className="segment-panel-header">
-              <div>
-                <span className="eyebrow">Static Creative</span>
-                <strong>{selectedStaticCreative?.filename ?? "No static creative selected"}</strong>
-              </div>
-              <div className="segment-panel-meta">Silent mode image</div>
-            </div>
-
-            <div className="segment-panel-body">
-              <MediaPoster
-                alt={selectedStaticCreative?.filename ?? "Static creative slot"}
-                className="segment-poster"
-                label="Choose a static creative"
-                src={selectedStaticCreative?.thumbnailUrl ?? selectedStaticCreative?.previewUrl ?? null}
-              />
-              <div className="segment-panel-copy">
-                <strong>{assetMetaSummary(selectedStaticCreative ?? undefined)}</strong>
-                <p className="muted">
-                  This image is shown during silent mode for the current minute slot.
-                </p>
-                <div className="button-row">
-                  <button
-                    className="button button-secondary"
-                    disabled={staticCreativeAssets.length === 0}
-                    onClick={() => setStaticPickerOpen(true)}
-                    type="button"
-                  >
-                    Choose Static Creative
-                  </button>
-                  {selectedStaticCreative ? (
-                    <button
-                      className="button button-secondary"
-                      onClick={() => chooseStaticCreative(null)}
-                      type="button"
-                    >
-                      Clear
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="segment-panel">
-            <div className="segment-panel-header">
-              <div>
-                <span className="eyebrow">Filler Segments</span>
-                <strong>{selectedFillers.length} configured</strong>
-              </div>
-              <div className="segment-panel-meta">Target 48 seconds</div>
-            </div>
-
-            <p className="muted">
-              Add weather, news, branded, or other filler segments manually. Static JPG/PNG filler
-              assets stay on screen for the duration you set here.
-            </p>
-
-            <div className="segment-list">
-              {selectedFillers.length === 0 ? (
-                <div className="empty-state compact">
-                  <strong>No filler segments yet</strong>
-                  <p>Use Auto-fill or Add filler segment to build this minute out around the ad.</p>
-                </div>
-              ) : (
-                selectedFillers.map((content, index) => (
-                  <div className="segment-list-item" key={`${content.assetId}-${index}`}>
-                    <MediaPoster
-                      alt={content.asset?.filename ?? `Filler ${index + 1}`}
-                      className="segment-thumb"
-                      label="Filler"
-                      src={content.asset?.thumbnailUrl}
-                    />
-                    <div className="segment-copy">
-                      <strong>{content.asset?.filename ?? "Choose filler asset"}</strong>
-                      <span className="muted">
-                        {formatTime(content.startTimeMs)} start / {content.asset?.category ?? "FILLER"}
-                      </span>
-                    </div>
-                    <select
-                      onChange={(event) => handleFillerChange(index, event.target.value)}
-                      value={content.assetId}
-                    >
-                      {fillerAssets.map((asset) => (
-                        <option key={asset.id} value={asset.id}>
-                          {asset.category} / {asset.filename}
-                        </option>
-                      ))}
-                    </select>
-                    <label className="field compact-field">
-                      <span>Duration (seconds)</span>
-                      <input
-                        min={1}
-                        onChange={(event) =>
-                          handleDurationChange(index, Number(event.target.value) * 1000)
-                        }
-                        step={1}
-                        type="number"
-                        value={Math.round(content.durationMs / 1000)}
-                      />
-                    </label>
-                    <button
-                      className="button button-secondary"
-                      onClick={() => handleRemoveFiller(index)}
-                      type="button"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+      {publishing ? <PublishProgress state={state} /> : null}
+      {error ? <div className="alert alert-danger">{error}</div> : null}
+      {!publishing && state.publishError ? (
+        <div className="alert alert-danger">
+          <strong>Last publish did not go through.</strong> {state.publishError}
         </div>
-
-        <div className="validation-banner">
-          <div className={`validation-state ${getSlotSummary(selectedSlot).isValid ? "is-valid" : "is-invalid"}`}>
-            <strong>
-              {getSlotSummary(selectedSlot).isValid ? "Slot ready" : "Slot still in progress"}
-            </strong>
-            <span>
-              {getSlotSummary(selectedSlot).isValid
-                ? "This slot totals 60 seconds and contains one advertisement."
-                : `${formatTime(getSlotSummary(selectedSlot).totalDuration)} programmed, ${formatTime(
-                    getSlotSummary(selectedSlot).remainingDuration,
-                  )} remaining. You can still save this draft slot.`}
-            </span>
-          </div>
-          <button
-            className="button button-secondary"
-            disabled={saving || publishing || !dirtySlots.includes(selectedPosition)}
-            onClick={() => void persistChanges()}
-            type="button"
-          >
-            Save selected slot
-          </button>
+      ) : null}
+      {state.publishedBeforeUpdate && !publishing ? <div className="lx-note">{PUBLISHED_BEFORE_UPDATE_NOTE}</div> : null}
+      {state.unpublishedChanges && !publishing ? (
+        <div className="alert alert-warning">
+          The saved slots differ from what cabs are playing. Publish to send the changes to cabs.
         </div>
-      </section>
-
-      {adPickerOpen ? (
-        <Modal
-          eyebrow="Advertisement Assets"
-          onClose={() => setAdPickerOpen(false)}
-          title={`Choose ad for slot ${selectedPosition + 1}`}
-        >
-          <div className="asset-picker-grid">
-            {advertisementAssets.length === 0 ? (
-              <div className="empty-state compact">
-                <strong>No advertisement assets ready</strong>
-                <p>Upload and process ad creatives in the asset library first.</p>
-              </div>
-            ) : (
-              advertisementAssets.map((asset) => (
-                <button
-                  className={`asset-choice ${selectedAd?.assetId === asset.id ? "is-selected" : ""}`}
-                  key={asset.id}
-                  onClick={() => chooseAd(asset)}
-                  type="button"
-                >
-                  <MediaPoster
-                    alt={asset.filename}
-                    className="asset-choice-poster"
-                    label="Ad creative"
-                    src={asset.thumbnailUrl}
-                  />
-                  <div className="stack-sm">
-                    <strong>{asset.filename}</strong>
-                    <span className="muted">{assetMetaSummary(asset)}</span>
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-        </Modal>
       ) : null}
 
-      {staticPickerOpen ? (
-        <Modal
-          eyebrow="Static Creatives"
-          onClose={() => setStaticPickerOpen(false)}
-          title={`Choose static creative for slot ${selectedPosition + 1}`}
-        >
-          <div className="asset-picker-grid">
-            {staticCreativeAssets.length === 0 ? (
-              <div className="empty-state compact">
-                <strong>No static creative assets ready</strong>
-                <p>Upload branded JPG or PNG static creatives in the asset library first.</p>
-              </div>
-            ) : (
-              staticCreativeAssets.map((asset) => (
-                <button
-                  className={`asset-choice ${
-                    selectedStaticCreative?.id === asset.id ? "is-selected" : ""
-                  }`}
-                  key={asset.id}
-                  onClick={() => chooseStaticCreative(asset)}
-                  type="button"
-                >
-                  <MediaPoster
-                    alt={asset.filename}
-                    className="asset-choice-poster"
-                    label="Static creative"
-                    src={asset.thumbnailUrl ?? asset.previewUrl}
-                  />
-                  <div className="stack-sm">
-                    <strong>{asset.filename}</strong>
-                    <span className="muted">{assetMetaSummary(asset)}</span>
-                  </div>
-                </button>
-              ))
-            )}
+      <section className="card lb-overview" aria-label="Slots">
+        <div className="lb-section-head">
+          <div>
+            <span className="eyebrow">Ten one-minute slots · {formatClock(0)}–10:00</span>
+            <h2>Running order</h2>
           </div>
-        </Modal>
+          <div className="lb-legend">
+            <span><i className="is-ad" /> Advert</span>
+            <span><i className="is-filler" /> Filler</span>
+            <span><i className="is-still" /> Still image</span>
+            <span><i className="is-held" /> Held on last frame</span>
+          </div>
+        </div>
+        <div className="lb-slot-grid">
+          {slots.map((entry) => {
+            const entryAdvert = entry.items.find((item) => item.contentType === "ADVERTISEMENT");
+            const entryAsset = entryAdvert ? assetMap.get(entryAdvert.assetId) : undefined;
+            const entryArithmetic = slotArithmetic(entry.items);
+            const problems = entry.items.length ? publishSlotProblems(entry.items) : ["Empty"];
+            const entryWarnings = warnings.filter((warning) => warning.position === entry.position).length;
+            const status = problems.length === 0
+              ? { text: entryWarnings ? `Ready · ${entryWarnings} note${entryWarnings === 1 ? "" : "s"}` : "Ready", tone: entryWarnings ? "note" : "ok" }
+              : entry.items.length === 0
+                ? { text: "Empty", tone: "bad" }
+                : !entryAdvert
+                  ? { text: "No advert", tone: "bad" }
+                  : entryArithmetic.remainingMs > 0
+                    ? { text: `${formatSeconds(entryArithmetic.remainingMs)} short`, tone: "bad" }
+                    : { text: `${formatSeconds(-entryArithmetic.remainingMs)} over`, tone: "bad" };
+            return (
+              <button
+                className={`lb-slot ${entry.position === selected ? "is-active" : ""} ${dirtyPositions.includes(entry.position) ? "is-dirty" : ""}`}
+                key={entry.position}
+                onClick={() => setSelected(entry.position)}
+                type="button"
+              >
+                <div className="lb-slot-top">
+                  <span className="lb-slot-number">{entry.position + 1}</span>
+                  <span className="lb-slot-time">{formatClock(entry.position * SLOT_DURATION_MS)}</span>
+                  <span className={`lb-slot-status is-${status.tone}`}>{status.text}</span>
+                </div>
+                <MediaPoster
+                  alt={entryAsset?.filename ?? ""}
+                  className="lb-slot-poster"
+                  label={entryAsset ? "No preview" : "No advert yet"}
+                  src={entryAsset?.thumbnailUrl}
+                  videoSrc={entryAsset && !entryAsset.mimeType.startsWith("image/") ? entryAsset.previewUrl : null}
+                />
+                <strong className="lb-slot-name">{entryAsset?.filename ?? "Choose an advert"}</strong>
+                <SlotBar assetMap={assetMap} slot={entry} />
+              </button>
+            );
+          })}
+        </div>
+        {warnings.length ? (
+          <p className="lb-note">
+            {warnings.length} item{warnings.length === 1 ? " does" : "s do"} not match {warnings.length === 1 ? "its" : "their"} time: open the slot to see what will be cut off or held.
+          </p>
+        ) : null}
+      </section>
+
+      <section className="card lb-editor" aria-label={`Slot ${selected + 1}`}>
+        <div className="lb-section-head">
+          <div>
+            <span className="eyebrow">
+              Slot {selected + 1} · plays {formatClock(selected * SLOT_DURATION_MS)}–{formatClock((selected + 1) * SLOT_DURATION_MS)} in the loop
+            </span>
+            <h2>{advert ? assetMap.get(advert.assetId)?.filename : "Choose an advert"}</h2>
+          </div>
+          <div className="button-row">
+            <button className="button button-secondary" onClick={() => setPreviewOpen("slot")} type="button">
+              Preview slot
+            </button>
+          </div>
+        </div>
+
+        <SlotBar assetMap={assetMap} large slot={slot} />
+        <div className={`lb-sum ${slotProblems.length ? "is-bad" : "is-ok"}`}>
+          <span className="lb-sum-text">{describeArithmetic(arithmetic)}</span>
+          {arithmetic.remainingMs !== 0 && slot.items.some((item) => item.contentType === "FILLER") ? (
+            <button className="button button-secondary" onClick={fillTheRest} type="button">
+              {arithmetic.remainingMs > 0 ? `Give the last filler ${formatSeconds(arithmetic.remainingMs)} more` : `Take ${formatSeconds(-arithmetic.remainingMs)} off the last filler`}
+            </button>
+          ) : null}
+        </div>
+        {slotProblems.length && slot.items.length ? <p className="lb-problem">To publish: {slotProblems.join(" ")}</p> : null}
+
+        <div className="lb-editor-grid">
+          <div className="lb-items">
+            {slot.items.length === 0 ? (
+              <div className="empty-state compact">
+                <strong>This slot is empty</strong>
+                <p>Start with the advert. It takes the length of its file; fillers take the rest of the minute.</p>
+              </div>
+            ) : null}
+            {slot.items.map((item, index) => {
+              const asset = assetMap.get(item.assetId);
+              const fit = fitOf(asset, item.durationMs);
+              const warning = fitWarning({ ...item, asset });
+              return (
+                <div className={`lb-item ${item.contentType === "ADVERTISEMENT" ? "is-ad" : ""}`} key={item.key}>
+                  <div className="lb-item-when">
+                    <span>{formatClock(item.startTimeMs)}</span>
+                    <span className="muted">{formatClock(item.startTimeMs + item.durationMs)}</span>
+                  </div>
+                  <MediaPoster
+                    alt={asset?.filename ?? ""}
+                    className="lb-item-thumb"
+                    label="No preview"
+                    src={asset?.thumbnailUrl ?? (asset?.mimeType.startsWith("image/") ? asset.previewUrl : null)}
+                    videoSrc={asset && !asset.mimeType.startsWith("image/") ? asset.previewUrl : null}
+                  />
+                  <div className="lb-item-copy">
+                    <span className={`lb-kind ${item.contentType === "ADVERTISEMENT" ? "is-ad" : ""}`}>
+                      {item.contentType === "ADVERTISEMENT" ? "Advert" : categoryLabels[asset?.category ?? ""] ?? "Filler"}
+                    </span>
+                    <strong title={asset?.filename}>{asset?.filename ?? "File missing"}</strong>
+                    <span className="muted">
+                      {lengthLabel(asset)}
+                      {asset?.hidden ? " · removed from the library" : ""}
+                    </span>
+                    {warning ? <span className={`lb-fit is-${fit.kind}`}>{warning}</span> : null}
+                  </div>
+                  <div className="lb-item-controls">
+                    <span className="lb-plays">plays for</span>
+                    <DurationInput
+                      label={`Length of ${asset?.filename ?? "item"} in seconds`}
+                      onCommit={(ms) => setItems(slot.items.map((entry) => (entry.key === item.key ? { ...entry, durationMs: ms } : entry)))}
+                      valueMs={item.durationMs}
+                    />
+                    <div className="lb-item-buttons">
+                      <button aria-label="Move earlier" className="lb-icon-button" disabled={index === 0} onClick={() => moveItem(item.key, -1)} type="button">
+                        ↑
+                      </button>
+                      <button aria-label="Move later" className="lb-icon-button" disabled={index === slot.items.length - 1} onClick={() => moveItem(item.key, 1)} type="button">
+                        ↓
+                      </button>
+                      {item.contentType === "ADVERTISEMENT" ? (
+                        <button className="lb-text-button" onClick={() => setPicker({ kind: "advert" })} type="button">
+                          Change
+                        </button>
+                      ) : (
+                        <button className="lb-text-button" onClick={() => setPicker({ kind: "filler", replaceKey: item.key })} type="button">
+                          Change
+                        </button>
+                      )}
+                      <button className="lb-text-button is-danger" onClick={() => setItems(slot.items.filter((entry) => entry.key !== item.key))} type="button">
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            <div className="button-row lb-add-row">
+              {!advert ? (
+                <button className="button button-primary" disabled={adverts.length === 0} onClick={() => setPicker({ kind: "advert" })} type="button">
+                  Choose advert
+                </button>
+              ) : null}
+              <button className="button button-secondary" disabled={fillers.length === 0} onClick={() => setPicker({ kind: "filler" })} type="button">
+                Add filler
+              </button>
+              <button
+                className="button button-secondary"
+                disabled={!advert || fillerTemplate.length === 0 || fillers.length === 0}
+                onClick={() => setTemplateOpen(true)}
+                title={fillerTemplate.length === 0 ? "The filler template in Settings is empty." : undefined}
+                type="button"
+              >
+                Fill from template…
+              </button>
+            </div>
+            {adverts.length === 0 ? <p className="muted">No adverts in the library yet: upload one in Assets.</p> : null}
+          </div>
+
+          <aside className="lb-still">
+            <span className="eyebrow">Between journeys</span>
+            <h3>Still image for this minute</h3>
+            {still ? (
+              <MediaPoster alt={still.filename} className="lb-still-poster" label="Still image" src={still.thumbnailUrl ?? still.previewUrl} />
+            ) : (
+              <div className="lb-still-fallback" aria-label="Orison logo on navy">
+                <img alt="" src="/m-app/windmill-gold.png" />
+              </div>
+            )}
+            {still ? (
+              <p className="muted">{still.filename}</p>
+            ) : (
+              <p className="lb-still-default">No still image chosen: between journeys the cab shows the Orison logo during this minute.</p>
+            )}
+            <div className="button-row">
+              <button className="button button-secondary" disabled={stills.length === 0} onClick={() => setPicker({ kind: "still" })} type="button">
+                {still ? "Change" : "Choose still image"}
+              </button>
+              {still ? (
+                <button className="button button-secondary" onClick={() => chooseStill(null)} type="button">
+                  Use the logo
+                </button>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      {picker ? (
+        <AssetPicker
+          assets={picker.kind === "advert" ? adverts : picker.kind === "still" ? stills : fillers}
+          onChoose={(asset) => (picker.kind === "advert" ? chooseAdvert(asset) : picker.kind === "still" ? chooseStill(asset) : chooseFiller(asset, picker.replaceKey))}
+          onClose={() => setPicker(null)}
+          selectedId={picker.kind === "advert" ? advert?.assetId : picker.kind === "still" ? slot.staticCreativeId : undefined}
+          title={picker.kind === "advert" ? `Advert for slot ${selected + 1}` : picker.kind === "still" ? `Still image for slot ${selected + 1}` : `Filler for slot ${selected + 1}`}
+          note={
+            picker.kind === "advert"
+              ? "An advert plays for the length of its file. You can shorten it afterwards."
+              : picker.kind === "filler"
+                ? `This slot has ${formatSeconds(Math.max(arithmetic.remainingMs, 0))} left.`
+                : "Shown on the cab's screen between journeys during this minute."
+          }
+        />
+      ) : null}
+
+      {templateOpen && advert ? (
+        <TemplateDialog
+          advertMs={arithmetic.advertMs}
+          fillers={fillers}
+          onApply={(items) => {
+            setItems([slot.items.find((item) => item.contentType === "ADVERTISEMENT")!, ...items.map((entry) => ({ ...entry, key: newKey(), orderInSlot: 0, startTimeMs: 0, contentType: "FILLER" as const }))]);
+            setTemplateOpen(false);
+            toast({ title: "Fillers added", message: `Slot ${selected + 1}: ${items.length} filler${items.length === 1 ? "" : "s"} from the template.`, tone: "success" });
+          }}
+          onClose={() => setTemplateOpen(false)}
+          template={fillerTemplate}
+        />
       ) : null}
 
       {previewOpen ? (
-        <Modal
-          className="preview-modal"
-          eyebrow="Preview"
-          onClose={() => setPreviewOpen(false)}
-          title={previewScope === "slot" ? `Slot ${selectedPosition + 1}` : "Full Loop"}
-        >
-          <div className="preview-controls">
-            <div className="segmented-control">
-              <button
-                className={`segment-toggle ${previewScope === "slot" ? "is-active" : ""}`}
-                onClick={() => {
-                  setPreviewScope("slot");
-                  setPreviewIndex(0);
-                }}
-                type="button"
-              >
-                Selected Slot
-              </button>
-              <button
-                className={`segment-toggle ${previewScope === "loop" ? "is-active" : ""}`}
-                onClick={() => {
-                  setPreviewScope("loop");
-                  setPreviewIndex(0);
-                }}
-                type="button"
-              >
-                Full Loop
-              </button>
-            </div>
-            <span className="muted">
-              Item {previewIndex + 1} of {previewItems.length}
-            </span>
-          </div>
+        <PreviewPlayer
+          assetMap={assetMap}
+          onClose={() => setPreviewOpen(null)}
+          slots={previewOpen === "slot" ? [slot] : slots}
+          frame={frame}
+        />
+      ) : null}
 
-          <div className="preview-frame">
-            {currentPreview?.mimeType.startsWith("image/") ? (
-              <img alt={currentPreview.filename} src={currentPreview.url} />
-            ) : (
-              <video
-                autoPlay
-                controls
-                key={currentPreview?.url}
-                onEnded={() => setPreviewIndex((index) => (index + 1) % previewItems.length)}
-                src={currentPreview?.url}
-              />
-            )}
-          </div>
+      {confirm ? <ConfirmDialog onClose={() => setConfirm(null)} request={confirm} /> : null}
+    </div>
+  );
+}
 
-          <div className="preview-playlist">
-            {previewItems.map((item, index) => (
-              <button
-                className={`preview-playlist-item ${index === previewIndex ? "is-active" : ""}`}
-                key={`${item.slotPosition}-${item.assetId}-${index}`}
-                onClick={() => setPreviewIndex(index)}
-                type="button"
-              >
-                <span className="eyebrow">Slot {item.slotPosition + 1}</span>
-                <strong>{item.filename}</strong>
+function AssetPicker({
+  assets,
+  onChoose,
+  onClose,
+  selectedId,
+  title,
+  note,
+}: {
+  assets: AssetOption[];
+  onChoose: (asset: AssetOption) => void;
+  onClose: () => void;
+  selectedId?: string | null;
+  title: string;
+  note: string;
+}) {
+  const [query, setQuery] = useState("");
+  const shown = assets.filter((asset) => `${asset.filename} ${Object.values(asset.metadata).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
+  return (
+    <Modal className="lb-picker" eyebrow="Choose from the library" onClose={onClose} title={title}>
+      <div className="stack">
+        <div className="lb-picker-bar">
+          <p className="muted">{note}</p>
+          <input autoFocus className="lb-search" onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, advertiser or campaign" value={query} />
+        </div>
+        {shown.length === 0 ? (
+          <div className="empty-state compact">
+            <strong>Nothing to choose</strong>
+            <p>Upload files in Assets first.</p>
+          </div>
+        ) : (
+          <div className="lb-picker-grid">
+            {shown.map((asset) => (
+              <button className={`lb-pick ${selectedId === asset.id ? "is-selected" : ""}`} key={asset.id} onClick={() => onChoose(asset)} type="button">
+                <MediaPoster
+                  alt={asset.filename}
+                  className="lb-pick-poster"
+                  label="No preview"
+                  src={asset.thumbnailUrl ?? (asset.mimeType.startsWith("image/") ? asset.previewUrl : null)}
+                  videoSrc={asset.mimeType.startsWith("image/") ? null : asset.previewUrl}
+                />
+                <span className="lb-pick-length">{lengthLabel(asset).replace("file ", "")}</span>
+                <strong>{asset.filename}</strong>
                 <span className="muted">
-                  {item.type} / {formatTime(item.durationMs)}
+                  {categoryLabels[asset.category] ?? asset.category}
+                  {asset.metadata.advertiserName ? ` · ${asset.metadata.advertiserName}` : ""}
                 </span>
               </button>
             ))}
           </div>
-        </Modal>
-      ) : null}
-    </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function TemplateDialog({
+  template,
+  fillers,
+  advertMs,
+  onApply,
+  onClose,
+}: {
+  template: Array<{ category: string; durationMs: number }>;
+  fillers: AssetOption[];
+  advertMs: number;
+  onApply: (items: Array<{ assetId: string; durationMs: number }>) => void;
+  onClose: () => void;
+}) {
+  const fitted = fitTemplateDurations(template, SLOT_DURATION_MS - advertMs);
+  const eligible = (category: string) => fillers.filter((asset) => category === "ANY_FILLER" || asset.category === category);
+  // Newest matching file first (the library is newest first); any filler if none in the category.
+  const [choices, setChoices] = useState(() =>
+    template.map((row, index) => {
+      const list = eligible(row.category);
+      const pool = list.length ? list : fillers;
+      return pool[index % Math.max(pool.length, 1)]?.id ?? "";
+    }),
+  );
+  return (
+    <Modal className="lb-template" eyebrow="Filler template (Settings)" onClose={onClose} title="Fill the rest of the minute">
+      <div className="stack">
+        {!fitted.ok ? (
+          <div className="alert alert-danger">{fitted.reason}</div>
+        ) : (
+          <>
+            <p className="muted">
+              The advert takes {formatSeconds(advertMs)}, leaving {formatSeconds(SLOT_DURATION_MS - advertMs)}.
+              {fitted.adjustedLastByMs !== 0
+                ? ` The last row is ${fitted.adjustedLastByMs > 0 ? "lengthened" : "shortened"} by ${formatSeconds(Math.abs(fitted.adjustedLastByMs))} so the slot adds up to exactly one minute.`
+                : ""}{" "}
+              Pick the file for each row:
+            </p>
+            {template.map((row, index) => {
+              const list = eligible(row.category);
+              const options = list.length ? list : fillers;
+              return (
+                <div className="lb-template-row" key={index}>
+                  <span className="lb-kind">{categoryLabels[row.category] ?? row.category}</span>
+                  <select onChange={(event) => setChoices((current) => current.map((value, at) => (at === index ? event.target.value : value)))} value={choices[index]}>
+                    {options.map((asset) => (
+                      <option key={asset.id} value={asset.id}>
+                        {asset.filename} ({lengthLabel(asset).replace("file ", "")})
+                      </option>
+                    ))}
+                  </select>
+                  <span>{formatSeconds(fitted.durations[index])}</span>
+                  {list.length === 0 ? <span className="lb-fit is-held">No {categoryLabels[row.category]?.toLowerCase()} in the library: pick any filler.</span> : null}
+                </div>
+              );
+            })}
+          </>
+        )}
+        <div className="button-row lx-confirm-actions">
+          <button className="button button-secondary" onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button
+            className="button button-primary"
+            disabled={!fitted.ok || choices.some((choice) => !choice)}
+            onClick={() => fitted.ok && onApply(choices.map((assetId, index) => ({ assetId, durationMs: fitted.durations[index] })))}
+            type="button"
+          >
+            Replace this slot's fillers
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Plays the items as the cab will: each for exactly its time; a video longer than its time is cut,
+ * a shorter one stays on its last frame (silent) until its time is up; stills show for their time.
+ */
+function PreviewPlayer({
+  slots,
+  assetMap,
+  onClose,
+  frame,
+}: {
+  slots: SlotState[];
+  assetMap: Map<string, AssetOption>;
+  onClose: () => void;
+  frame: { width: number; height: number };
+}) {
+  const playlist = slots.flatMap((entry) => entry.items.map((item) => ({ ...item, position: entry.position, asset: assetMap.get(item.assetId) })));
+  const [index, setIndex] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [held, setHeld] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const current = playlist[index];
+
+  useEffect(() => {
+    if (!current) return;
+    setElapsedMs(0);
+    setHeld(false);
+    const started = performance.now();
+    const timer = window.setInterval(() => {
+      const ms = performance.now() - started;
+      setElapsedMs(ms);
+      const video = videoRef.current;
+      if (video && ms >= current.durationMs - 30) video.pause();
+      if (ms >= current.durationMs) {
+        window.clearInterval(timer);
+        setIndex((value) => (value + 1) % playlist.length);
+      }
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [current, playlist.length]);
+
+  if (!current) {
+    return (
+      <Modal onClose={onClose} title="Preview">
+        <p className="muted">Nothing to preview yet.</p>
+      </Modal>
+    );
+  }
+  const isImage = current.asset?.mimeType.startsWith("image/");
+  const fit = fitOf(current.asset, current.durationMs);
+  return (
+    <Modal className="lb-preview" eyebrow={slots.length > 1 ? "Whole loop, as the cab plays it" : `Slot ${slots[0].position + 1}, as the cab plays it`} onClose={onClose} title={current.asset?.filename ?? "Preview"}>
+      <div className="stack">
+        <div className="lb-preview-frame" style={{ aspectRatio: `${frame.width} / ${frame.height}` }}>
+          {isImage ? (
+            <img alt={current.asset?.filename ?? ""} src={current.asset?.previewUrl} />
+          ) : (
+            <video autoPlay key={`${index}-${current.key}`} onEnded={() => setHeld(true)} playsInline ref={videoRef} src={current.asset?.previewUrl} />
+          )}
+          {held ? <span className="lb-preview-held">Held on its last frame</span> : null}
+        </div>
+        <div className="lb-preview-bar">
+          <span>
+            Slot {current.position + 1} · {current.contentType === "ADVERTISEMENT" ? "Advert" : "Filler"} · {formatClock(elapsedMs)} of {formatClock(current.durationMs)}
+            {fit.kind === "cut" ? " · cut off at its time" : ""}
+          </span>
+          <div className="button-row">
+            <button className="button button-secondary" onClick={() => setIndex((value) => (value - 1 + playlist.length) % playlist.length)} type="button">
+              Previous
+            </button>
+            <button className="button button-secondary" onClick={() => setIndex((value) => (value + 1) % playlist.length)} type="button">
+              Next
+            </button>
+          </div>
+        </div>
+        <div className="lb-preview-track">
+          <div className="lb-preview-fill" style={{ width: `${Math.min(elapsedMs / current.durationMs, 1) * 100}%` }} />
+        </div>
+      </div>
+    </Modal>
   );
 }

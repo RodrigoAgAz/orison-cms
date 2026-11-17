@@ -4,6 +4,9 @@ import { assetListQuerySchema } from "@orison/shared";
 import { requireApiUser } from "@/lib/auth";
 import { apiError, apiResponse } from "@/lib/http";
 
+// Reads the session cookie: never pre-rendered at build time.
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   try {
     await requireApiUser();

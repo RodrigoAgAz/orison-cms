@@ -4,12 +4,13 @@
  *
  * Node's HTTP server aborts any request whose body has not fully arrived within
  * `server.requestTimeout` (300 s by default) with a 408. `next start` keeps that default and has no
- * option for it, which cuts off phone uploads of a few hundred MB over mobile data. This raises the
- * limit on the servers Next creates and changes nothing else: Next still creates and owns the server
- * (middleware, hostname/port from the environment, keep-alive and shutdown handling are untouched).
+ * option for it. Uploads now arrive in pieces of at most 4 MB (lib/chunked-upload.ts), so this only
+ * matters on a very slow connection (a 4 MB piece at under ~14 KB/s); the hosting proxy (Railway)
+ * cuts any request body off after 5 minutes anyway. This raises the limit on the servers Next
+ * creates and changes nothing else: Next still creates and owns the server (middleware,
+ * hostname/port from the environment, keep-alive and shutdown handling are untouched).
  *
  * REQUEST_TIMEOUT_SECONDS overrides the limit (default 1800 = 30 minutes; 0 disables it).
- * A reverse proxy in front of the app has its own body/idle timeouts, which must also allow this.
  */
 "use strict";
 

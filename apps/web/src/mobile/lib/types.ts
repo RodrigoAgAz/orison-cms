@@ -1,4 +1,4 @@
-// Client-side shapes of the mobile JSON API (/api/m/*). Mirrors src/lib/mobile.ts (CONTRACT.md).
+// Client-side shapes of the mobile JSON API (/api/m/*). Mirrors the types in src/lib/mobile.ts.
 
 export type LoopRef = { id: string; name: string; posterUrl: string | null };
 
@@ -19,7 +19,13 @@ export type LoopSummary = {
   publishedAt: string | null;
   createdAt: string;
   source: "upload" | "builder";
-  liveOn: { fleet: boolean; groups: { id: string; name: string }[]; cabCount: number };
+  liveOn: {
+    fleet: boolean;
+    groups: { id: string; name: string }[];
+    cabCount: number;
+    /** Cabs that last reported playing it (a cab whose update fails still shows its old video). */
+    onScreens?: number;
+  };
 };
 
 export type CabLocation = {
@@ -39,7 +45,7 @@ export type CabSummary = {
   driverName: string | null;
   group: { id: string; name: string } | null;
   status: CabStatus;
-  playerStatus: "journey" | "silent" | "idle" | "disabled" | "unknown";
+  playerStatus: "journey" | "silent" | "idle" | "disabled" | "fallback" | "error" | "unknown";
   lastSeenAt: string | null;
   playing: LoopRef | null;
   expected: LoopRef | null;
@@ -58,10 +64,38 @@ export type CabSummary = {
   fleetPaused: boolean;
   /** Worst-case minutes for this cab to act on a change (depends on its software version). */
   changeLagMinutes: number;
+  /** Seconds on since London midnight (hoursOnlineToday is rounded to a tenth of an hour). */
+  secondsOnlineToday?: number;
+  /** The cab plays its built-in standby video (a new box, or one that lost its video). */
+  playingBuiltIn?: boolean;
+  /** What its equipment reports about where it is (latest heartbeat). */
+  positionReporting?: "gps" | "cell" | "none" | "unknown";
+  /** How journeys start, once the cab reports it. */
+  playbackTrigger?: "gpio" | "keyboard" | "always" | null;
+  /** The cab plays for passenger journeys, so passenger wording applies. */
+  reportsJourneys?: boolean;
+  /** Fine-grained player state (firmware 1.2.0+): "SAFETY" while the safety message plays. */
+  playerState?: string | null;
+  /** How its content update stands. "failing"/"downloading" come from firmware 1.2.0+. */
+  sync?: {
+    state: "failing" | "downloading" | "waiting" | "current" | "unknown";
+    error: string | null;
+    since: string | null;
+    nextRetryAt: string | null;
+    lastSyncedAt: string | null;
+    failedLoop: { id: string; name: string } | null;
+  };
 };
 
 export type CabDetail = CabSummary & {
+  /** dBm from the modem, or (older firmware without a modem) a 0-100 percentage. */
   signalStrength: number | null;
+  /** 0-100 signal quality, when that is what the cab reports. */
+  signalPercent?: number | null;
+  /** dBm, when the cab's modem reports it. */
+  signalDbm?: number | null;
+  /** When the technical figures were reported. */
+  reportedAt?: string | null;
   networkType: string | null;
   storageFreeMb: number | null;
   cpuTemp: number | null;

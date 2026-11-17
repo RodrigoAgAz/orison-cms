@@ -20,16 +20,38 @@ import {
   Freshness,
 } from "../components/ui";
 import { VideoPlayer } from "../components/video-player";
-import { api } from "../lib/api";
-import { ago, distance, duration, hoursAsDuration, longDate, plural, quoted, when, whenLong } from "../lib/format";
-import { isSwitchedOn, passengerLine, sourceLine } from "../lib/status";
+import { api, ApiFailure } from "../lib/api";
+import { ago, distance, duration, longDate, plural, quoted, when, whenLong } from "../lib/format";
+import { isSwitchedOn, passengerLine, signalWords, sourceLine, updateFailureText } from "../lib/status";
+import { BuiltInStill } from "../components/built-in";
 import { invalidate, useResource } from "../lib/store";
 import type { CabDetail, Overview } from "../lib/types";
 
-function signalWords(dbm: number | null) {
-  if (dbm === null) return "Unknown";
-  const label = dbm >= -75 ? "Strong" : dbm >= -90 ? "Good" : dbm >= -105 ? "Weak" : "Very weak";
-  return `${label} (${dbm} dBm)`;
+/** How the cab starts its video: lib/device-status.ts hasPassengerDetection, in words. */
+function triggerWords(cab: CabDetail) {
+  switch (cab.playbackTrigger) {
+    case "gpio":
+      return "When a passenger gets in (door or button)";
+    case "keyboard":
+      return "When a passenger presses a key";
+    case "always":
+      return "All the time (no passenger detection)";
+    default:
+      return cab.reportsJourneys ? "When a passenger gets in (older software, so not reported)" : "Not reported (older software)";
+  }
+}
+
+function positionWords(cab: CabDetail) {
+  switch (cab.positionReporting) {
+    case "gps":
+      return "GPS";
+    case "cell":
+      return "Mobile mast only (approximate)";
+    case "none":
+      return "Not reported by this cab’s equipment";
+    default:
+      return "Unknown";
+  }
 }
 
 export function CabScreen({ id }: { id: string }) {
@@ -57,11 +79,26 @@ export function CabScreen({ id }: { id: string }) {
 
   const now = new Date();
   const on = isSwitchedOn(data);
+  // Still reporting, even if its screen is paused (a paused cab is switched on; its screen isn't playing).
+  const reporting = on || Boolean(data.onlineSince);
   const passenger = passengerLine(data);
   const group = data.group ? overview.data?.groups.find((item) => item.id === data.group?.id) : null;
   const inheritName = group ? `${group.name}’s video` : "the video for all cabs";
   const inheritLoop = group?.loop ?? overview.data?.fleetLoop ?? null;
   const pending = !data.isUpToDate && data.expected;
+  // What the player box should show: what is on the screen when on; when off, what it played last,
+  // or (never played anything) what it is set to play.
+  const shownLoop = on || data.status === "paused" ? data.playing ?? (data.playingBuiltIn ? null : data.expected) : data.playing ?? null;
+  const playTitle = on
+    ? "On the screen now"
+    : data.status === "paused"
+      ? "Set to play"
+      : data.playing || data.playingBuiltIn
+        ? "Last played"
+        : "Set to play";
+  const showsSetToPlay = playTitle === "Set to play" && !data.playing;
+  const reportedAt = data.reportedAt ?? data.lastSeenAt;
+  const secondsToday = data.secondsOnlineToday ?? Math.round(data.hoursOnlineToday * 3600);
   // This cab's own figure: older screen software only checks for changes every 30 minutes.
   const lag = data.changeLagMinutes;
 
@@ -97,20 +134,51 @@ export function CabScreen({ id }: { id: string }) {
         ) : null}
       </div>
 
-      <Section title={on ? "Playing now" : data.status === "paused" ? "Set to play" : "Last played"}>
+      <Section title={playTitle}>
         <div className="m-card m-cabplay">
-          {data.playing || data.expected ? (
-            <VideoPlayer
-              loopId={(data.playing ?? data.expected)!.id}
-              name={(data.playing ?? data.expected)!.name}
-              posterUrl={(data.playing ?? data.expected)!.posterUrl}
-            />
+          {data.playingBuiltIn && (on || !showsSetToPlay) ? (
+            <BuiltInStill />
+          ) : shownLoop ? (
+            <VideoPlayer loopId={shownLoop.id} name={shownLoop.name} posterUrl={shownLoop.posterUrl} />
+          ) : showsSetToPlay && data.expected ? (
+            <VideoPlayer loopId={data.expected.id} name={data.expected.name} posterUrl={data.expected.posterUrl} />
           ) : null}
           <div className="m-cabplay-text">
-            <strong data-testid="cab-playing">{data.playing ? data.playing.name : "Nothing has played yet"}</strong>
-            <span className="m-muted">{sourceLine(data)}</span>
+            <strong data-testid="cab-playing">
+              {data.playing
+                ? data.playing.name
+                : data.playingBuiltIn
+                  ? "Its built-in Orison video"
+                  : showsSetToPlay && data.expected
+                    ? data.expected.name
+                    : "Nothing has played yet"}
+            </strong>
+            {on && data.playerState === "SAFETY" ? (
+              <span className="m-muted" data-testid="cab-safety-note">
+                The safety message is on the screen now; this video follows it.
+              </span>
+            ) : null}
+            <span className="m-muted">
+              {data.playingBuiltIn && !data.playing
+                ? "A standby video the box carries. It shows this until it has fetched its video from the library."
+                : showsSetToPlay && data.expected && !data.lastSeenAt
+                  ? `It hasn’t been switched on yet. ${sourceLine(data)}.`
+                  : data.playing && data.expected && !data.isUpToDate
+                    ? // What it shows isn't what it's set to: say which is which.
+                      `Its previous video. Set to play ${quoted(data.expected.name)} (${sourceLine(data).replace(/^./, (c) => c.toLowerCase())}).`
+                    : sourceLine(data)}
+            </span>
           </div>
-          {pending ? (
+          {pending && data.sync?.state === "failing" ? (
+            <Notice tone="warn" title="Its update is failing" testId="cab-update-failing">
+              {updateFailureText(data, now)} Until then it keeps playing what it has.
+              {data.sync.since ? ` Failing since ${whenLong(data.sync.since, now)}.` : ""}
+            </Notice>
+          ) : pending && data.sync?.state === "downloading" && on ? (
+            <Notice tone="info" title="Downloading its new video" testId="cab-pending">
+              It is downloading {quoted(data.expected!.name)} and switches to it once that has finished.
+            </Notice>
+          ) : pending ? (
             <Notice tone="info" title={on ? "Switching to a new video" : "New video waiting"} testId="cab-pending">
               {on
                 ? `It has been told to play ${quoted(data.expected!.name)} and will switch within about ${plural(lag, "minute")}.`
@@ -138,13 +206,13 @@ export function CabScreen({ id }: { id: string }) {
           <div className="m-stats">
             <div>
               <span className="m-stat-label">
-                <ClockIcon size={15} /> {on ? "On for" : "Status"}
+                <ClockIcon size={15} /> {reporting ? "On for" : "Status"}
               </span>
               <strong className="m-stat-value">
-                {on && data.onlineSince ? duration((now.getTime() - new Date(data.onlineSince).getTime()) / 1000) : on ? "On" : "Off"}
+                {reporting && data.onlineSince ? duration((now.getTime() - new Date(data.onlineSince).getTime()) / 1000) : reporting ? "On" : "Off"}
               </strong>
               <span className="m-muted m-stat-sub">
-                {on && data.onlineSince
+                {reporting && data.onlineSince
                   ? `since ${whenLong(data.onlineSince, now)}`
                   : data.lastSeenAt
                     ? `last on ${whenLong(data.lastSeenAt, now)}`
@@ -153,7 +221,7 @@ export function CabScreen({ id }: { id: string }) {
             </div>
             <div>
               <span className="m-stat-label">On today</span>
-              <strong className="m-stat-value">{data.hoursOnlineToday > 0 ? hoursAsDuration(data.hoursOnlineToday) : "Not yet"}</strong>
+              <strong className="m-stat-value" data-testid="on-today">{secondsToday > 0 ? duration(secondsToday) : "Not yet"}</strong>
               <span className="m-muted m-stat-sub">since midnight</span>
             </div>
           </div>
@@ -162,6 +230,7 @@ export function CabScreen({ id }: { id: string }) {
         </div>
       </Section>
 
+      {data.location || data.positionReporting !== "none" ? (
       <Section title="Where it is">
         <div className="m-card m-cabloc">
           {data.location ? (
@@ -180,7 +249,7 @@ export function CabScreen({ id }: { id: string }) {
                     cab had no GPS fix, so the position comes from the nearest mobile phone mast.
                   </>
                 )}
-                {!on ? ` It may have moved since it was switched off.` : ""}
+                {!reporting ? ` It may have moved since it was switched off.` : ""}
               </p>
               <a
                 className="m-btn m-btn-secondary m-btn-block"
@@ -193,12 +262,17 @@ export function CabScreen({ id }: { id: string }) {
             </>
           ) : (
             <p className="m-cabloc-none" data-testid="cab-location-text">
-              <MapIcon size={18} className="m-inline-icon" /> This cab hasn&rsquo;t reported where it is yet. Its position appears once the
-              screen is switched on with a signal.
+              <MapIcon size={18} className="m-inline-icon" />{" "}
+              {data.positionReporting === "unknown"
+                ? "This cab hasn’t reported where it is yet: it hasn’t been switched on. Its position appears once it is."
+                : data.positionReporting === "cell"
+                  ? "This cab hasn’t reported where it is yet. It has no GPS, so it appears in an approximate area once its mobile mast has been looked up."
+                  : "This cab hasn’t reported where it is yet. Its position appears once its screen is on and has a GPS fix."}
             </p>
           )}
         </div>
       </Section>
+      ) : null}
 
       <Section title="Screen">
         <div className="m-card">
@@ -231,18 +305,36 @@ export function CabScreen({ id }: { id: string }) {
       </Section>
 
       <details className="m-details m-card" data-testid="tech-details">
-        <summary>Technical details</summary>
+        <summary>
+          <span>
+            Technical details
+            {!reporting && reportedAt ? <span className="m-muted m-details-age"> · as of {ago(reportedAt)}</span> : null}
+          </span>
+        </summary>
+        {!reporting && reportedAt ? (
+          <p className="m-muted m-details-note" data-testid="tech-stale">
+            The cab is off. These are the figures it reported when it was last on, {whenLong(reportedAt, now)}; they may have changed since.
+          </p>
+        ) : null}
         <KeyValue
           items={[
             ["Screen serial", <code key="s">{data.serialNumber}</code>],
             ["Last check-in", data.lastSeenAt ? `${when(data.lastSeenAt, now)} (${ago(data.lastSeenAt)})` : "Never"],
             ["Running since restart", data.uptimeSeconds !== null ? duration(data.uptimeSeconds) : "Off"],
-            ["Mobile signal", signalWords(data.signalStrength)],
-            ["Connection", data.networkType ? data.networkType.toUpperCase() : "Unknown"],
-            ["Free storage", data.storageFreeMb !== null ? `${(data.storageFreeMb / 1024).toFixed(1)} GB` : "Unknown"],
-            ["Temperature", data.cpuTemp !== null ? `${Math.round(data.cpuTemp)}°C` : "Unknown"],
-            ["Software", data.firmwareVersion ?? "Unknown"],
-            ["Playing (ID)", data.playing ? <code key="p">{data.playing.id}</code> : "None"],
+            [reporting ? "Mobile signal" : "Mobile signal (last reported)", signalWords(data.signalStrength, data.signalPercent, data.signalDbm)],
+            ["Position", positionWords(data)],
+            // Firmware before 1.2.0 always says "4g", so the server leaves it out (as the desktop does).
+            ["Connection", data.networkType ? data.networkType.toUpperCase() : data.lastSeenAt ? "Not reported" : "Unknown"],
+            [reporting ? "Free storage" : "Free storage (last reported)", data.storageFreeMb !== null ? `${(data.storageFreeMb / 1024).toFixed(1)} GB` : "Unknown"],
+            [reporting ? "Temperature" : "Temperature (last reported)", data.cpuTemp !== null ? `${Math.round(data.cpuTemp)}°C` : "Unknown"],
+            [
+              "Software",
+              data.firmwareVersion
+                ? `${data.firmwareVersion} · acts on a change within about ${plural(data.changeLagMinutes, "minute")}`
+                : "Unknown",
+            ],
+            ["Starts playing", triggerWords(data)],
+            ["Playing (ID)", data.playing ? <code key="p">{data.playing.id}</code> : data.playingBuiltIn ? "Built-in video (fallback)" : "None"],
             ["In service since", longDate(data.inServiceSince)],
             ...(data.notes ? ([["Notes", data.notes]] as Array<[string, React.ReactNode]>) : []),
           ]}
@@ -274,6 +366,22 @@ function PauseSheet({ cab, open, onClose, onDone }: { cab: CabDetail; open: bool
       setReason("");
       onClose();
     } catch (failure) {
+      if (failure instanceof ApiFailure && failure.uncertain) {
+        // No answer: read the cab back instead of guessing.
+        const after = await api<CabDetail>(`/api/m/cabs/${cab.id}`).catch(() => null);
+        if (after && after.cabPaused === !resuming) {
+          onDone();
+          setReason("");
+          onClose();
+          return;
+        }
+        setError(
+          after
+            ? `The server didn’t answer in time and the screen is still ${resuming ? "paused" : "playing"}, so nothing changed. Please try again.`
+            : `We didn’t hear back from the server, so we can’t tell whether the screen was ${resuming ? "resumed" : "paused"}. It may have worked: close this and check the cab’s status at the top of the screen before trying again.`,
+        );
+        return;
+      }
       setError(failure instanceof Error ? failure.message : "That didn’t work.");
     } finally {
       setBusy(false);

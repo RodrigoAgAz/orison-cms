@@ -29,7 +29,7 @@ async function enableDevice(params: Props["params"], actor: PhoneActor) {
     },
   });
 
-  await logActivity("DEVICE_ENABLED", `Device ${device.serialNumber} enabled by ${actor.name}`, {
+  await logActivity("DEVICE_ENABLED", `Cab ${device.serialNumber} resumed by ${actor.name}`, {
     deviceId: device.id,
     serialNumber: device.serialNumber,
     ...actorMetadata(actor),
@@ -55,7 +55,7 @@ export async function PUT(_: Request, { params }: Props) {
 }
 
 /**
- * Phone app (CONTRACT.md) uses POST; same behaviour as PUT. Open to callers who are not signed in
+ * The phone app uses POST; same behaviour as PUT. Open to callers who are not signed in
  * unless PHONE_APP_REQUIRE_SIGN_IN is set (see lib/phone-access.ts).
  */
 export async function POST(_: Request, { params }: Props) {

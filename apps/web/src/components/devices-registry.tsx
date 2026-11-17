@@ -7,35 +7,46 @@ import { Modal } from "@/components/modal";
 import { PaginationControls } from "@/components/pagination-controls";
 import { StatusDot } from "@/components/status-dot";
 import { useToast } from "@/components/toast-provider";
+import { formatSignal, screenActivityLabel } from "@/lib/device-status";
+import { formatLondonDateTime } from "@/lib/london-time";
 
 type DeviceItem = {
   id: string;
   serialNumber: string;
   cabLicenseNumber: string | null;
   driverName: string | null;
-  currentLoopId: string | null;
-  expectedLoopId: string | null;
-  lastSyncAt: string | null;
-  lastHeartbeatAt: string | null;
-  storageFreeMb: number | null;
   hpTaxiCabId: string | null;
-  notes: string | null;
+  groupId: string | null;
   isActive: boolean;
   isDisabled: boolean;
   disabledReason: string | null;
-  groupId: string | null;
-  group: {
-    id: string;
-    name: string;
-  } | null;
   status: "online" | "outdated" | "offline" | "inactive";
-  heartbeats: Array<{
-    id: string;
-    receivedAt: string;
-    playerStatus: string | null;
-    networkType: string | null;
-    signalStrength: number | null;
-  }>;
+  online: boolean;
+  currentLoopId: string | null;
+  currentLoopName: string | null;
+  expectedLoopId: string | null;
+  expectedLoopName: string | null;
+  expectedSourceLabel: string | null;
+  sync: {
+    state: "failing" | "downloading" | "waiting" | "current" | "unknown";
+    label: string;
+    error: string | null;
+    since: string | null;
+    nextRetryAt: string | null;
+    failedLoopName: string | null;
+  };
+  lastSyncAt: string | null;
+  lastHeartbeatAt: string | null;
+  playerStatusNow: string | null;
+  playerStateNow: string | null;
+  playbackTrigger: string | null;
+  reportsJourneys: boolean;
+  hasReportedJourney: boolean;
+  signalPercent: number | null;
+  signalDbm: number | null;
+  networkType: string | null;
+  storageFreeMb: number | null;
+  firmwareVersion: string | null;
 };
 
 type DeviceGroup = {
@@ -50,7 +61,6 @@ type DeviceGroup = {
 type Props = {
   devices: DeviceItem[];
   groups: DeviceGroup[];
-  publishedLoopId: string | null;
   fleetControl: {
     disabled: boolean;
     reason: string | null;
@@ -61,16 +71,35 @@ type Props = {
   total: number;
 };
 
-export function DevicesRegistry({
-  devices,
-  groups,
-  publishedLoopId,
-  fleetControl,
-  selectedGroupId,
-  page,
-  pageSize,
-  total,
-}: Props) {
+const statusLabels: Record<DeviceItem["status"], string> = {
+  online: "Online",
+  outdated: "Online, updating",
+  offline: "Offline",
+  inactive: "Inactive",
+};
+
+function triggerLabel(trigger: string | null, hasReportedJourney: boolean) {
+  switch (trigger) {
+    case "always":
+      return "Plays continuously (no passenger detection)";
+    case "keyboard":
+      return "Journeys start from a key press";
+    case "gpio":
+      return "Journeys start from the button/door input";
+    default:
+      // Firmware before 1.2.0 does not say whether a passenger input is connected.
+      return hasReportedJourney
+        ? "Has reported passenger journeys in the last 30 days"
+        : "No passenger journey reported in the last 30 days";
+  }
+}
+
+async function errorMessage(response: Response, fallback: string) {
+  const body = (await response.json().catch(() => null)) as { error?: string } | null;
+  return body?.error ?? fallback;
+}
+
+export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId, page, pageSize, total }: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const [registerOpen, setRegisterOpen] = useState(false);
@@ -101,9 +130,7 @@ export function DevicesRegistry({
 
     const response = await fetch("/api/devices", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         serialNumber: form.serialNumber,
         cabLicenseNumber: form.cabLicenseNumber || null,
@@ -114,10 +141,9 @@ export function DevicesRegistry({
     });
 
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
       toast({
-        title: "Device registration failed",
-        message: body?.error ?? "Unable to register the device.",
+        title: "Cab not registered",
+        message: await errorMessage(response, "Unable to register the cab."),
         tone: "error",
       });
       setSaving(false);
@@ -125,19 +151,13 @@ export function DevicesRegistry({
     }
 
     toast({
-      title: "Device registered",
-      message: `${form.serialNumber} is now in the fleet registry.`,
+      title: "Cab registered",
+      message: `${form.serialNumber} is now in the list of cabs.`,
       tone: "success",
     });
     setRegisterOpen(false);
     setSaving(false);
-    setForm({
-      serialNumber: "",
-      cabLicenseNumber: "",
-      driverName: "",
-      hpTaxiCabId: "",
-      notes: "",
-    });
+    setForm({ serialNumber: "", cabLicenseNumber: "", driverName: "", hpTaxiCabId: "", notes: "" });
     refreshPage();
   }
 
@@ -147,20 +167,14 @@ export function DevicesRegistry({
 
     const response = await fetch("/api/device-groups", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: groupForm.name,
-        description: groupForm.description || null,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: groupForm.name, description: groupForm.description || null }),
     });
 
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
       toast({
-        title: "Group creation failed",
-        message: body?.error ?? "Unable to create the device group.",
+        title: "Group not created",
+        message: await errorMessage(response, "Unable to create the group."),
         tone: "error",
       });
       setGroupSaving(false);
@@ -169,13 +183,10 @@ export function DevicesRegistry({
 
     toast({
       title: "Group created",
-      message: `${groupForm.name} is available for device assignment.`,
+      message: `${groupForm.name} can now be chosen for cabs.`,
       tone: "success",
     });
-    setGroupForm({
-      name: "",
-      description: "",
-    });
+    setGroupForm({ name: "", description: "" });
     setGroupModalOpen(false);
     setGroupSaving(false);
     refreshPage();
@@ -191,30 +202,20 @@ export function DevicesRegistry({
 
     const response = await fetch(`/api/device-groups/${group.id}`, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        name: nextName,
-        description: nextDescription?.trim() || null,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: nextName, description: nextDescription?.trim() || null }),
     });
 
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
       toast({
-        title: "Group update failed",
-        message: body?.error ?? "Unable to update the group.",
+        title: "Group not renamed",
+        message: await errorMessage(response, "Unable to update the group."),
         tone: "error",
       });
       return;
     }
 
-    toast({
-      title: "Group updated",
-      message: `${group.name} was updated.`,
-      tone: "success",
-    });
+    toast({ title: "Group renamed", message: `${group.name} is now ${nextName}.`, tone: "success" });
     refreshPage();
   }
 
@@ -224,25 +225,18 @@ export function DevicesRegistry({
       return;
     }
 
-    const response = await fetch(`/api/device-groups/${group.id}`, {
-      method: "DELETE",
-    });
+    const response = await fetch(`/api/device-groups/${group.id}`, { method: "DELETE" });
 
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
       toast({
-        title: "Group deletion failed",
-        message: body?.error ?? "Unable to delete the group.",
+        title: "Group not deleted",
+        message: await errorMessage(response, "Unable to delete the group."),
         tone: "error",
       });
       return;
     }
 
-    toast({
-      title: "Group deleted",
-      message: `${group.name} was removed.`,
-      tone: "success",
-    });
+    toast({ title: "Group deleted", message: `${group.name} was removed.`, tone: "success" });
     refreshPage();
   }
 
@@ -251,82 +245,60 @@ export function DevicesRegistry({
 
     const response = await fetch(`/api/devices/${deviceId}`, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        groupId: groupId || null,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ groupId: groupId || null }),
     });
 
     if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
       toast({
-        title: "Device update failed",
-        message: body?.error ?? "Unable to update the device group.",
+        title: "Group not changed",
+        message: await errorMessage(response, "Unable to change the cab's group."),
         tone: "error",
       });
       setBusyDeviceId(null);
       return;
     }
 
-    toast({
-      title: "Device updated",
-      message: "Group assignment saved.",
-      tone: "success",
-    });
+    toast({ title: "Group changed", message: "The cab's group was saved.", tone: "success" });
     setBusyDeviceId(null);
     refreshPage();
   }
 
   async function toggleDeviceDisabled(device: DeviceItem) {
+    let reason: string | null = null;
+    if (!device.isDisabled) {
+      reason = window.prompt("Reason for pausing (optional)", device.disabledReason ?? "");
+      if (reason === null) {
+        return;
+      }
+    }
     setBusyDeviceId(device.id);
 
     try {
-      if (device.isDisabled) {
-        const response = await fetch(`/api/devices/${device.id}/enable`, {
-          method: "PUT",
-        });
+      const response = device.isDisabled
+        ? await fetch(`/api/devices/${device.id}/enable`, { method: "PUT" })
+        : await fetch(`/api/devices/${device.id}/disable`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: reason?.trim() || null }),
+          });
 
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? "Unable to enable the device.");
-        }
-
-        toast({
-          title: "Device enabled",
-          message: `${device.serialNumber} can receive playback again.`,
-          tone: "success",
-        });
-      } else {
-        const reason = window.prompt("Disable reason (optional)", device.disabledReason ?? "") ?? "";
-        const response = await fetch(`/api/devices/${device.id}/disable`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            reason: reason.trim() || null,
-          }),
-        });
-
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? "Unable to disable the device.");
-        }
-
-        toast({
-          title: "Device disabled",
-          message: `${device.serialNumber} was disabled remotely.`,
-          tone: "success",
-        });
+      if (!response.ok) {
+        throw new Error(
+          await errorMessage(response, device.isDisabled ? "Unable to resume the cab." : "Unable to pause the cab."),
+        );
       }
 
+      toast(
+        device.isDisabled
+          ? { title: "Cab resumed", message: `${device.serialNumber} plays again from its next heartbeat.`, tone: "success" }
+          : { title: "Cab paused", message: `${device.serialNumber} stops playing at its next heartbeat.`, tone: "success" },
+      );
       refreshPage();
     } catch (error) {
       toast({
-        title: "Device update failed",
-        message: error instanceof Error ? error.message : "Unable to update the device.",
+        title: "Cab not changed",
+        message: error instanceof Error ? error.message : "Unable to change the cab.",
         tone: "error",
       });
     } finally {
@@ -335,52 +307,40 @@ export function DevicesRegistry({
   }
 
   async function toggleFleetDisabled() {
+    let reason: string | null = null;
+    if (!fleetControl.disabled) {
+      reason = window.prompt("Reason for pausing all cabs (optional)", fleetControl.reason ?? "");
+      if (reason === null) {
+        return;
+      }
+    }
     setFleetBusy(true);
 
     try {
-      if (fleetControl.disabled) {
-        const response = await fetch("/api/devices/enable-all", {
-          method: "PUT",
-        });
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? "Unable to enable the fleet.");
-        }
+      const response = fleetControl.disabled
+        ? await fetch("/api/devices/enable-all", { method: "PUT" })
+        : await fetch("/api/devices/disable-all", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: reason?.trim() || null }),
+          });
 
-        toast({
-          title: "Fleet enabled",
-          message: "All devices can resume playback.",
-          tone: "success",
-        });
-      } else {
-        const reason = window.prompt("Disable all devices reason (optional)", fleetControl.reason ?? "") ?? "";
-        const response = await fetch("/api/devices/disable-all", {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            reason: reason.trim() || null,
-          }),
-        });
-
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? "Unable to disable the fleet.");
-        }
-
-        toast({
-          title: "Fleet disabled",
-          message: "The emergency kill-switch is now active.",
-          tone: "success",
-        });
+      if (!response.ok) {
+        throw new Error(
+          await errorMessage(response, fleetControl.disabled ? "Unable to resume all cabs." : "Unable to pause all cabs."),
+        );
       }
 
+      toast(
+        fleetControl.disabled
+          ? { title: "All cabs resumed", message: "Cabs play again from their next heartbeat.", tone: "success" }
+          : { title: "All cabs paused", message: "Every cab stops playing at its next heartbeat.", tone: "success" },
+      );
       refreshPage();
     } catch (error) {
       toast({
-        title: "Fleet update failed",
-        message: error instanceof Error ? error.message : "Unable to change fleet state.",
+        title: "Pause not changed",
+        message: error instanceof Error ? error.message : "Unable to change the pause.",
         tone: "error",
       });
     } finally {
@@ -402,11 +362,11 @@ export function DevicesRegistry({
         <div className="card-header">
           <div>
             <span className="eyebrow">Groups</span>
-            <h2>Fleet Segments</h2>
+            <h2>Groups of cabs</h2>
           </div>
           <div className="button-row">
             <button className="button button-secondary" onClick={() => setGroupModalOpen(true)} type="button">
-              Create Group
+              Create group
             </button>
             <button
               className={fleetControl.disabled ? "button button-secondary" : "button button-danger"}
@@ -420,9 +380,9 @@ export function DevicesRegistry({
                   Working
                 </span>
               ) : fleetControl.disabled ? (
-                "Enable All Devices"
+                "Resume all cabs"
               ) : (
-                "Disable All Devices"
+                "Pause all cabs"
               )}
             </button>
           </div>
@@ -430,14 +390,14 @@ export function DevicesRegistry({
 
         {fleetControl.disabled ? (
           <div className="alert alert-warning">
-            Fleet kill-switch active{fleetControl.reason ? `: ${fleetControl.reason}` : "."}
+            All cabs are paused{fleetControl.reason ? `: ${fleetControl.reason}` : "."}
           </div>
         ) : null}
 
         {groups.length === 0 ? (
           <div className="empty-state compact">
-            <strong>No device groups yet</strong>
-            <p>Create named fleet segments like Airport Runs or HP Fleet A, then assign cabs from the table below.</p>
+            <strong>No groups yet</strong>
+            <p>A group lets a set of cabs play its own loop. Create one, then choose it for cabs in the table below.</p>
           </div>
         ) : (
           <div className="chart-list">
@@ -446,16 +406,12 @@ export function DevicesRegistry({
                 <div>
                   <strong>{group.name}</strong>
                   <div className="muted">
-                    {group.description || "No description"} / {group._count.devices} device
+                    {group.description || "No description"} / {group._count.devices} cab
                     {group._count.devices === 1 ? "" : "s"}
                   </div>
                 </div>
                 <div className="button-row">
-                  <button
-                    className="button button-secondary"
-                    onClick={() => void renameGroup(group)}
-                    type="button"
-                  >
+                  <button className="button button-secondary" onClick={() => void renameGroup(group)} type="button">
                     Rename
                   </button>
                   <button className="button button-danger" onClick={() => void deleteGroup(group)} type="button">
@@ -471,14 +427,14 @@ export function DevicesRegistry({
       <div className="card stack">
         <div className="card-header">
           <div>
-            <span className="eyebrow">Device Registry</span>
-            <h2>Cab Units</h2>
+            <span className="eyebrow">Cabs</span>
+            <h2>Every cab</h2>
           </div>
           <div className="button-row">
             <label className="field compact-field">
-              <span>Filter by group</span>
+              <span>Show</span>
               <select value={selectedGroupId} onChange={(event) => applyGroupFilter(event.target.value)}>
-                <option value="ALL">All Devices</option>
+                <option value="ALL">All cabs</option>
                 {groups.map((group) => (
                   <option key={group.id} value={group.id}>
                     {group.name}
@@ -487,65 +443,84 @@ export function DevicesRegistry({
               </select>
             </label>
             <button className="button button-primary" onClick={() => setRegisterOpen(true)} type="button">
-              Register Device
+              Register a cab
             </button>
           </div>
         </div>
 
         {devices.length === 0 ? (
           <div className="empty-state">
-            <strong>No devices registered yet</strong>
+            <strong>No cabs yet</strong>
             <p>
-              Register your first cab screen, assign it to a group, and the CMS will start tracking
-              sync, heartbeats, storage, and playback health.
+              A cab appears here by itself when it sends its first heartbeat. You can also register one in advance with
+              its serial number.
             </p>
             <button className="button button-primary" onClick={() => setRegisterOpen(true)} type="button">
-              Register the first device
+              Register a cab
             </button>
           </div>
         ) : (
           <>
             <div className="table-wrap">
-              <table className="data-table">
+              <table className="data-table cab-table">
                 <thead>
                   <tr>
-                    <th>Serial</th>
-                    <th>Cab License</th>
-                    <th>Driver</th>
+                    <th>Cab</th>
                     <th>Status</th>
                     <th>Group</th>
-                    <th>Current Loop</th>
-                    <th>Last Heartbeat</th>
-                    <th>Storage Free</th>
-                    <th />
+                    <th>Loop</th>
+                    <th>Update</th>
+                    <th>Screen</th>
+                    <th>Signal / storage</th>
                   </tr>
                 </thead>
                 <tbody>
                   {devices.map((device) => (
                     <tr key={device.id}>
                       <td>
-                        <strong>{device.serialNumber}</strong>
-                        {device.hpTaxiCabId ? (
-                          <div className="muted">HP Taxi ID: {device.hpTaxiCabId}</div>
-                        ) : null}
+                        <div className="cab-cell-lines">
+                          <strong>{device.serialNumber}</strong>
+                          <span className="muted">Licence {device.cabLicenseNumber ?? "not set"}</span>
+                          {device.driverName ? <span className="muted">Driver {device.driverName}</span> : null}
+                          {device.hpTaxiCabId ? <span className="muted">HP Taxi ID {device.hpTaxiCabId}</span> : null}
+                        </div>
                       </td>
-                      <td>{device.cabLicenseNumber ?? "n/a"}</td>
-                      <td>{device.driverName ?? "n/a"}</td>
                       <td>
-                        <div className="stack-sm">
-                          <StatusDot label={device.status} status={device.status} />
+                        <div className="cab-cell-lines">
+                          <StatusDot label={statusLabels[device.status]} status={device.status} />
                           {device.isDisabled ? (
-                            <span className="muted">Disabled{device.disabledReason ? `: ${device.disabledReason}` : ""}</span>
+                            <span className="text-warning">
+                              Paused{device.disabledReason ? `: ${device.disabledReason}` : ""}
+                            </span>
                           ) : null}
+                          <span className="muted">Last heartbeat {formatLondonDateTime(device.lastHeartbeatAt)}</span>
+                          <button
+                            className={`cab-pause-button ${device.isDisabled ? "button button-secondary" : "button button-danger"}`}
+                            disabled={busyDeviceId === device.id}
+                            onClick={() => void toggleDeviceDisabled(device)}
+                            type="button"
+                          >
+                            {busyDeviceId === device.id ? (
+                              <span className="button-inline">
+                                <span aria-hidden className="button-spinner" />
+                                Working
+                              </span>
+                            ) : device.isDisabled ? (
+                              "Resume"
+                            ) : (
+                              "Pause"
+                            )}
+                          </button>
                         </div>
                       </td>
                       <td>
                         <select
+                          className="cab-group-select"
                           disabled={busyDeviceId === device.id}
                           onChange={(event) => void assignGroup(device.id, event.target.value)}
                           value={device.groupId ?? ""}
                         >
-                          <option value="">All Devices</option>
+                          <option value="">No group</option>
                           {groups.map((group) => (
                             <option key={group.id} value={group.id}>
                               {group.name}
@@ -554,38 +529,58 @@ export function DevicesRegistry({
                         </select>
                       </td>
                       <td>
-                        {device.currentLoopId
-                          ? device.expectedLoopId && device.currentLoopId === device.expectedLoopId
-                            ? "Assigned loop synced"
-                            : device.currentLoopId === publishedLoopId
-                              ? "Current published loop"
-                              : device.currentLoopId
-                          : "None"}
+                        <div className="cab-cell-lines">
+                          <span>
+                            Plays{" "}
+                            {device.currentLoopName ??
+                              (device.currentLoopId ? "a loop that no longer exists" : "nothing yet")}
+                          </span>
+                          <span className="muted">
+                            {device.expectedLoopId && device.currentLoopId === device.expectedLoopId
+                              ? `As it should (${device.expectedSourceLabel ?? "assigned"})`
+                              : `Should play ${device.expectedLoopName ?? "nothing"}${
+                                  device.expectedSourceLabel ? ` (${device.expectedSourceLabel})` : ""
+                                }`}
+                          </span>
+                        </div>
                       </td>
                       <td>
-                        {device.lastHeartbeatAt
-                          ? new Date(device.lastHeartbeatAt).toLocaleString()
-                          : "Never"}
-                      </td>
-                      <td>{device.storageFreeMb ? `${device.storageFreeMb} MB` : "n/a"}</td>
-                      <td>
-                        <button
-                          className={device.isDisabled ? "button button-secondary" : "button button-danger"}
-                          disabled={busyDeviceId === device.id}
-                          onClick={() => void toggleDeviceDisabled(device)}
-                          type="button"
-                        >
-                          {busyDeviceId === device.id ? (
-                            <span className="button-inline">
-                              <span aria-hidden className="button-spinner" />
-                              Working
+                        <div className="cab-cell-lines">
+                          <span className={device.sync.state === "failing" ? "text-danger" : undefined}>
+                            {!device.online && device.sync.state === "current" ? "Up to date when last seen" : device.sync.label}
+                          </span>
+                          {device.sync.state === "failing" ? (
+                            <span className="text-danger">
+                              {device.sync.failedLoopName ? `${device.sync.failedLoopName}: ` : ""}
+                              {device.sync.error}
                             </span>
-                          ) : device.isDisabled ? (
-                            "Enable"
-                          ) : (
-                            "Disable"
-                          )}
-                        </button>
+                          ) : null}
+                          {device.sync.state === "failing" && device.sync.nextRetryAt ? (
+                            <span className="muted">Tries again {formatLondonDateTime(device.sync.nextRetryAt)}</span>
+                          ) : null}
+                          {device.sync.state === "waiting" ? (
+                            <span className="muted">This cab&apos;s firmware does not report why.</span>
+                          ) : null}
+                          <span className="muted">Last updated {formatLondonDateTime(device.lastSyncAt, "never recorded")}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="cab-cell-lines">
+                          <span>{screenActivityLabel(device.playerStatusNow, device.reportsJourneys, device.online, device.playerStateNow)}</span>
+                          <span className="muted">{triggerLabel(device.playbackTrigger, device.hasReportedJourney)}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="cab-cell-lines">
+                          <span>
+                            {formatSignal(device.signalPercent, device.signalDbm)}
+                            {device.networkType && device.networkType !== "unknown" ? ` · ${device.networkType}` : ""}
+                          </span>
+                          <span className="muted">
+                            {typeof device.storageFreeMb === "number" ? `${device.storageFreeMb} MB free` : "Storage unknown"}
+                          </span>
+                          <span className="muted">Firmware {device.firmwareVersion ?? "unknown"}</span>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -600,74 +595,44 @@ export function DevicesRegistry({
               query={selectedGroupId !== "ALL" ? { group: selectedGroupId } : undefined}
               total={total}
             />
-
-            <div className="stack">
-              {devices.slice(0, 5).map((device) => (
-                <div className="card inset-card" key={`${device.id}-heartbeats`}>
-                  <strong>{device.serialNumber} recent heartbeats</strong>
-                  <div className="chart-list">
-                    {device.heartbeats.length === 0 ? (
-                      <span className="muted">No heartbeat data yet.</span>
-                    ) : (
-                      device.heartbeats.map((heartbeat) => (
-                        <div className="activity-item" key={heartbeat.id}>
-                          <strong>{new Date(heartbeat.receivedAt).toLocaleString()}</strong>
-                          <div className="muted">
-                            {heartbeat.playerStatus ?? "unknown"} / {heartbeat.networkType ?? "unknown"} /
-                            {heartbeat.signalStrength ?? "n/a"} dBm
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            <p className="muted small-print">Times are London time.</p>
           </>
         )}
       </div>
 
       {registerOpen ? (
-        <Modal eyebrow="Fleet" onClose={() => setRegisterOpen(false)} title="Register device">
+        <Modal eyebrow="Cabs" onClose={() => setRegisterOpen(false)} title="Register a cab">
           <form className="stack" onSubmit={handleSubmit}>
             <div className="asset-upload-grid">
               <label className="field">
-                <span>Serial Number</span>
+                <span>Serial number</span>
                 <input
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, serialNumber: event.target.value }))
-                  }
+                  onChange={(event) => setForm((current) => ({ ...current, serialNumber: event.target.value }))}
                   required
                   value={form.serialNumber}
                 />
               </label>
 
               <label className="field">
-                <span>Cab License Number</span>
+                <span>Cab licence number</span>
                 <input
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, cabLicenseNumber: event.target.value }))
-                  }
+                  onChange={(event) => setForm((current) => ({ ...current, cabLicenseNumber: event.target.value }))}
                   value={form.cabLicenseNumber}
                 />
               </label>
 
               <label className="field">
-                <span>Driver Name</span>
+                <span>Driver name</span>
                 <input
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, driverName: event.target.value }))
-                  }
+                  onChange={(event) => setForm((current) => ({ ...current, driverName: event.target.value }))}
                   value={form.driverName}
                 />
               </label>
 
               <label className="field">
-                <span>HP Taxi Cab ID</span>
+                <span>HP Taxi cab ID</span>
                 <input
-                  onChange={(event) =>
-                    setForm((current) => ({ ...current, hpTaxiCabId: event.target.value }))
-                  }
+                  onChange={(event) => setForm((current) => ({ ...current, hpTaxiCabId: event.target.value }))}
                   value={form.hpTaxiCabId}
                 />
               </label>
@@ -687,10 +652,10 @@ export function DevicesRegistry({
                 {saving ? (
                   <span className="button-inline">
                     <span aria-hidden className="button-spinner" />
-                    Registering device
+                    Registering cab
                   </span>
                 ) : (
-                  "Register Device"
+                  "Register cab"
                 )}
               </button>
             </div>
@@ -699,10 +664,10 @@ export function DevicesRegistry({
       ) : null}
 
       {groupModalOpen ? (
-        <Modal eyebrow="Groups" onClose={() => setGroupModalOpen(false)} title="Create device group">
+        <Modal eyebrow="Groups" onClose={() => setGroupModalOpen(false)} title="Create a group">
           <form className="stack" onSubmit={createGroup}>
             <label className="field">
-              <span>Group Name</span>
+              <span>Group name</span>
               <input
                 onChange={(event) => setGroupForm((current) => ({ ...current, name: event.target.value }))}
                 required
@@ -713,9 +678,7 @@ export function DevicesRegistry({
             <label className="field">
               <span>Description</span>
               <textarea
-                onChange={(event) =>
-                  setGroupForm((current) => ({ ...current, description: event.target.value }))
-                }
+                onChange={(event) => setGroupForm((current) => ({ ...current, description: event.target.value }))}
                 rows={4}
                 value={groupForm.description}
               />
@@ -729,7 +692,7 @@ export function DevicesRegistry({
                     Creating group
                   </span>
                 ) : (
-                  "Create Group"
+                  "Create group"
                 )}
               </button>
             </div>

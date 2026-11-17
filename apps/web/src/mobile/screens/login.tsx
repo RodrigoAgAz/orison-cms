@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { BrandMark } from "../components/icons";
 import { Notice, Spinner } from "../components/ui";
+import { WRITE_TIMEOUT_MS } from "../lib/api";
 
 /**
  * `signInRequired`: PHONE_APP_REQUIRE_SIGN_IN is set, so the whole phone app needs sign-in.
@@ -27,6 +28,7 @@ export function LoginScreen({ next, signInRequired }: { next: string; signInRequ
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: String(form.get("email") ?? "").trim(), password: form.get("password") }),
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
       });
       if (!response.ok) {
         setError(
@@ -39,7 +41,7 @@ export function LoginScreen({ next, signInRequired }: { next: string; signInRequ
       }
       window.location.replace(next);
     } catch {
-      setError("No connection. Check your signal and try again.");
+      setError("We couldn’t reach the server (no connection, or no answer in time). Check your signal and try again.");
       setBusy(false);
     }
   }

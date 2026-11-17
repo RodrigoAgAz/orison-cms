@@ -1,16 +1,16 @@
 import type { Metadata, Viewport } from "next";
 
 import { DevicePreviewPlayer } from "@/components/device-preview-player";
-import { getCurrentPublishedLoop } from "@/lib/queries";
+import { getCurrentPublishedLoop } from "@/lib/fleet-data";
 
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "Device Preview",
-  description: "Fullscreen published loop preview for Orison device demos.",
+  title: "Screen preview",
+  description: "Full-screen preview of the loop all cabs play.",
   appleWebApp: {
     capable: true,
-    title: "Orison Device Preview",
+    title: "Orison screen preview",
     statusBarStyle: "black-translucent",
   },
 };
@@ -31,7 +31,7 @@ export default async function DevicePreviewPage() {
       <main className="device-preview-screen">
         <div className="device-preview-overlay" role="status">
           <strong>No published loop available</strong>
-          <span>Publish a loop to preview the current fleet programme.</span>
+          <span>No loop is on air for all cabs yet. Put one on air to preview it here.</span>
         </div>
       </main>
     );

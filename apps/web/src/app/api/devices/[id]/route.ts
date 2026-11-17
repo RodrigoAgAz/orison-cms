@@ -11,21 +11,13 @@ type Props = {
   };
 };
 
+// GET is not used by any screen; kept because apps/web/e2e/mobile.e2e.mjs checks that a removed
+// user's session is refused here. It returns the Device row only (no heartbeats or playback rows).
 export async function GET(_: Request, { params }: Props) {
   try {
     await requireApiUser();
     const device = await prisma.device.findUnique({
       where: { id: params.id },
-      include: {
-        heartbeats: {
-          orderBy: { receivedAt: "desc" },
-          take: 50,
-        },
-        playbackLogs: {
-          orderBy: { playedAt: "desc" },
-          take: 100,
-        },
-      },
     });
 
     if (!device) {
@@ -51,17 +43,3 @@ export async function PUT(request: Request, { params }: Props) {
     return apiError(error);
   }
 }
-
-export async function DELETE(_: Request, { params }: Props) {
-  try {
-    await requireApiUser();
-    await prisma.device.update({
-      where: { id: params.id },
-      data: { isActive: false },
-    });
-    return apiResponse({ ok: true });
-  } catch (error) {
-    return apiError(error);
-  }
-}
-

@@ -1,8 +1,19 @@
-node_modules
-.next
-dist
-coverage
+# Railway builds from a clean checkout; this keeps a local `docker build` the same size.
 .git
+.github
+**/node_modules
+**/.next
+**/.next-*
+**/tmp
+**/*.tsbuildinfo
+**/__pycache__
+**/coverage
+**/dist
+.env
+.env.*
+!.env.example
 .DS_Store
-tmp
-
+# Not part of the web app
+device
+scripts
+apps/web/e2e

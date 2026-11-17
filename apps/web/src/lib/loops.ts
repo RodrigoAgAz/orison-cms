@@ -1,28 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
-import { prisma, type Asset, type Loop, type LoopStatus, type Prisma, type Slot, type SlotContent } from "@orison/db";
-import {
-  advertisementDurationMs,
-  directLoopUploadMaxBytes,
-  directLoopUploadMaxDurationMs,
-  loopDurationMs,
-  slotDurationMs,
-  type SlotContentInput,
-} from "@orison/shared";
-import { checksumJson } from "@orison/shared/src/manifest.server";
+import { prisma, type Loop, type LoopStatus, type Prisma } from "@orison/db";
+import { directLoopUploadMaxBytes, directLoopUploadMaxDurationMs, type SlotContentInput } from "@orison/shared";
 
 import { logActivity } from "./activity";
 import { assignLoop, assignTargetSchema, describeTarget } from "./assignment";
-import { getCmsSettings } from "./cms-settings";
-import { createKeyedJobs, createLimiter, processSingleton } from "./job-limits";
+import { getCmsSettings, loopFrameFrom } from "./cms-settings";
+import { createKeyedJobs, createLimiter, mediaJobLimiter, processSingleton } from "./job-limits";
+import { generateContactSheet } from "./loop-poster";
+import { contactSheetTimes } from "./loop-publish";
 import { getLoopRoutingSnapshot } from "./loop-routing";
-import { commandExists, extractMetadata } from "./media";
+import { finishManifest, KEYFRAME_INTERVAL_FRAMES } from "./loop-plan";
+import { commandExists, extractMetadata, maxGapMs, probeKeyframeTimes } from "./media";
+import { aacArgs, h264Args, isAlreadyLoopFormat, isHdrTransfer, videoFilter, type FrameSize } from "./media-format";
+import { hasZscaleFilter } from "./media";
+import { draftSlotProblems, LOOP_FPS, SLOT_COUNT, SLOT_DURATION_MS } from "./slot-rules";
 import {
   deleteObject,
   downloadObjectToFile,
@@ -30,6 +28,7 @@ import {
   getPublicUrl,
   putObject,
   putObjectFromFile,
+  readObject,
 } from "./storage";
 import { enqueueUploadJob } from "./upload-queue";
 import {
@@ -41,15 +40,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-type LoopWithContents = Loop & {
-  slots: Array<
-    Slot & {
-      staticCreative?: Asset | null;
-      contents: Array<SlotContent & { asset: Asset }>;
-    }
-  >;
-};
-
 type SafetyVideoManifestData = {
   url: string;
   checksum: string;
@@ -58,136 +48,59 @@ type SafetyVideoManifestData = {
   mimeType: string;
 };
 
-type DirectLoopUploadOptions = {
-  name: string;
-  originalFilename: string;
-  tempFilePath: string;
-  publishedByUserId: string;
-};
-
-function sortLoopContents(loop: LoopWithContents) {
-  return loop.slots
-    .slice()
-    .sort((a, b) => a.position - b.position)
-    .map((slot) => ({
-      ...slot,
-      contents: slot.contents.slice().sort((a, b) => a.orderInSlot - b.orderInSlot),
-    }));
-}
-
-function validateDraftSlotContents(contents: SlotContentInput[]) {
-  const sorted = contents.slice().sort((a, b) => a.startTimeMs - b.startTimeMs);
-  const totalDuration = contents.reduce((sum, content) => sum + content.durationMs, 0);
-  const advertisements = contents.filter((content) => content.contentType === "ADVERTISEMENT");
-
-  if (advertisements.length > 1) {
-    throw new Error("A slot can only contain one advertisement");
-  }
-
-  if (advertisements.some((content) => content.durationMs !== advertisementDurationMs)) {
-    throw new Error(`Advertisement duration must be ${advertisementDurationMs}ms`);
-  }
-
-  if (totalDuration > slotDurationMs) {
-    throw new Error(`Slot content cannot exceed ${slotDurationMs}ms`);
-  }
-
-  for (let index = 0; index < sorted.length; index += 1) {
-    const current = sorted[index];
-    const next = sorted[index + 1];
-
-    if (current.startTimeMs + current.durationMs > slotDurationMs) {
-      throw new Error("Slot content exceeds the 60 second slot duration");
-    }
-
-    if (next && current.startTimeMs + current.durationMs > next.startTimeMs) {
-      throw new Error("Slot contents overlap");
-    }
-  }
-
-  return sorted;
-}
-
-export function validateSlotContents(contents: SlotContentInput[]) {
-  const sorted = validateDraftSlotContents(contents);
-  const totalDuration = contents.reduce((sum, content) => sum + content.durationMs, 0);
-  const advertisements = contents.filter((content) => content.contentType === "ADVERTISEMENT");
-  if (totalDuration !== slotDurationMs) {
-    throw new Error(`Slot must total exactly ${slotDurationMs}ms`);
-  }
-
-  if (advertisements.length !== 1) {
-    throw new Error("Each slot must contain exactly one advertisement");
-  }
-
-  return sorted;
-}
+/** A save based on data that someone else has changed since it was loaded. */
+export class StaleEditError extends Error {}
+/** A request that breaks a rule, with a message fit for staff. */
+export class LoopRuleError extends Error {}
 
 export async function createLoopDraft(name: string) {
-  return prisma.$transaction(async (tx) => {
-    const loop = await tx.loop.create({
-      data: {
-        name,
-        status: "DRAFT",
-      },
-    });
-
+  const loop = await prisma.$transaction(async (tx) => {
+    const created = await tx.loop.create({ data: { name, status: "DRAFT" } });
     await tx.slot.createMany({
-      data: Array.from({ length: 10 }, (_, position) => ({
-        loopId: loop.id,
-        position,
-      })),
+      data: Array.from({ length: SLOT_COUNT }, (_, position) => ({ loopId: created.id, position })),
     });
-
-    await logActivity("LOOP_CREATED", `Loop ${name} created`, { loopId: loop.id, name });
-
     return tx.loop.findUniqueOrThrow({
-      where: { id: loop.id },
-      include: {
-        slots: {
-          orderBy: { position: "asc" },
-        },
-      },
+      where: { id: created.id },
+      include: { slots: { orderBy: { position: "asc" } } },
     });
   });
+  await logActivity("LOOP_CREATED", `Loop ${name} created`, { loopId: loop.id, name });
+  return loop;
 }
 
+/** A name for a copy that no other loop has: "X (copy)", "X (copy 2)", ... */
+export function copyName(name: string, taken: Set<string>) {
+  const base = name.replace(/ \(copy(?: \d+)?\)$/, "");
+  for (let index = 1; ; index += 1) {
+    const candidate = index === 1 ? `${base} (copy)` : `${base} (copy ${index})`;
+    if (!taken.has(candidate)) return candidate.slice(0, 120);
+  }
+}
+
+/** Copy a slot-built loop's slots, still images and target into a new draft. */
 export async function duplicateLoop(loopId: string) {
   const existing = await prisma.loop.findUnique({
     where: { id: loopId },
-    include: {
-      slots: {
-        orderBy: { position: "asc" },
-        include: {
-          contents: {
-            orderBy: { orderInSlot: "asc" },
-          },
-        },
-      },
-    },
+    include: { slots: { orderBy: { position: "asc" }, include: { contents: { orderBy: { orderInSlot: "asc" } } } } },
   });
-
   if (!existing) {
-    throw new Error("Loop not found");
+    throw new LoopRuleError("Loop not found");
   }
+  if (existing.slots.length === 0) {
+    throw new LoopRuleError("A pre-built (uploaded) loop cannot be duplicated: upload its file again instead.");
+  }
+  const similar = await prisma.loop.findMany({
+    where: { name: { startsWith: existing.name.replace(/ \(copy(?: \d+)?\)$/, "") } },
+    select: { name: true },
+  });
+  const name = copyName(existing.name, new Set(similar.map((loop) => loop.name)));
 
-  return prisma.$transaction(async (tx) => {
-    const duplicated = await tx.loop.create({
-      data: {
-        name: `${existing.name} Copy`,
-        status: "DRAFT",
-      },
-    });
-
+  const duplicated = await prisma.$transaction(async (tx) => {
+    const loop = await tx.loop.create({ data: { name, status: "DRAFT", targetGroupId: existing.targetGroupId } });
     for (const slot of existing.slots) {
       const newSlot = await tx.slot.create({
-        data: {
-          loopId: duplicated.id,
-          position: slot.position,
-          staticCreativeId: slot.staticCreativeId,
-        },
+        data: { loopId: loop.id, position: slot.position, staticCreativeId: slot.staticCreativeId },
       });
-
       if (slot.contents.length > 0) {
         await tx.slotContent.createMany({
           data: slot.contents.map((content) => ({
@@ -201,9 +114,13 @@ export async function duplicateLoop(loopId: string) {
         });
       }
     }
-
-    return duplicated;
+    return loop;
   });
+  await logActivity("LOOP_CREATED", `Loop ${name} created as a copy of ${existing.name}`, {
+    loopId: duplicated.id,
+    copiedFrom: existing.id,
+  });
+  return duplicated;
 }
 
 export async function loadLoop(loopId: string) {
@@ -214,179 +131,90 @@ export async function loadLoop(loopId: string) {
         orderBy: { position: "asc" },
         include: {
           staticCreative: true,
-          contents: {
-            orderBy: { orderInSlot: "asc" },
-            include: {
-              asset: true,
-            },
-          },
+          contents: { orderBy: { orderInSlot: "asc" }, include: { asset: true } },
         },
       },
     },
   });
 }
 
-export async function updateSlotContents(
-  loopId: string,
-  position: number,
-  contents: SlotContentInput[],
-  staticCreativeId?: string | null,
-) {
-  validateDraftSlotContents(contents);
+export type SlotSave = {
+  position: number;
+  contents: SlotContentInput[];
+  staticCreativeId?: string | null;
+  /** The slot's updatedAt the editor loaded; a save is refused if the slot changed since. */
+  expectedUpdatedAt?: string | null;
+};
 
-  const slot = await prisma.slot.findUnique({
-    where: {
-      loopId_position: {
-        loopId,
-        position,
-      },
-    },
-  });
-
-  if (!slot) {
-    throw new Error("Slot not found");
+/**
+ * Save several slots of a loop in one transaction. Refused as a whole if any slot breaks a draft
+ * rule (LoopRuleError) or was changed by someone else since it was loaded (StaleEditError).
+ */
+export async function saveSlots(loopId: string, saves: SlotSave[]) {
+  for (const save of saves) {
+    const problems = draftSlotProblems(save.contents);
+    if (problems.length) {
+      throw new LoopRuleError(`Slot ${save.position + 1}: ${problems[0]}`);
+    }
   }
-
-  const assetIds = [...new Set(contents.map((content) => content.assetId))];
-  const assets = await prisma.asset.findMany({
-    where: {
-      id: { in: assetIds },
-      status: "READY",
-    },
-  });
-
-  if (assets.length !== assetIds.length) {
-    throw new Error("All slot assets must exist and be in READY state");
+  const assetIds = [...new Set(saves.flatMap((save) => save.contents.map((content) => content.assetId)))];
+  const assets = await prisma.asset.findMany({ where: { id: { in: assetIds } }, select: { id: true, status: true, filename: true } });
+  const ready = new Set(assets.filter((asset) => asset.status === "READY").map((asset) => asset.id));
+  const missing = assetIds.find((id) => !ready.has(id));
+  if (missing) {
+    const asset = assets.find((entry) => entry.id === missing);
+    throw new LoopRuleError(asset ? `"${asset.filename}" is not ready to use.` : "One of the chosen files no longer exists.");
   }
-
-  if (staticCreativeId) {
-    const staticCreative = await prisma.asset.findUnique({
-      where: { id: staticCreativeId },
-    });
-
-    if (!staticCreative || staticCreative.status !== "READY" || staticCreative.category !== "STATIC_CREATIVE") {
-      throw new Error("Static creative must exist, be ready, and use the STATIC_CREATIVE category");
+  const stillIds = [...new Set(saves.map((save) => save.staticCreativeId).filter((id): id is string => Boolean(id)))];
+  if (stillIds.length) {
+    const stills = await prisma.asset.findMany({ where: { id: { in: stillIds } } });
+    for (const id of stillIds) {
+      const still = stills.find((asset) => asset.id === id);
+      if (!still || still.status !== "READY" || still.category !== "STATIC_CREATIVE") {
+        throw new LoopRuleError("The still image must be a ready file from the Still images category.");
+      }
     }
   }
 
   await prisma.$transaction(async (tx) => {
-    await tx.slot.update({
-      where: { id: slot.id },
-      data: {
-        staticCreativeId: staticCreativeId ?? null,
-      },
-    });
-
-    await tx.slotContent.deleteMany({
-      where: { slotId: slot.id },
-    });
-
-    await tx.slotContent.createMany({
-      data: contents.map((content) => ({
-        slotId: slot.id,
-        assetId: content.assetId,
-        orderInSlot: content.orderInSlot,
-        startTimeMs: content.startTimeMs,
-        durationMs: content.durationMs,
-        contentType: content.contentType,
-      })),
-    });
+    for (const save of saves) {
+      const slot = await tx.slot.findUnique({ where: { loopId_position: { loopId, position: save.position } } });
+      if (!slot) {
+        throw new LoopRuleError(`Slot ${save.position + 1} not found`);
+      }
+      if (save.expectedUpdatedAt && slot.updatedAt.toISOString() !== save.expectedUpdatedAt) {
+        throw new StaleEditError(
+          `Slot ${save.position + 1} was changed by someone else after you opened this loop. Reload to see their version, then make your change again.`,
+        );
+      }
+      // Leaving staticCreativeId out keeps the slot's still image; null clears it.
+      await tx.slot.update({ where: { id: slot.id }, data: save.staticCreativeId === undefined ? { updatedAt: new Date() } : { staticCreativeId: save.staticCreativeId } });
+      await tx.slotContent.deleteMany({ where: { slotId: slot.id } });
+      await tx.slotContent.createMany({
+        data: save.contents.map((content) => ({
+          slotId: slot.id,
+          assetId: content.assetId,
+          orderInSlot: content.orderInSlot,
+          startTimeMs: content.startTimeMs,
+          durationMs: content.durationMs,
+          contentType: content.contentType,
+        })),
+      });
+    }
   });
 
   return loadLoop(loopId);
 }
 
-export async function buildPreviewManifest(loopId: string) {
-  const [loop, safetyVideo] = await Promise.all([
-    loadLoop(loopId) as Promise<LoopWithContents | null>,
-    loadSafetyVideoManifestData(),
-  ]);
-  if (!loop) {
-    throw new Error("Loop not found");
-  }
-
-  const sortedSlots = sortLoopContents(loop);
-  const slots = sortedSlots.map((slot) => {
-    const advertisement = slot.contents.find((content) => content.contentType === "ADVERTISEMENT");
-
-    return {
-      position: slot.position,
-      staticImageAssetId: slot.staticCreativeId ?? null,
-      staticImageUrl: slot.staticCreative ? getPublicUrl(slot.staticCreative.s3Key) : null,
-      staticImageChecksum: slot.staticCreative?.checksum ?? null,
-      advertisementVideoUrl: advertisement ? getPublicUrl(advertisement.asset.s3Key) : null,
-      contents: slot.contents.map((content) => ({
-        type: content.contentType,
-        assetId: content.assetId,
-        filename: content.asset.filename,
-        url: getPublicUrl(content.asset.s3Key),
-        checksum: content.asset.checksum ?? "",
-        startTimeMs: content.startTimeMs,
-        durationMs: content.durationMs,
-        fileSizeBytes: content.asset.fileSize,
-      })),
-    };
-  });
-
-  const manifest = {
-    version: "1.0",
-    loopId: loop.id,
-    loopName: loop.name,
-    targetGroupId: loop.targetGroupId ?? null,
-    publishedAt: new Date().toISOString(),
-    totalDurationMs: loopDurationMs,
-    safetyVideo:
-      safetyVideo && safetyVideo.durationMs > 0
-        ? {
-            url: safetyVideo.url,
-            checksum: safetyVideo.checksum,
-            durationMs: safetyVideo.durationMs,
-            mimeType: safetyVideo.mimeType,
-          }
-        : undefined,
-    slots,
-    totalDownloadSizeBytes: sortedSlots.reduce(
-      (total, slot) =>
-        total +
-        slot.contents.reduce((slotSum, content) => slotSum + content.asset.fileSize, 0) +
-        (slot.staticCreative?.fileSize ?? 0),
-      0,
-    ) + (safetyVideo?.fileSizeBytes ?? 0),
-    compiledVideoUrl: loop.compiledVideoUrl,
-    compiledVideoChecksum: null,
-  };
-
-  return {
-    ...manifest,
-    checksum: checksumJson(manifest),
-  };
-}
-
-async function ensureLoopPublishable(loop: LoopWithContents) {
-  const sortedSlots = sortLoopContents(loop);
-  if (sortedSlots.length !== 10) {
-    throw new Error("Loop must contain exactly 10 slots");
-  }
-
-  for (const slot of sortedSlots) {
-    if (slot.contents.length === 0) {
-      throw new Error(`Slot ${slot.position + 1} is empty`);
-    }
-
-    validateSlotContents(
-      slot.contents.map((content) => ({
-        assetId: content.assetId,
-        orderInSlot: content.orderInSlot,
-        startTimeMs: content.startTimeMs,
-        durationMs: content.durationMs,
-        contentType: content.contentType,
-      })),
-    );
-
-    if (slot.contents.some((content) => content.asset.status !== "READY")) {
-      throw new Error(`Slot ${slot.position + 1} contains assets that are not ready`);
-    }
-  }
+/** Save one slot (kept for the per-slot route). */
+export async function updateSlotContents(
+  loopId: string,
+  position: number,
+  contents: SlotContentInput[],
+  staticCreativeId?: string | null,
+  expectedUpdatedAt?: string | null,
+) {
+  return saveSlots(loopId, [{ position, contents, staticCreativeId, expectedUpdatedAt }]);
 }
 
 async function loadSafetyVideoManifestData(): Promise<SafetyVideoManifestData | null> {
@@ -426,116 +254,39 @@ async function loadSafetyVideoManifestData(): Promise<SafetyVideoManifestData | 
 }
 
 async function runFfmpeg(args: string[], options: { timeoutMs?: number } = {}) {
-  await execFileAsync("ffmpeg", ["-y", ...args], options.timeoutMs ? { timeout: options.timeoutMs } : {});
-}
-
-async function normalizeImageToClip(
-  inputPath: string,
-  outputPath: string,
-  durationMs: number,
-) {
-  await runFfmpeg([
-    "-loop",
-    "1",
-    "-i",
-    inputPath,
-    "-f",
-    "lavfi",
-    "-i",
-    "anullsrc=channel_layout=stereo:sample_rate=44100",
-    "-shortest",
-    "-t",
-    (durationMs / 1000).toFixed(3),
-    "-vf",
-    "scale=1280:800:force_original_aspect_ratio=decrease,pad=1280:800:(ow-iw)/2:(oh-ih)/2:black,fps=30",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "ultrafast",
-    "-crf",
-    "23",
-    "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "128k",
-    "-movflags",
-    "+faststart",
-    outputPath,
-  ]);
-}
-
-const LOOP_FIT_FILTER = "scale=1280:800:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1";
-const LOOP_PAD_FILTER = "pad=1280:800:(ow-iw)/2:(oh-ih)/2:black";
-const LOOP_FRAME_FILTER = `${LOOP_FIT_FILTER},${LOOP_PAD_FILTER},fps=30,format=yuv420p`;
-// HDR (iPhone HLG / PQ) -> SDR BT.709; requires ffmpeg built with libzimg. The float tone-map is
-// the expensive part, so the picture is first scaled down to the screen size and the frame rate
-// reduced to 30 fps, then tone-mapped, then padded (a 4K60 clip tone-mapped at full size is
-// several times slower).
-const HDR_TONEMAP_FILTER =
-  "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0," +
-  "zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
-export const HDR_LOOP_FILTER = `${LOOP_FIT_FILTER},fps=30,${HDR_TONEMAP_FILTER},${LOOP_PAD_FILTER},format=yuv420p`;
-
-let zscaleAvailable: Promise<boolean> | null = null;
-function hasZscaleFilter() {
-  zscaleAvailable ??= execFileAsync("ffmpeg", ["-hide_banner", "-filters"])
-    .then(({ stdout }) => /\bzscale\b/.test(stdout) && /\btonemap\b/.test(stdout))
-    .catch(() => false);
-  return zscaleAvailable;
-}
-
-function isHdrTransfer(transfer: string | null | undefined) {
-  return transfer === "smpte2084" || transfer === "arib-std-b67";
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-nostdin", ...args], {
+    timeout: options.timeoutMs ?? 30 * 60 * 1000,
+    killSignal: "SIGKILL",
+    maxBuffer: 16 * 1024 * 1024,
+  });
 }
 
 /**
- * Normalise any input (mp4/mov/m4v, H.264/HEVC, 8/10-bit, portrait, rotated) to the standard loop
- * format: 1280x800 H.264 High 4.1 yuv420p, 30fps, AAC 44.1kHz, faststart. The picture is fitted
- * inside 1280x800 and letter/pillarboxed (never stretched). ffmpeg applies display rotation
- * (autorotate) before the filter chain, so portrait/rotated phone footage is fitted upright.
+ * Normalise an uploaded pre-built loop to the loop format (the same one a slot-built loop is
+ * compiled to, lib/media-format.ts): the loop frame from Settings (fitted, never stretched),
+ * H.264 High 4.1 8-bit 4:2:0 SDR (HDR tone-mapped), 30 fps constant, a keyframe every 2 s,
+ * AAC stereo 48 kHz (silence added when the source has none), faststart.
  */
 async function transcodeCompiledLoopVideo(
   inputPath: string,
   outputPath: string,
-  metadata?: Awaited<ReturnType<typeof extractMetadata>>,
+  metadata: Awaited<ReturnType<typeof extractMetadata>>,
+  frame: FrameSize,
 ) {
-  const tonemap = isHdrTransfer(metadata?.colorTransfer) && (await hasZscaleFilter());
-  const filter = tonemap ? HDR_LOOP_FILTER : LOOP_FRAME_FILTER;
+  const hdr = isHdrTransfer(metadata.colorTransfer) && (await hasZscaleFilter());
   await runFfmpeg([
     "-i",
     inputPath,
+    ...(metadata.hasAudio ? [] : ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]),
     "-map",
     "0:v:0",
     "-map",
-    "0:a:0?",
+    metadata.hasAudio ? "0:a:0" : "1:a:0",
     "-vf",
-    filter,
-    "-c:v",
-    "libx264",
-    "-preset",
-    "ultrafast",
-    "-crf",
-    "23",
-    "-profile:v",
-    "high",
-    "-level",
-    "4.1",
-    "-pix_fmt",
-    "yuv420p",
-    "-color_primaries",
-    "bt709",
-    "-color_trc",
-    "bt709",
-    "-colorspace",
-    "bt709",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "128k",
-    "-ar",
-    "44100",
+    videoFilter({ size: frame, mode: "frame", hdr, fps: LOOP_FPS }),
+    ...h264Args({ keyframeIntervalFrames: KEYFRAME_INTERVAL_FRAMES }),
+    ...aacArgs(),
+    ...(metadata.hasAudio ? [] : ["-shortest"]),
     "-map_metadata",
     "-1",
     "-movflags",
@@ -544,105 +295,15 @@ async function transcodeCompiledLoopVideo(
   ]);
 }
 
-async function generateFallbackStaticImage(outputPath: string) {
-  await runFfmpeg([
-    "-f",
-    "lavfi",
-    "-i",
-    "color=c=0x0a1628:s=1280x800",
-    "-frames:v",
-    "1",
-    "-vf",
-    "drawbox=x=120:y=120:w=1040:h=560:color=0xc9a84c:t=12",
-    outputPath,
-  ]);
-}
-
 async function remuxCompiledLoopVideo(inputPath: string, outputPath: string) {
-  await runFfmpeg([
-    "-i",
-    inputPath,
-    "-c",
-    "copy",
-    "-movflags",
-    "+faststart",
-    outputPath,
-  ]);
+  await runFfmpeg(["-i", inputPath, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-map_metadata", "-1", "-movflags", "+faststart", outputPath]);
 }
 
-function isDirectLoopAlreadyStandard(metadata: Awaited<ReturnType<typeof extractMetadata>>) {
-  return (
-    metadata.width === 1280 &&
-    metadata.height === 800 &&
-    metadata.videoCodec === "h264" &&
-    metadata.audioCodec === "aac" &&
-    (metadata.pixFmt ?? "yuv420p") === "yuv420p" &&
-    !metadata.rotation &&
-    !isHdrTransfer(metadata.colorTransfer)
-  );
-}
-
-async function compileSingleFileLoop(loop: LoopWithContents) {
-  if (!(await commandExists("ffmpeg"))) {
-    throw new Error("ffmpeg is required to publish compiled loops");
-  }
-
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "orison-loop-"));
-
-  try {
-    const playlistPath = path.join(tempDir, "playlist.txt");
-    const outputPath = path.join(tempDir, `${loop.id}.mp4`);
-    const playlistEntries: string[] = [];
-    let sequence = 0;
-
-    for (const slot of sortLoopContents(loop)) {
-      for (const content of slot.contents) {
-        const sourceExtension = path.extname(content.asset.filename) || ".bin";
-        const sourcePath = path.join(tempDir, `${sequence}${sourceExtension}`);
-        await downloadObjectToFile(content.asset.s3Key, sourcePath);
-
-        let mediaPath = sourcePath;
-        if (content.asset.mimeType.startsWith("image/")) {
-          mediaPath = path.join(tempDir, `${sequence}.mp4`);
-          await normalizeImageToClip(sourcePath, mediaPath, content.durationMs);
-        }
-
-        playlistEntries.push(`file '${mediaPath.replace(/'/g, "'\\''")}'`);
-        sequence += 1;
-      }
-    }
-
-    await writeFile(playlistPath, playlistEntries.join("\n"));
-    await runFfmpeg([
-      "-f",
-      "concat",
-      "-safe",
-      "0",
-      "-i",
-      playlistPath,
-      "-c:v",
-      "libx264",
-      "-preset",
-      "ultrafast",
-      "-crf",
-      "23",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "128k",
-      "-movflags",
-      "+faststart",
-      outputPath,
-    ]);
-
-    return {
-      outputPath,
-      tempDir,
-    };
-  } catch (error) {
-    await rm(tempDir, { recursive: true, force: true });
-    throw error;
-  }
+async function isDirectLoopAlreadyStandard(filePath: string, metadata: Awaited<ReturnType<typeof extractMetadata>>, frame: FrameSize) {
+  const cheap = isAlreadyLoopFormat({ ...metadata, maxKeyframeIntervalMs: 0 }, frame);
+  if (!cheap) return false;
+  const { keyframeSeconds } = await probeKeyframeTimes(filePath);
+  return isAlreadyLoopFormat({ ...metadata, maxKeyframeIntervalMs: maxGapMs(keyframeSeconds, metadata.durationMs ?? 0) }, frame);
 }
 
 async function checksumFilePath(filePath: string) {
@@ -653,102 +314,6 @@ async function checksumFilePath(filePath: string) {
   }
 
   return `sha256:${digest.digest("hex")}`;
-}
-
-export async function publishLoop(loopId: string, publishedByUserId: string) {
-  const loop = (await loadLoop(loopId)) as LoopWithContents | null;
-  if (!loop) {
-    throw new Error("Loop not found");
-  }
-
-  await ensureLoopPublishable(loop);
-  const manifestDraft = await buildPreviewManifest(loop.id);
-  const manifestKey = `manifests/${loop.id}/${Date.now()}-${randomUUID()}.json`;
-  const compiledVideoKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}.mp4`;
-  const compileResult = await compileSingleFileLoop(loop);
-  const fallbackStaticPath = path.join(compileResult.tempDir, "fallback-static.jpg");
-  const fallbackStaticKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}-static-fallback.jpg`;
-
-  try {
-    const compiledStats = await stat(compileResult.outputPath);
-    const compiledVideoUrl = getPublicUrl(compiledVideoKey);
-    const compiledVideoChecksum = await checksumFilePath(compileResult.outputPath);
-    await generateFallbackStaticImage(fallbackStaticPath);
-    const fallbackStaticUrl = getPublicUrl(fallbackStaticKey);
-    const fallbackStaticChecksum = await checksumFilePath(fallbackStaticPath);
-    const manifest = {
-      ...manifestDraft,
-      slots: manifestDraft.slots.map((slot) => ({
-        ...slot,
-        staticImageUrl: slot.staticImageUrl ?? fallbackStaticUrl,
-        staticImageChecksum: slot.staticImageChecksum ?? fallbackStaticChecksum,
-      })),
-      compiledVideoUrl,
-      compiledVideoChecksum,
-    };
-    const checksum = checksumJson(manifest);
-    const manifestWithChecksum = {
-      ...manifest,
-      checksum,
-    };
-
-    await putObject({
-      key: manifestKey,
-      body: Buffer.from(JSON.stringify(manifestWithChecksum, null, 2)),
-      contentType: "application/json",
-    });
-    await putObjectFromFile({
-      key: compiledVideoKey,
-      filePath: compileResult.outputPath,
-      contentType: "video/mp4",
-    });
-    await putObjectFromFile({
-      key: fallbackStaticKey,
-      filePath: fallbackStaticPath,
-      contentType: "image/jpeg",
-    });
-
-    await prisma.loop.update({
-      where: { id: loop.id },
-      data: {
-        status: "PUBLISHED",
-        version: { increment: 1 },
-        publishedAt: new Date(),
-        publishedBy: publishedByUserId,
-        publishError: null,
-        manifestKey,
-        manifestUrl: getPublicUrl(manifestKey),
-        compiledVideoKey,
-        compiledVideoUrl,
-        checksum,
-        durationMs: loopDurationMs,
-        // The compiled video changed; the poster is regenerated lazily.
-        posterKey: null,
-      },
-    });
-
-    await logActivity("LOOP_PUBLISHED", `Loop ${loop.name} published`, {
-      loopId: loop.id,
-      publishedByUserId,
-      checksum,
-      compiledVideoKey,
-    });
-
-    return {
-      manifest: manifestWithChecksum,
-      compiledVideoUrl,
-      checksum,
-      compiledVideoChecksum,
-      fileSizeBytes: compiledStats.size,
-    };
-  } catch (error) {
-    await deleteObject(manifestKey).catch(() => undefined);
-    await deleteObject(compiledVideoKey).catch(() => undefined);
-    await deleteObject(fallbackStaticKey).catch(() => undefined);
-    throw error;
-  } finally {
-    await rm(compileResult.tempDir, { recursive: true, force: true });
-  }
 }
 
 export const directLoopUploadExtensions = [".mp4", ".mov", ".m4v"] as const;
@@ -796,11 +361,12 @@ async function prepareLoopVideo(tempFilePath: string, workDir: string): Promise<
   }
 
   const outputPath = path.join(workDir, "loop.mp4");
+  const frame = loopFrameFrom(await getCmsSettings());
   try {
-    if (isDirectLoopAlreadyStandard(sourceMetadata)) {
+    if (await isDirectLoopAlreadyStandard(tempFilePath, sourceMetadata, frame)) {
       await remuxCompiledLoopVideo(tempFilePath, outputPath);
     } else {
-      await transcodeCompiledLoopVideo(tempFilePath, outputPath, sourceMetadata);
+      await transcodeCompiledLoopVideo(tempFilePath, outputPath, sourceMetadata, frame);
     }
   } catch (error) {
     console.error("loop transcode failed", error);
@@ -808,7 +374,8 @@ async function prepareLoopVideo(tempFilePath: string, workDir: string): Promise<
   }
 
   const outputMetadata = await extractMetadata(outputPath);
-  const durationMs = outputMetadata.durationMs ?? sourceMetadata.durationMs;
+  // The picture's length: what the cab's player loops at (totalDurationMs).
+  const durationMs = outputMetadata.videoDurationMs ?? outputMetadata.durationMs ?? sourceMetadata.durationMs;
   if (!durationMs) {
     throw new LoopUploadError("Unable to determine transcoded loop duration");
   }
@@ -855,6 +422,8 @@ async function publishPreparedLoopVideo(options: {
   workDir: string;
   publishedByUserId: string;
   requireStatus: LoopStatus;
+  /** Status once stored (default PUBLISHED). DRAFT keeps a desktop upload off air until published. */
+  finalStatus?: "PUBLISHED" | "DRAFT";
   activity: { message: string; metadata: Record<string, unknown> };
 }) {
   const { loop, prepared, workDir, publishedByUserId } = options;
@@ -869,13 +438,33 @@ async function publishPreparedLoopVideo(options: {
   try {
     const compiledVideoUrl = getPublicUrl(compiledVideoKey);
     const compiledVideoChecksum = await checksumFilePath(prepared.outputPath);
-    const manifest = {
+    const outputMetadata = await extractMetadata(prepared.outputPath);
+    const body = {
       version: "1.0",
+      formatVersion: 2,
       loopId: loop.id,
       loopName: loop.name,
       targetGroupId: loop.targetGroupId ?? null,
       publishedAt: publishedAt.toISOString(),
       totalDurationMs: prepared.durationMs,
+      // A pre-built loop has no slots: the player has no schedule to follow inside it.
+      slotCount: 0,
+      slotDurationMs: null,
+      video: {
+        width: outputMetadata.width ?? null,
+        height: outputMetadata.height ?? null,
+        frameRate: outputMetadata.avgFrameRate ?? null,
+        codec: outputMetadata.videoCodec ?? null,
+        profile: outputMetadata.videoProfile ?? null,
+        pixelFormat: outputMetadata.pixFmt ?? null,
+        audioCodec: outputMetadata.audioCodec ?? null,
+        audioChannels: outputMetadata.audioChannels ?? null,
+        audioSampleRate: outputMetadata.audioSampleRate ?? null,
+        videoDurationMs: outputMetadata.videoDurationMs ?? null,
+        audioDurationMs: outputMetadata.audioDurationMs ?? null,
+        keyframeIntervalMs: (KEYFRAME_INTERVAL_FRAMES * 1000) / LOOP_FPS,
+        fileSizeBytes: prepared.fileSizeBytes,
+      },
       safetyVideo:
         safetyVideo && safetyVideo.durationMs > 0
           ? {
@@ -890,8 +479,7 @@ async function publishPreparedLoopVideo(options: {
       compiledVideoUrl,
       compiledVideoChecksum,
     };
-    const checksum = checksumJson(manifest);
-    const manifestWithChecksum = { ...manifest, checksum };
+    const { manifest: manifestWithChecksum, checksum, manifestContentKey } = finishManifest(body);
 
     await putObject({
       key: manifestKey,
@@ -913,10 +501,11 @@ async function publishPreparedLoopVideo(options: {
     const updated = await prisma.loop.updateMany({
       where: { id: loop.id, status: options.requireStatus },
       data: {
-        status: "PUBLISHED",
+        status: options.finalStatus ?? "PUBLISHED",
         publishedAt,
         publishedBy: publishedByUserId,
         publishError: null,
+        manifestContentKey,
         manifestKey,
         manifestUrl: getPublicUrl(manifestKey),
         compiledVideoKey,
@@ -960,45 +549,22 @@ async function publishPreparedLoopVideo(options: {
   }
 }
 
-/**
- * Desktop direct upload: synchronous, .mp4, creates the loop and makes it live fleet-wide
- * (autoLive defaults to true) once published. Behaviour unchanged from before the refactor.
- */
-export async function publishDirectLoopUpload({
-  name,
-  originalFilename,
-  tempFilePath,
-  publishedByUserId,
-}: DirectLoopUploadOptions) {
-  const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-direct-loop-"));
-  let loop: Loop | null = null;
+/** Where a pre-built loop uploaded from the desktop plays once it is ready. */
+export type DesktopUploadTarget = { kind: "library" } | { kind: "all" } | { kind: "group"; groupId: string };
 
-  try {
-    const prepared = await prepareLoopVideo(tempFilePath, workDir);
-    loop = await prisma.loop.create({ data: { name, status: "DRAFT" } });
-    const published = await publishPreparedLoopVideo({
-      loop,
-      prepared,
-      workDir,
-      publishedByUserId,
-      requireStatus: "DRAFT",
-      activity: {
-        message: `Loop ${loop.name} published from direct upload`,
-        metadata: { originalFilename, mode: "DIRECT_UPLOAD" },
-      },
-    });
-    if (!published) {
-      throw new Error("The loop was changed while it was being published");
-    }
-    return published;
-  } catch (error) {
-    if (loop) {
-      await prisma.loop.delete({ where: { id: loop.id } }).catch(() => undefined);
-    }
-    throw error;
-  } finally {
-    await rm(workDir, { recursive: true, force: true });
-  }
+/**
+ * Create the Loop row for a pre-built loop uploaded from the desktop (PUBLISHING, autoLive: it
+ * behaves like any desktop loop, with its target group) before it is processed in the background.
+ */
+export async function createPendingDesktopLoop(options: { name: string; target: DesktopUploadTarget }) {
+  return prisma.loop.create({
+    data: {
+      name: options.name,
+      status: "PUBLISHING",
+      autoLive: true,
+      targetGroupId: options.target.kind === "group" ? options.target.groupId : null,
+    },
+  });
 }
 
 export { STALE_PUBLISHING_MESSAGE, STALE_PUBLISHING_MS } from "./upload-rules";
@@ -1087,6 +653,8 @@ export async function processUploadedLoop(options: {
   tempFilePath: string;
   tempDir: string;
   publishedBy: UploadUser;
+  /** Phone (default): published, then put where the phone asked. Desktop: see DesktopUploadTarget. */
+  desktop?: { target: DesktopUploadTarget };
 }) {
   const workDir = await mkdtemp(path.join(os.tmpdir(), "orison-mobile-loop-")).catch(() => null);
   try {
@@ -1098,17 +666,35 @@ export async function processUploadedLoop(options: {
       return; // removed before it was prepared
     }
     const prepared = await prepareLoopVideo(options.tempFilePath, workDir);
+    let finalStatus: "PUBLISHED" | "DRAFT" = "PUBLISHED";
+    let note: string | null = null;
+    const desktopTarget = options.desktop?.target;
+    if (desktopTarget) {
+      finalStatus = desktopTarget.kind === "library" ? "DRAFT" : "PUBLISHED";
+      if (desktopTarget.kind === "group") {
+        // The group may have been deleted while this was converted: then it would play on all cabs.
+        const current = await prisma.loop.findUnique({ where: { id: loop.id }, select: { targetGroupId: true } });
+        if (current?.targetGroupId !== desktopTarget.groupId) {
+          finalStatus = "DRAFT";
+          note = "Its group was deleted while the video was being converted, so it was kept off air. Choose where it plays and put it on air.";
+        }
+      }
+    }
+    const where = desktopTarget?.kind === "group" ? "its group" : "all cabs";
     const published = await publishPreparedLoopVideo({
       loop,
       prepared,
       workDir,
       publishedByUserId: options.publishedBy.id,
       requireStatus: "PUBLISHING",
+      finalStatus,
       activity: {
-        message: `Loop ${loop.name} uploaded from the mobile app by ${options.publishedBy.name}`,
+        message: desktopTarget
+          ? `Loop ${loop.name} uploaded by ${options.publishedBy.name}${finalStatus === "PUBLISHED" ? ` and put on air for ${where}` : ", kept off air"}`
+          : `Loop ${loop.name} uploaded from the phone app by ${options.publishedBy.name}`,
         metadata: {
           originalFilename: options.originalFilename,
-          mode: "MOBILE_UPLOAD",
+          mode: desktopTarget ? "DIRECT_UPLOAD" : "MOBILE_UPLOAD",
           userId: options.publishedBy.id,
           userName: options.publishedBy.name,
           ...(options.publishedBy.anonymous
@@ -1126,6 +712,9 @@ export async function processUploadedLoop(options: {
         loopId: loop.id,
       }).catch(() => undefined);
       return;
+    }
+    if (note) {
+      await prisma.loop.update({ where: { id: loop.id }, data: { publishError: note } });
     }
     if (next === "apply-target") {
       await applyUploadTarget(loop.id, options.publishedBy);
@@ -1158,8 +747,8 @@ export async function processUploadedLoop(options: {
 }
 
 /**
- * Queue an upload for processing (long-lived Node server). Phone uploads are prepared one at a
- * time; later ones wait and are reported as waiting.
+ * Queue an upload for processing (long-lived Node server). Uploads (phone and desktop) are
+ * prepared one at a time; later ones wait and are reported as waiting.
  */
 export function startUploadedLoopProcessing(options: Parameters<typeof processUploadedLoop>[0]) {
   void enqueueUploadJob(options.loopId, () => processUploadedLoop(options)).catch((error) =>
@@ -1193,7 +782,7 @@ async function generateLoopPoster(loopId: string): Promise<string | null> {
   // Re-read: the poster may have been made while this job waited for a slot.
   const loop = await prisma.loop.findUnique({
     where: { id: loopId },
-    select: { id: true, posterKey: true, compiledVideoKey: true, durationMs: true },
+    select: { id: true, posterKey: true, compiledVideoKey: true, durationMs: true, manifestKey: true },
   });
   if (!loop?.compiledVideoKey) {
     return null;
@@ -1207,14 +796,22 @@ async function generateLoopPoster(loopId: string): Promise<string | null> {
   try {
     const posterPath = path.join(workDir, "poster.jpg");
     let durationMs = loop.durationMs;
+    const sheet = await contactSheetPlan(loop.manifestKey);
+    const make = async (videoPath: string) => {
+      if (sheet) {
+        await generateContactSheet(videoPath, sheet.times, posterPath, sheet.frame);
+      } else {
+        durationMs ??= (await extractMetadata(videoPath)).durationMs ?? null;
+        await generatePosterImage(videoPath, posterPath, durationMs);
+      }
+    };
     const source = await getObjectReadLocation(videoKey);
     let made = false;
     if (source.kind === "url") {
-      // Object storage: ffmpeg reads only the start of the video over a signed URL (range
-      // requests) instead of the whole 100-300MB file.
+      // Object storage: ffmpeg reads only what it needs over a signed URL (range requests)
+      // instead of the whole 100-300MB file.
       try {
-        durationMs ??= (await extractMetadata(source.location)).durationMs ?? null;
-        await generatePosterImage(source.location, posterPath, durationMs);
+        await make(source.location);
         made = true;
       } catch (error) {
         console.warn(`poster from signed URL failed for loop ${loop.id}; downloading instead`, error);
@@ -1226,8 +823,7 @@ async function generateLoopPoster(loopId: string): Promise<string | null> {
         videoPath = path.join(workDir, "loop.mp4");
         await downloadObjectToFile(videoKey, videoPath); // streamed to disk, never buffered
       }
-      durationMs ??= (await extractMetadata(videoPath)).durationMs ?? null;
-      await generatePosterImage(videoPath, posterPath, durationMs);
+      await make(videoPath);
     }
     const posterKey = `loops/${loop.id}/${Date.now()}-${randomUUID()}-poster.jpg`;
     await putObjectFromFile({ key: posterKey, filePath: posterPath, contentType: "image/jpeg" });
@@ -1243,5 +839,37 @@ async function generateLoopPoster(loopId: string): Promise<string | null> {
     return posterKey;
   } finally {
     await rm(workDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * For a slot-built loop, where to take the contact sheet's frames from: its published manifest
+ * (what is really in the compiled video). Null for a pre-built loop or an unreadable manifest.
+ */
+async function contactSheetPlan(manifestKey: string | null) {
+  if (!manifestKey) return null;
+  try {
+    const manifest = JSON.parse((await readObject(manifestKey)).toString("utf8")) as {
+      slots?: Array<{ position: number; contents?: Array<{ type: string; assetId: string; startTimeMs: number; durationMs: number }> }>;
+      slotDurationMs?: number | null;
+      video?: { width?: number; height?: number };
+    };
+    const slots = (manifest.slots ?? []).map((slot) => ({
+      position: slot.position,
+      contents: (slot.contents ?? []).map((content) => ({ ...content, contentType: content.type })),
+    }));
+    const times = contactSheetTimes(slots, manifest.slotDurationMs ?? SLOT_DURATION_MS);
+    if (times.length === 0) return null;
+    const settingsFrame = loopFrameFrom(await getCmsSettings());
+    const frame =
+      manifest.video?.width && manifest.video?.height
+        ? { width: manifest.video.width, height: manifest.video.height }
+        : manifest.video
+          ? settingsFrame
+          : { width: 1280, height: 800 };
+    return { times, frame };
+  } catch (error) {
+    console.warn(`could not read manifest ${manifestKey} for a poster`, error);
+    return null;
   }
 }

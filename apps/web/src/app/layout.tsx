@@ -8,8 +8,9 @@ import { getSessionUser } from "@/lib/auth";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Orison Screens CMS",
-  description: "Digital signage control plane for the Orison pilot fleet.",
+  // Each page sets its own title ("Loops · Orison"), like the phone app.
+  title: { default: "Orison", template: "%s · Orison" },
+  description: "What plays on the screens in Orison's cabs.",
 };
 
 export default async function RootLayout({

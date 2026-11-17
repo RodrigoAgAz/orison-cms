@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Only what runs without a browser, a database, ffmpeg or a server. The end-to-end suites
+# (npm run test:e2e:desktop, npm run test:e2e:mobile, apps/web/e2e/billing.e2e.py) need all of
+# those and are run by hand; see README.md, "Testing".
+jobs:
+  web:
+    name: Typecheck and web unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Same Node release as the production image (Dockerfile).
+          node-version: 22.23.4
+          cache: npm
+      - run: npm ci
+      # The Prisma client's types are generated from the schema; no database is needed.
+      - run: npm run db:generate
+      - run: npm run typecheck
+      - run: npm test
+
+  device:
+    name: Device firmware tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install requests psutil
+      - run: npm run test:device

@@ -18,3 +18,9 @@ __pycache__
 .DS_Store
 packages/db/generated
 *.tsbuildinfo
+
+# a cab's config must never be committed
+device/config.json
+
+# screenshots written by the end-to-end suites
+apps/web/e2e/shots*/

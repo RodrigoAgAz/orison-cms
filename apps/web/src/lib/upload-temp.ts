@@ -2,7 +2,7 @@ import { readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-/** Temp folder prefixes used by uploads and media jobs (see upload-stream.ts and loops.ts). */
+/** Temp folder prefixes used by uploads and media jobs (joined uploads, loops.ts, media.ts). */
 export const UPLOAD_TEMP_PREFIXES = [
   "orison-mobile-upload-",
   "orison-mobile-loop-",
@@ -10,6 +10,8 @@ export const UPLOAD_TEMP_PREFIXES = [
   "orison-direct-loop-",
   "orison-loop-",
   "orison-poster-",
+  // Desktop asset uploads (joined from pieces) and their processing.
+  "orison-asset-",
 ] as const;
 
 /**

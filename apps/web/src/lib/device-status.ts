@@ -138,3 +138,140 @@ export function startOfLocalDay(now: Date = new Date(), timeZone = "Europe/Londo
   }
   return new Date(candidate);
 }
+
+// --- Sync state and passenger detection (DEVICE_CONTRACT_V2) -----------------------------------
+// Shared by the desktop pages and, for the phone app, lib/mobile.ts. Both read the Device row:
+// Device.syncState/syncError/syncStateSince/syncNextRetryAt/lastSyncAt and Device.playbackTrigger
+// are written by POST /api/devices/heartbeat.
+
+export type SyncSummary = {
+  /** "failing": the cab reports its last attempt failed. "downloading": it is fetching content.
+   * "waiting": it plays something else than expected and reports no sync state (firmware before
+   * 1.2.0, which cannot say why). "current": plays what it should. "unknown": no data. */
+  state: "failing" | "downloading" | "waiting" | "current" | "unknown";
+  label: string;
+  /** Short reason from the cab, only when failing. */
+  error: string | null;
+  since: Date | null;
+  nextRetryAt: Date | null;
+  lastSyncedAt: Date | null;
+};
+
+type SyncDevice = {
+  currentLoopId: string | null;
+  lastSyncAt: Date | null;
+  syncState?: string | null;
+  syncError?: string | null;
+  syncStateSince?: Date | null;
+  syncNextRetryAt?: Date | null;
+};
+
+export function summarizeSync(device: SyncDevice, expectedLoopId: string | null): SyncSummary {
+  const base = {
+    since: device.syncStateSince ?? null,
+    nextRetryAt: device.syncNextRetryAt ?? null,
+    lastSyncedAt: device.lastSyncAt,
+  };
+  if (device.syncState === "failed") {
+    return { ...base, state: "failing", label: "Update failing", error: device.syncError ?? "No reason given" };
+  }
+  if (device.syncState === "downloading") {
+    return { ...base, state: "downloading", label: "Downloading new content", error: null };
+  }
+  if (expectedLoopId && device.currentLoopId !== expectedLoopId) {
+    return { ...base, state: "waiting", label: "Not on the expected loop yet", error: null };
+  }
+  // With state "ok" the cab may still explain itself (e.g. nothing assigned): shown as a note.
+  const note = device.syncState === "ok" && device.syncError ? ` (${device.syncError})` : "";
+  if (!device.currentLoopId && !expectedLoopId) {
+    return { ...base, state: "unknown", label: `Nothing to play${note}`, error: null };
+  }
+  return { ...base, state: "current", label: `Up to date${note}`, error: null };
+}
+
+/**
+ * Whether a cab is known to start journeys from a passenger input (so "waiting for a passenger" /
+ * "passenger on board" and journey figures apply). A reported trigger decides: "always" = plays
+ * continuously with no passenger detection; "gpio"/"keyboard" = detects passengers. With no trigger
+ * (firmware before 1.2.0) the firmware has the code path but not necessarily the input: the one
+ * production cab is an x86 box with no GPIO, so it idles forever. Such a cab counts only once it
+ * has actually reported a journey (player status "playing" or "silent", which firmware before 1.2.0
+ * only reports during a passenger journey) in the last JOURNEY_EVIDENCE_DAYS.
+ * The phone app has the same rule (lib/mobile.ts reportsJourneysFor) and should call this one.
+ */
+export const JOURNEY_EVIDENCE_DAYS = 30;
+
+export function reportsJourneys(playbackTrigger: string | null | undefined, hasReportedJourney: boolean) {
+  if (playbackTrigger) {
+    return playbackTrigger !== "always";
+  }
+  return hasReportedJourney;
+}
+
+/** A heartbeat player status that only a passenger journey produces. */
+export function isJourneyStatus(status: string | null | undefined) {
+  return status === "playing" || status === "silent";
+}
+
+/** Kept for callers that only know the trigger: true unless the cab says it plays continuously. */
+export function hasPassengerDetection(playbackTrigger: string | null | undefined) {
+  return playbackTrigger !== "always";
+}
+
+/**
+ * One wording for what the screen is doing. Passenger wording only for cabs known to detect
+ * passengers (reportsJourneys); otherwise it says neutrally what is on screen.
+ */
+export function screenActivityLabel(
+  playerStatus: string | null | undefined,
+  knownToDetectPassengers: boolean,
+  online: boolean,
+  playerState?: string | null,
+) {
+  if (!online) {
+    return "Not reporting";
+  }
+  if (playerState === "SAFETY" && playerStatus !== "disabled") {
+    return "Safety message playing";
+  }
+  switch (playerStatus) {
+    case "playing":
+      return knownToDetectPassengers ? "Passenger on board" : "Playing the loop";
+    case "silent":
+      return knownToDetectPassengers ? "Passenger on board (muted)" : "Playing muted";
+    case "idle":
+      return knownToDetectPassengers ? "Waiting for a passenger" : "Showing a still";
+    case "disabled":
+      return "Paused";
+    case "fallback":
+      return "Playing fallback content";
+    case "error":
+      return "Player not running";
+    default:
+      return "Unknown";
+  }
+}
+
+/** Cabs are off whenever the engine is off; silence matters only after this long. */
+export const SILENT_CAB_ATTENTION_DAYS = 3;
+
+/** Signal as a person reads it: "62%" (quality) or "-95 dBm". */
+export function formatSignal(signalPercent: number | null | undefined, signalDbm: number | null | undefined) {
+  if (typeof signalPercent === "number") {
+    return `${signalPercent}%`;
+  }
+  if (typeof signalDbm === "number") {
+    return `${signalDbm} dBm`;
+  }
+  return "n/a";
+}
+
+/**
+ * The network type a cab reported, only when it is a measurement: firmware before 1.2.0 sends
+ * "4g" whatever the connection (the production cab reports "4g" through NetworkManager).
+ */
+export function detectedNetworkType(networkType: string | null | undefined, firmwareVersion: string | null | undefined) {
+  const match = /^(\d+)\.(\d+)/.exec(firmwareVersion ?? "");
+  const detects = match ? Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 2) : false;
+  return detects && networkType && networkType !== "unknown" ? networkType : null;
+}

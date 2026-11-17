@@ -11,6 +11,16 @@ function londonDayKey(date: Date) {
   return keyFormat.format(date);
 }
 
+/**
+ * The London calendar day before `now` ("YYYY-MM-DD"). Not "now minus 24 hours": on the day after a
+ * clock change that lands on the wrong day for an hour.
+ */
+export function londonYesterdayKey(now: Date) {
+  const [year, month, day] = londonDayKey(now).split("-").map(Number);
+  const previous = new Date(Date.UTC(year, month - 1, day - 1));
+  return previous.toISOString().slice(0, 10);
+}
+
 export function clockTime(value: string | number | Date) {
   return timeFormat.format(new Date(value));
 }
@@ -19,7 +29,7 @@ export function clockTime(value: string | number | Date) {
 export function when(value: string | number | Date, now = new Date()) {
   const date = new Date(value);
   const today = londonDayKey(now);
-  const yesterday = londonDayKey(new Date(now.getTime() - 24 * 3600_000));
+  const yesterday = londonYesterdayKey(now);
   const key = londonDayKey(date);
   if (key === today) return `${clockTime(date)}`;
   if (key === yesterday) return `yesterday ${clockTime(date)}`;
@@ -31,7 +41,7 @@ export function whenLong(value: string | number | Date, now = new Date()) {
   const date = new Date(value);
   const key = londonDayKey(date);
   if (key === londonDayKey(now)) return `today at ${clockTime(date)}`;
-  if (key === londonDayKey(new Date(now.getTime() - 24 * 3600_000))) return `yesterday at ${clockTime(date)}`;
+  if (key === londonYesterdayKey(now)) return `yesterday at ${clockTime(date)}`;
   return `${dayFormat.format(date)} at ${clockTime(date)}`;
 }
 
@@ -98,3 +108,11 @@ export function distance(metres: number) {
 export function quoted(name: string) {
   return `“${name}”`;
 }
+
+/** Copy for a video being prepared: honest about long videos (a 10-minute one takes several minutes). */
+export function preparingWords(durationMs: number | null | undefined) {
+  if (durationMs && durationMs <= 2 * 60_000) return "This usually takes a minute or two.";
+  if (durationMs) return "A video this long can take 5 minutes or more.";
+  return "Short videos take a minute or two; a long one (say 10 minutes) can take 5 minutes or more.";
+}
+
