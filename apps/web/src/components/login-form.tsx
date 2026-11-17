@@ -27,36 +27,38 @@ export function LoginForm() {
 
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      setError(body?.error ?? "Unable to sign in");
+      setError(body?.error && body.error !== "Invalid request body" ? body.error : "Check the email and password.");
       setLoading(false);
       return;
     }
 
-    window.location.href = "/";
+    // Back to the page that asked for sign-in (same site only).
+    const next = new URLSearchParams(window.location.search).get("next");
+    window.location.href = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
   }
 
   return (
     <form className="auth-card" onSubmit={handleSubmit}>
       <div>
-        <span className="eyebrow">Internal Login</span>
-        <h1>Orison Screens CMS</h1>
-        <p className="muted">Use the seeded admin account or an internal editor account.</p>
+        <img alt="Orison" className="auth-logo" height={56} src="/m-app/windmill-gold.png" width={42} />
+        <h1>Orison</h1>
+        <p className="muted">Sign in to manage what plays on the cab screens.</p>
       </div>
 
       <label className="field">
         <span>Email</span>
-        <input name="email" type="email" required placeholder="admin@orisonscreens.com" />
+        <input autoComplete="username" name="email" type="email" required placeholder="you@orisonscreens.com" />
       </label>
 
       <label className="field">
         <span>Password</span>
-        <input name="password" type="password" required placeholder="••••••••" />
+        <input autoComplete="current-password" name="password" type="password" required placeholder="••••••••" />
       </label>
 
       {error ? <div className="alert alert-danger">{error}</div> : null}
 
       <button className="button button-primary" disabled={loading} type="submit">
-        {loading ? "Signing In..." : "Sign In"}
+        {loading ? "Signing in…" : "Sign in"}
       </button>
     </form>
   );

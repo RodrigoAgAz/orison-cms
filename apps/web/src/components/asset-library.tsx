@@ -1,12 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { MediaPoster } from "@/components/media-poster";
 import { Modal } from "@/components/modal";
 import { PaginationControls } from "@/components/pagination-controls";
-import { StatusPill } from "@/components/status-pill";
 import { useToast } from "@/components/toast-provider";
 
 type AssetItem = {
@@ -23,6 +22,8 @@ type AssetItem = {
   previewUrl: string;
   metadata: Record<string, string>;
   createdAt: string;
+  errorMessage: string | null;
+  isSafetyMessage: boolean;
   slotUsages: Array<{
     usageType: "VIDEO" | "STATIC";
     slot: {
@@ -56,6 +57,29 @@ const categories = [
   "FILLER_OTHER",
 ] as const;
 
+export const categoryLabels: Record<string, string> = {
+  ALL: "All kinds",
+  ADVERTISEMENT: "Advert",
+  STATIC_CREATIVE: "Still image (between journeys)",
+  SAFETY_MESSAGE: "Safety message",
+  FILLER_WEATHER: "Weather filler",
+  FILLER_NEWS: "News filler",
+  FILLER_BRANDED: "Branded filler",
+  FILLER_OTHER: "Other filler",
+};
+
+const statusLabels: Record<string, { label: string; className: string }> = {
+  READY: { label: "Ready", className: "pill pill-success" },
+  PROCESSING: { label: "Processing", className: "pill pill-warning" },
+  FAILED: { label: "Failed", className: "pill pill-danger" },
+};
+
+function lengthOf(asset: { mimeType: string; durationMs: number | null; status: string }) {
+  if (asset.mimeType.startsWith("image/")) return "Still image";
+  if (asset.status !== "READY" || !asset.durationMs) return "—";
+  return `${(Math.round(asset.durationMs / 100) / 10).toFixed(1)} s`;
+}
+
 function formatFileSize(bytes: number) {
   if (bytes < 1_000_000) {
     return `${Math.round(bytes / 1000)} KB`;
@@ -72,7 +96,7 @@ function assetSummary(asset: AssetItem) {
     return `${advertiser} / ${campaign}`;
   }
 
-  return advertiser ?? campaign ?? "No campaign metadata";
+  return advertiser ?? campaign ?? "No advertiser or campaign";
 }
 
 export function AssetLibrary({
@@ -96,6 +120,13 @@ export function AssetLibrary({
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<AssetItem | null>(null);
+  const processingIds = assets.filter((asset) => asset.status === "PROCESSING").map((asset) => asset.id).join(",");
+  useEffect(() => {
+    // Files are processed in the background: refresh until they are ready (or failed).
+    if (!processingIds) return;
+    const timer = window.setInterval(() => router.refresh(), 3000);
+    return () => window.clearInterval(timer);
+  }, [processingIds, router]);
   const [uploadState, setUploadState] = useState<{
     phase: "idle" | "uploading" | "processing";
     progress: number;
@@ -180,23 +211,23 @@ export function AssetLibrary({
       progress: 8,
     });
 
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-    formData.append("category", category);
-    formData.append(
-      "metadata",
-      JSON.stringify({
+    // The file is sent as the request body (streamed to disk on the server, never held in memory).
+    const params = new URLSearchParams({
+      filename: selectedFile.name,
+      category,
+      metadata: JSON.stringify({
         advertiserName: advertiserName.trim() || undefined,
         campaignName: campaignName.trim() || undefined,
       }),
-    );
+    });
 
     const result = await new Promise<{
       ok: boolean;
       body: { error?: string; filename?: string };
     }>((resolve) => {
       const request = new XMLHttpRequest();
-      request.open("POST", "/api/assets/upload");
+      request.open("POST", `/api/assets/upload?${params.toString()}`);
+      request.setRequestHeader("Content-Type", "application/octet-stream");
 
       request.upload.onprogress = (progressEvent) => {
         if (!progressEvent.lengthComputable) {
@@ -218,7 +249,7 @@ export function AssetLibrary({
         stopProgressTimer();
         resolve({
           ok: false,
-          body: { error: "Upload failed. Check the dev server and try again." },
+          body: { error: "The upload was interrupted. Check the connection and try again." },
         });
       };
 
@@ -233,8 +264,8 @@ export function AssetLibrary({
             body = {
               error:
                 request.status >= 500
-                  ? `The server returned an invalid ${request.status} response while processing the asset.`
-                  : `Upload failed with HTTP ${request.status}.`,
+                  ? "The server could not take this file. Try again; if it fails again, the details are in the server log."
+                  : `Upload failed (HTTP ${request.status}).`,
             };
           }
         }
@@ -245,7 +276,7 @@ export function AssetLibrary({
         });
       };
 
-      request.send(formData);
+      request.send(selectedFile);
     });
 
     if (!result.ok) {
@@ -267,19 +298,25 @@ export function AssetLibrary({
       progress: 100,
     });
     toast({
-      title: "Asset processed",
-      message: `${result.body.filename} is ready in the library.`,
+      title: "Uploaded",
+      message: `${result.body.filename} is being processed; it shows as Ready when it can be used.`,
       tone: "success",
     });
     resetForm();
     router.refresh();
   }
 
-  async function handleDelete(assetId: string) {
-    const confirmed = window.confirm("Delete this asset?");
+  async function handleDelete(asset: AssetItem) {
+    const used = new Set(asset.slotUsages.map((usage) => usage.slot.loop.name));
+    const confirmed = window.confirm(
+      used.size
+        ? `Remove "${asset.filename}" from the library? ${used.size === 1 ? "A loop uses" : `${used.size} loops use`} it, so its file is kept for ${used.size === 1 ? "that loop" : "them"} and it is only hidden here.`
+        : `Delete "${asset.filename}"? Nothing uses it, so it is deleted for good.`,
+    );
     if (!confirmed) {
       return;
     }
+    const assetId = asset.id;
 
     const response = await fetch(`/api/assets/${assetId}`, {
       method: "DELETE",
@@ -287,18 +324,19 @@ export function AssetLibrary({
 
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      const message = body?.error ?? "Delete failed";
+      const message = body?.error ?? "The file could not be removed.";
       toast({
-        title: "Delete failed",
+        title: "Not removed",
         message,
         tone: "error",
       });
       return;
     }
 
+    const outcome = (await response.json().catch(() => null)) as { outcome?: string; message?: string } | null;
     toast({
-      title: "Asset deleted",
-      message: "The asset has been removed from the library.",
+      title: outcome?.outcome === "hidden" ? "Removed from the library" : "Deleted",
+      message: outcome?.message ?? "Done.",
       tone: "success",
     });
     setSelectedAsset(null);
@@ -310,8 +348,8 @@ export function AssetLibrary({
       <div className="card stack">
         <div className="card-header">
           <div>
-            <span className="eyebrow">Asset Upload</span>
-            <h2>Content Library</h2>
+            <span className="eyebrow">Upload</span>
+            <h2>Add a file</h2>
           </div>
         </div>
 
@@ -339,7 +377,7 @@ export function AssetLibrary({
             type="button"
           >
             <input
-              accept=".mp4,.mov,.webm,.jpg,.jpeg,.png"
+              accept=".mp4,.mov,.m4v,.webm,.jpg,.jpeg,.png,.webp"
               hidden
               name="file"
               onChange={(event) => handleFileSelect(event.target.files?.item(0) ?? null)}
@@ -347,30 +385,30 @@ export function AssetLibrary({
               type="file"
             />
             <span className="drop-zone-kicker">Drag files here or click to browse</span>
-            <strong>{selectedFile?.name ?? "MP4, MOV, WEBM, JPG, JPEG, PNG"}</strong>
+            <strong>{selectedFile?.name ?? "Videos: MP4, MOV (iPhone HDR is fine), WebM · Images: JPG, PNG"}</strong>
             <span className="muted">
               {selectedFile
                 ? `${formatFileSize(selectedFile.size)} ready to upload`
-                : "Transcoding runs automatically after upload and generates a thumbnail."}
+                : "Each file is converted after upload; it can be used in loops once it shows Ready."}
             </span>
           </button>
 
           <div className="asset-upload-grid">
             <label className="field">
-              <span>Category</span>
+              <span>Kind</span>
               <select onChange={(event) => setCategory(event.target.value)} value={category}>
                 {categories
                   .filter((item) => item !== "ALL")
                   .map((item) => (
                     <option key={item} value={item}>
-                      {item}
+                      {categoryLabels[item]}
                     </option>
                   ))}
               </select>
             </label>
 
             <label className="field">
-              <span>Advertiser Name</span>
+              <span>Advertiser</span>
               <input
                 onChange={(event) => setAdvertiserName(event.target.value)}
                 placeholder="Nike, Pret, TfL..."
@@ -379,7 +417,7 @@ export function AssetLibrary({
             </label>
 
             <label className="field">
-              <span>Campaign Name</span>
+              <span>Campaign</span>
               <input
                 onChange={(event) => setCampaignName(event.target.value)}
                 placeholder="Spring Launch 2026"
@@ -392,7 +430,7 @@ export function AssetLibrary({
             <div className="upload-progress-card">
               <div className="card-header">
                 <strong>
-                  {uploadState.phase === "uploading" ? "Uploading asset" : "Transcoding and indexing"}
+                  {uploadState.phase === "uploading" ? "Uploading" : "Finishing the upload"}
                 </strong>
                 <span>{uploadState.progress}%</span>
               </div>
@@ -411,11 +449,11 @@ export function AssetLibrary({
               type="submit"
             >
               {uploadState.phase === "idle" ? (
-                "Upload Asset"
+                "Upload"
               ) : (
                 <span className="button-inline">
                   <span aria-hidden className="button-spinner" />
-                  Processing asset
+                  Uploading
                 </span>
               )}
             </button>
@@ -426,19 +464,19 @@ export function AssetLibrary({
       <form className="toolbar" onSubmit={applyFilters}>
         <input
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search by filename, advertiser, or campaign"
+          placeholder="Search by file name, advertiser or campaign"
           value={query}
         />
         <select onChange={(event) => setSelectedCategory(event.target.value)} value={selectedCategory}>
           {categories.map((item) => (
             <option key={item} value={item}>
-              {item}
+              {categoryLabels[item]}
             </option>
           ))}
         </select>
         <div className="button-row">
           <button className="button button-secondary" type="submit">
-            Apply Filters
+            Search
           </button>
           {(currentQuery || currentCategory !== "ALL") && (
             <button className="button button-secondary" onClick={clearFilters} type="button">
@@ -452,18 +490,18 @@ export function AssetLibrary({
         <div className="empty-state">
           <strong>
             {currentQuery || currentCategory !== "ALL"
-              ? "No assets match the current filters"
-              : "No assets uploaded yet"}
+              ? "Nothing matches this search"
+              : "No files yet"}
           </strong>
           <p>
             {currentQuery || currentCategory !== "ALL"
-              ? "Try broadening the search or resetting the category filter."
-              : "Upload your first advertisement, static creative, or filler file to start building loops."}
+              ? "Try another search, or show all kinds."
+              : "Upload adverts, fillers and still images to build loops with."}
           </p>
           <div className="button-row">
             {currentQuery || currentCategory !== "ALL" ? (
               <button className="button button-secondary" onClick={clearFilters} type="button">
-                Clear Filters
+                Show everything
               </button>
             ) : (
               <button
@@ -471,7 +509,7 @@ export function AssetLibrary({
                 onClick={() => inputRef.current?.click()}
                 type="button"
               >
-                Upload First Asset
+                Upload a file
               </button>
             )}
           </div>
@@ -495,16 +533,17 @@ export function AssetLibrary({
               <div className="stack-sm">
                 <div className="card-header">
                   <strong>{asset.filename}</strong>
-                  <StatusPill value={asset.status} />
+                  <span className={statusLabels[asset.status]?.className ?? "pill pill-muted"}>{statusLabels[asset.status]?.label ?? asset.status}</span>
                 </div>
 
                 <span className="muted">{assetSummary(asset)}</span>
+                {asset.status === "FAILED" && asset.errorMessage ? <span className="asset-error">{asset.errorMessage}</span> : null}
 
                 <div className="meta-grid">
-                  <span>Category</span>
-                  <span>{asset.category}</span>
-                  <span>Duration</span>
-                  <span>{asset.durationMs ? `${Math.round(asset.durationMs / 1000)}s` : "n/a"}</span>
+                  <span>Kind</span>
+                  <span>{categoryLabels[asset.category] ?? asset.category}{asset.isSafetyMessage ? " (in use)" : ""}</span>
+                  <span>Length</span>
+                  <span>{lengthOf(asset)}</span>
                   <span>Dimensions</span>
                   <span>
                     {asset.width && asset.height ? `${asset.width}×${asset.height}` : "n/a"}
@@ -532,7 +571,7 @@ export function AssetLibrary({
       {selectedAsset ? (
         <Modal
           className="asset-modal"
-          eyebrow="Asset Preview"
+          eyebrow={categoryLabels[selectedAsset.category] ?? "File"}
           onClose={() => setSelectedAsset(null)}
           title={selectedAsset.filename}
         >
@@ -552,42 +591,50 @@ export function AssetLibrary({
                   rel="noreferrer"
                   target="_blank"
                 >
-                  Open asset
+                  Open file
                 </a>
                 <button
                   className="button button-danger"
-                  onClick={() => void handleDelete(selectedAsset.id)}
+                  disabled={selectedAsset.isSafetyMessage || selectedAsset.status === "PROCESSING"}
+                  onClick={() => void handleDelete(selectedAsset)}
+                  title={selectedAsset.isSafetyMessage ? "This is the safety message chosen in Settings. Choose another one first." : undefined}
                   type="button"
                 >
-                  Delete asset
+                  {selectedAsset.slotUsages.length ? "Remove from library" : "Delete"}
                 </button>
               </div>
+              {selectedAsset.isSafetyMessage ? (
+                <p className="muted">This is the safety message chosen in Settings, so it cannot be removed until another one is chosen.</p>
+              ) : null}
+              {selectedAsset.status === "FAILED" ? <div className="alert alert-danger">{selectedAsset.errorMessage ?? "Processing failed."}</div> : null}
             </div>
 
             <div className="stack">
               <div className="card stack-sm asset-modal-card">
-                <span className="eyebrow">Metadata</span>
+                <span className="eyebrow">Details</span>
                 <div className="meta-grid">
                   <span>Advertiser</span>
-                  <span>{selectedAsset.metadata.advertiserName ?? "n/a"}</span>
+                  <span>{selectedAsset.metadata.advertiserName ?? "—"}</span>
                   <span>Campaign</span>
-                  <span>{selectedAsset.metadata.campaignName ?? "n/a"}</span>
+                  <span>{selectedAsset.metadata.campaignName ?? "—"}</span>
                   <span>Status</span>
-                  <span>{selectedAsset.status}</span>
-                  <span>Category</span>
-                  <span>{selectedAsset.category}</span>
+                  <span>{statusLabels[selectedAsset.status]?.label ?? selectedAsset.status}</span>
+                  <span>Length</span>
+                  <span>{lengthOf(selectedAsset)}</span>
+                  <span>Picture</span>
+                  <span>{selectedAsset.width && selectedAsset.height ? `${selectedAsset.width} × ${selectedAsset.height}` : "—"}</span>
                   <span>Uploaded</span>
                   <span>{new Date(selectedAsset.createdAt).toLocaleString()}</span>
                 </div>
               </div>
 
               <div className="card stack-sm asset-modal-card">
-                <span className="eyebrow">Usage</span>
-                <strong>Loops and slots using this asset</strong>
+                <span className="eyebrow">Used in</span>
+                <strong>Loops using this file</strong>
                 {selectedAsset.slotUsages.length === 0 ? (
                   <div className="empty-state compact">
-                    <strong>Not used in a loop yet</strong>
-                    <p>This asset is available to assign from the loop builder.</p>
+                    <strong>Not used in a loop</strong>
+                    <p>Choose it in the loop builder.</p>
                   </div>
                 ) : (
                   <div className="usage-list">
@@ -595,9 +642,8 @@ export function AssetLibrary({
                       <span
                         key={`${placement.usageType}-${placement.slot.loop.id}-${placement.slot.position}-${selectedAsset.id}`}
                       >
-                        {placement.slot.loop.name} / Slot {placement.slot.position + 1} /{" "}
-                        {placement.usageType === "STATIC" ? "Static creative" : "Video segment"} /{" "}
-                        {placement.slot.loop.status}
+                        {placement.slot.loop.name} · slot {placement.slot.position + 1} ·{" "}
+                        {placement.usageType === "STATIC" ? "still image" : "plays in the slot"}
                       </span>
                     ))}
                   </div>

@@ -54,15 +54,15 @@ export default async function AssetsPage({ searchParams }: Props) {
     <div className="page">
       <div className="page-header">
         <div>
-          <span className="eyebrow">Media</span>
-          <h1>Asset Library</h1>
+          <span className="eyebrow">Assets</span>
+          <h1>Assets</h1>
           <p className="muted">
-            Upload advertisements, filler videos, branded interstitials, and image-based content.
+            The files loops are built from: adverts, fillers, still images shown between journeys, and the safety message.
           </p>
         </div>
       </div>
 
-      <PageErrorNotice message={result.error} title="Asset library unavailable" />
+      <PageErrorNotice message={result.error} title="Assets unavailable" />
 
       <AssetLibrary
         assets={result.items.map((asset) => ({
@@ -81,6 +81,8 @@ export default async function AssetsPage({ searchParams }: Props) {
           previewUrl: `/api/assets/${asset.id}/preview`,
           metadata: normaliseMetadata(asset.metadata),
           createdAt: asset.createdAt.toISOString(),
+          errorMessage: asset.errorMessage,
+          isSafetyMessage: asset.id === result.safetyVideoAssetId,
           slotUsages: [
             ...asset.slotPlacements.map((placement) => ({
               usageType: "VIDEO" as const,

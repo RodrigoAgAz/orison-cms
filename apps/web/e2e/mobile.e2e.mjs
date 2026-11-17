@@ -905,6 +905,27 @@ async function openSuite(browser) {
     await page.getByRole("tab", { name: /^All/ }).click();
   });
 
+  await check("demo fleet: videos, a video, the change steps and the upload form (screenshots for review)", async () => {
+    await goto(page, "/m/videos");
+    await page.getByTestId("video-list").waitFor();
+    await page.waitForTimeout(800);
+    await shot(page, "demo-videos", { fullPage: true });
+    await goto(page, `/m/videos/${spring.id}`);
+    await page.getByTestId("video-live").waitFor();
+    await shot(page, "demo-video", { fullPage: true });
+    await goto(page, "/m/change?target=fleet");
+    await page.getByTestId("choose-video-list").waitFor();
+    await shot(page, "demo-change-choose", { fullPage: true });
+    await goto(page, `/m/change?loop=${theatre.id}`);
+    await page.getByTestId("choose-target-list").waitFor();
+    await shot(page, "demo-change-where");
+    await goto(page, "/m/upload");
+    await page.getByTestId("upload-file").waitFor();
+    await shot(page, "demo-upload-form", { fullPage: true });
+    await goto(page, "/m");
+    await page.getByTestId("cab-list").waitFor();
+  });
+
   // ---------------------------------------------------------------- cab detail
   await check("cab detail: GPS cab with timeline, location and technical details", async () => {
     await page.locator('[data-testid="cab-row"]', { hasText: "LX21 KCB" }).click();

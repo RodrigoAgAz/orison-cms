@@ -106,7 +106,7 @@ export function loopStateOf(loop: ListLoop, liveOn: LiveOn, frame: { width: numb
     version: loop.version,
     durationMs: loop.durationMs,
     hasVideo: Boolean(loop.compiledVideoKey),
-    publishError: loop.publishError,
+    publishError: readablePublishError(loop.publishError),
     targetGroupId: loop.targetGroupId,
     targetLabel: loop.targetGroup ? `Group ${loop.targetGroup.name}` : "All cabs",
     readySlots,
@@ -117,6 +117,18 @@ export function loopStateOf(loop: ListLoop, liveOn: LiveOn, frame: { width: numb
     publish: publishStateSummary(loop),
     unpublishedChanges,
   };
+}
+
+/**
+ * Publishes before this change stored the whole ffmpeg command and output as the error. Show a
+ * short reason instead (the detail is in the server log).
+ */
+export function readablePublishError(error: string | null) {
+  if (!error) return null;
+  if (error.length > 400 || /^Command failed:|ffmpeg version|\n/.test(error)) {
+    return "The last publish failed while compiling the video (technical details are in the server log). Publish again.";
+  }
+  return error;
 }
 
 export type LoopState = ReturnType<typeof loopStateOf>;

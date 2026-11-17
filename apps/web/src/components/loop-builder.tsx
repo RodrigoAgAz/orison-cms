@@ -768,19 +768,17 @@ export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTe
           <aside className="lb-still">
             <span className="eyebrow">Between journeys</span>
             <h3>Still image for this minute</h3>
-            <MediaPoster
-              alt={still?.filename ?? "Orison logo"}
-              className="lb-still-poster"
-              label={still ? "Still image" : ""}
-              src={still?.thumbnailUrl ?? still?.previewUrl ?? null}
-            />
+            {still ? (
+              <MediaPoster alt={still.filename} className="lb-still-poster" label="Still image" src={still.thumbnailUrl ?? still.previewUrl} />
+            ) : (
+              <div className="lb-still-fallback" aria-label="Orison logo on navy">
+                <img alt="" src="/m-app/windmill-gold.png" />
+              </div>
+            )}
             {still ? (
               <p className="muted">{still.filename}</p>
             ) : (
-              <div className="lb-still-default">
-                <img alt="" src="/m-app/windmill-gold.png" />
-                <p>No still image chosen: between journeys the cab shows the Orison logo during this minute.</p>
-              </div>
+              <p className="lb-still-default">No still image chosen: between journeys the cab shows the Orison logo during this minute.</p>
             )}
             <div className="button-row">
               <button className="button button-secondary" disabled={stills.length === 0} onClick={() => setPicker({ kind: "still" })} type="button">
