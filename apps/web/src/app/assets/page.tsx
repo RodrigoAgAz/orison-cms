@@ -1,8 +1,10 @@
+import type { Metadata } from "next";
 import { assetCategories, type AssetCategory } from "@orison/shared/src/constants";
 
 import { AssetLibrary } from "@/components/asset-library";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
+import { readableAssetError } from "@/lib/loop-queries";
 import { getAssetLibraryData } from "@/lib/queries";
 
 function assetUrlForKey(key: string | null | undefined) {
@@ -39,6 +41,8 @@ function parseCategory(value: string | undefined): AssetCategory | "ALL" {
 
   return assetCategories.includes(value as AssetCategory) ? (value as AssetCategory) : "ALL";
 }
+
+export const metadata: Metadata = { title: "Assets" };
 
 export default async function AssetsPage({ searchParams }: Props) {
   await requireUser();
@@ -83,7 +87,7 @@ export default async function AssetsPage({ searchParams }: Props) {
           previewUrl: `/api/assets/${asset.id}/preview`,
           metadata: normaliseMetadata(asset.metadata),
           createdAt: asset.createdAt.toISOString(),
-          errorMessage: asset.errorMessage,
+          errorMessage: readableAssetError(asset.errorMessage),
           isSafetyMessage: asset.id === result.safetyVideoAssetId,
           slotUsages: [
             ...asset.slotPlacements.map((placement) => ({

@@ -183,8 +183,8 @@ export function AnalyticsDashboard({ analytics }: Props) {
 
       <section className="stats-grid">
         <StatCard
-          hint="Full passes of a directly uploaded loop video (firmware 1.2.0+). Counted apart from advert plays: the CMS does not know which adverts are inside such a video."
-          label="Uploaded-video passes (30 days)"
+          hint="Full passes of a pre-built loop or a phone upload, one uploaded video without slots (firmware 1.2.0+). Counted apart from advert plays: the CMS does not know which adverts are inside such a video."
+          label="Pre-built loop passes (30 days)"
           value={analytics.totals.loopPasses}
         />
       </section>

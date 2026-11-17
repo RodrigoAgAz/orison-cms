@@ -3,6 +3,9 @@ import { apiError, apiResponse } from "@/lib/http";
 import { cmsSettingsInputSchema, getCmsSettings, updateCmsSettings } from "@/lib/cms-settings";
 import { parseBody, toApiError } from "@/lib/loop-api";
 
+// Reads the session cookie: never pre-rendered at build time.
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     await requireApiUser();

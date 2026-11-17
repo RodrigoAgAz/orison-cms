@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { DevicesRegistry } from "@/components/devices-registry";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
@@ -16,6 +17,8 @@ function parsePage(value: string | undefined) {
 }
 
 const iso = (value: Date | null | undefined) => value?.toISOString() ?? null;
+
+export const metadata: Metadata = { title: "Cabs" };
 
 export default async function DevicesPage({ searchParams }: Props) {
   await requireUser();

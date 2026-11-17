@@ -285,7 +285,7 @@ export function SettingsForm({ settings, safetyAssets, users }: Props) {
             </tbody>
           </table>
         </div>
-        <p className="muted">Cabs sign in with the device token set in the server&apos;s environment, not with these accounts.</p>
+        <p className="muted">Cabs do not use these accounts: they identify themselves with the shared cab token set in the server&apos;s environment (DEVICE_SHARED_TOKEN).</p>
       </section>
     </div>
   );

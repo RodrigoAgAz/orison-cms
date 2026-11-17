@@ -1053,6 +1053,15 @@ textarea {
 .asset-card {
   display: grid;
   gap: 16px;
+  /* A long file name or error must wrap, never widen the card past its column. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.asset-card .pill {
+  overflow-wrap: normal;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .asset-card-button {
@@ -2955,9 +2964,10 @@ textarea {
 
 /* Assets */
 .asset-error { font-size: 0.82rem; color: #fca5a5; }
-.ll-table .table-actions { flex-wrap: nowrap; justify-content: flex-end; }
-.ll-table td:last-child { white-space: nowrap; }
-.ll-table td:first-child { min-width: 220px; }
+/* Actions stack in their own narrow column so the table fits the content area from 1280 px up. */
+.ll-table .table-actions { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 6px; }
+.ll-table td:last-child { width: 1%; white-space: nowrap; }
+.ll-table td:first-child { min-width: 200px; }
 .lb-still-fallback {
   aspect-ratio: 16 / 10;
   border-radius: 10px;
@@ -2969,5 +2979,15 @@ textarea {
 .lb-still-fallback img { width: 34%; max-width: 90px; opacity: 0.95; }
 .ll-table .button { padding: 6px 12px; font-size: 0.82rem; }
 .ll-table th, .ll-table td { padding-left: 10px; padding-right: 10px; }
-.ll-table td:nth-child(3), .ll-table td:nth-child(4) { min-width: 120px; }
-.ll-table td:nth-child(6) { white-space: nowrap; }
+.ll-table td:nth-child(3), .ll-table td:nth-child(4) { min-width: 110px; }
+.ll-table td:nth-child(5) { white-space: nowrap; }
+
+/* Cabs list: seven columns that fit the content area from 1280 px up (the pause button and the
+   last heartbeat live in the Status cell). */
+.cab-table th, .cab-table td { padding-left: 10px; padding-right: 10px; }
+.cab-table td:nth-child(1) { min-width: 130px; }
+.cab-table td:nth-child(2) { min-width: 150px; }
+.cab-table td:nth-child(4), .cab-table td:nth-child(5), .cab-table td:nth-child(6) { min-width: 120px; }
+.cab-table .text-danger { overflow-wrap: anywhere; }
+.cab-table .cab-group-select { max-width: 150px; }
+.cab-pause-button { justify-self: start; margin-top: 4px; padding: 6px 12px; font-size: 0.82rem; }

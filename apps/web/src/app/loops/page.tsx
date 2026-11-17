@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 
 import { CreateLoopForm } from "@/components/create-loop-form";
@@ -18,6 +19,8 @@ function parsePage(value: string | undefined) {
   const page = Number(value);
   return Number.isInteger(page) && page > 0 ? page : 1;
 }
+
+export const metadata: Metadata = { title: "Loops" };
 
 export default async function LoopsPage({ searchParams }: Props) {
   await requireUser();

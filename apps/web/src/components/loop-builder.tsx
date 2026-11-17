@@ -414,7 +414,7 @@ export function LoopBuilder({ loop, initialState, assets, deviceGroups, fillerTe
       }
       setTargetGroupId(nextId);
       toast({
-        title: "Target changed",
+        title: "Where it plays changed",
         message: body.live ? "Cabs were updated." : `It will publish to ${nextId ? `group ${deviceGroups.find((group) => group.id === nextId)?.name}` : "all cabs"}.`,
         tone: "success",
       });

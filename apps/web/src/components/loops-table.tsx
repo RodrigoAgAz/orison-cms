@@ -101,7 +101,6 @@ export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
               <th>Status</th>
               <th>On air for</th>
               <th>Plays on</th>
-              <th>Slots ready</th>
               <th>Last published</th>
               <th />
             </tr>
@@ -113,7 +112,10 @@ export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
                   <Link className="ll-name" href={`/loops/${loop.id}`}>
                     {loop.name}
                   </Link>
-                  <span className="ll-kind">{kindLabels[loop.kind]}</span>
+                  <span className="ll-kind">
+                    {kindLabels[loop.kind]}
+                    {loop.kind === "builder" ? ` · ${loop.readySlots} of ${loop.slotCount} slots ready` : ""}
+                  </span>
                 </td>
                 <td>
                   <div className="ll-status">
@@ -129,7 +131,6 @@ export function LoopsTable({ loops: initial, page, pageSize, total }: Props) {
                 </td>
                 <td className={loop.live ? "ll-live" : "muted"}>{loop.live ? shortLiveOn(loop.liveOn) : "Not on air"}</td>
                 <td>{loop.kind === "phone" ? <span className="muted">Phone app</span> : loop.targetLabel}</td>
-                <td>{loop.kind === "builder" ? `${loop.readySlots} of ${loop.slotCount}` : <span className="muted">—</span>}</td>
                 <td>{formatWhen(loop.publishedAt)}</td>
                 <td>
                   <div className="button-row table-actions">

@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { AnalyticsDashboard } from "@/components/analytics-dashboard";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { requireUser } from "@/lib/auth";
 import { getAnalyticsData } from "@/lib/fleet-data";
+
+export const metadata: Metadata = { title: "Analytics" };
 
 export default async function AnalyticsPage() {
   await requireUser();

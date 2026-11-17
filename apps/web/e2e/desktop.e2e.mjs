@@ -231,7 +231,7 @@ async function main() {
 
     // Target the test group (not on air yet: no confirmation needed).
     await page.selectOption("select[aria-label='Plays on']", created.groups[0]);
-    await toast("Target changed");
+    await toast("Where it plays changed");
 
     async function pick(name) {
       await page.fill(".lb-search", PREFIX);
@@ -421,7 +421,7 @@ async function main() {
     await page.waitForSelector(".lb-slot");
     await page.selectOption("select[aria-label='Plays on']", created.groups[1]);
     await page.click(".lx-confirm button:has-text('Move it now')");
-    await toast("Target changed");
+    await toast("Where it plays changed");
     const moved = await json(await api.get(`${BASE}/api/loops/${loopId}/publish`));
     check(/group B/.test(moved.state.liveLabel), `now live on ${moved.state.liveLabel}`);
     check((await cabAnswer(cabSerial)).loopId !== loopId, "the cab in group A no longer plays it");
@@ -525,12 +525,18 @@ async function main() {
     const bigLoopFile = path.join(mkdtempSync(path.join(os.tmpdir(), "orison-e2e-up-")), `${PREFIX}-pieces-loop.mp4`);
     await run("cp", [big, bigLoopFile]);
     const loopName = `${PREFIX} pre-built`;
+    const submitLoop = page.locator("button[type=submit]:has-text('Upload and put on air')");
     const fillLoopForm = async () => {
       await page.goto(`${BASE}/loops`);
       await page.waitForSelector(".ll-table, .empty-state");
-      await page.fill("input[placeholder^='e.g. DAZN']", loopName);
-      await page.setInputFiles("input[type=file][accept*='.mp4']", bigLoopFile);
-      await page.locator("label.field", { hasText: "When it is ready" }).locator("select").selectOption(created.groups[0]);
+      // Filled before React has hydrated the form, the fields would be reset: retry until it takes.
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await page.waitForTimeout(700);
+        await page.fill("input[placeholder^='e.g. DAZN finished']", loopName);
+        await page.setInputFiles("input[type=file][accept*='.mp4']", bigLoopFile);
+        await page.locator("label.field", { hasText: "When it is ready" }).locator("select").selectOption(created.groups[0]);
+        if (await submitLoop.isEnabled().catch(() => false)) break;
+      }
     };
     // Piece 1 is held (never answered) while the page is closed, as when a laptop lid shuts.
     let held = 0;
@@ -538,7 +544,7 @@ async function main() {
       held += 1;
     });
     await fillLoopForm();
-    await page.click("button[type=submit]:has-text('Upload and put on air')");
+    await submitLoop.click();
     await page.waitForSelector(".lx-confirm");
     check(/Put it on air for group/.test(await page.locator(".lx-confirm").innerText()), "asks before putting it on air for the group");
     await shot("prebuilt-confirm", { fullPage: false });
@@ -555,7 +561,7 @@ async function main() {
     await page.goto("about:blank");
     const beforeResume = pieceRequests.filter((request) => request.id === firstSession.uploadId).length;
     await fillLoopForm();
-    await page.click("button[type=submit]:has-text('Upload and put on air')");
+    await submitLoop.click();
     const [secondOpen] = await Promise.all([
       page.waitForResponse((r) => r.url() === `${BASE}/api/uploads` && r.request().method() === "POST"),
       page.click(".lx-confirm button:has-text('Upload and put on air')"),

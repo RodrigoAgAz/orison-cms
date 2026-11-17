@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { PageErrorNotice } from "@/components/page-error-notice";
 import { SettingsForm } from "@/components/settings-form";
 import { requireUser } from "@/lib/auth";
 import { getSettingsData } from "@/lib/queries";
+
+export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
   await requireUser();

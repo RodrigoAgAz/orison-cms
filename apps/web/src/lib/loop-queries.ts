@@ -131,6 +131,15 @@ export function readablePublishError(error: string | null) {
   return error;
 }
 
+/** The same for assets that failed before processing errors were made short. */
+export function readableAssetError(error: string | null) {
+  if (!error) return null;
+  if (error.length > 400 || /^Command failed:|ffmpeg version|\n/.test(error)) {
+    return "This file could not be converted (technical details are in the server log). Upload it again, or export it again as MP4 or MOV first.";
+  }
+  return error;
+}
+
 export type LoopState = ReturnType<typeof loopStateOf>;
 
 async function statesFor(where: Prisma.LoopWhereInput, options: { skip?: number; take?: number } = {}) {

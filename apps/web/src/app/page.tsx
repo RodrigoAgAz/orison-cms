@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { formatDistanceToNowStrict } from "date-fns";
 import type { Route } from "next";
 import Link from "next/link";
@@ -40,6 +41,9 @@ function activityClass(status: string | null) {
       return "ops-state-pill";
   }
 }
+
+// Absolute: the root layout's title template only applies to pages below it.
+export const metadata: Metadata = { title: { absolute: "Dashboard · Orison" } };
 
 export default async function DashboardPage() {
   await requireUser();

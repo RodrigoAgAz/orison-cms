@@ -135,7 +135,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
 
     if (!response.ok) {
       toast({
-        title: "Could not register the cab",
+        title: "Cab not registered",
         message: await errorMessage(response, "Unable to register the cab."),
         tone: "error",
       });
@@ -166,7 +166,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
 
     if (!response.ok) {
       toast({
-        title: "Could not create the group",
+        title: "Group not created",
         message: await errorMessage(response, "Unable to create the group."),
         tone: "error",
       });
@@ -201,7 +201,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
 
     if (!response.ok) {
       toast({
-        title: "Could not rename the group",
+        title: "Group not renamed",
         message: await errorMessage(response, "Unable to update the group."),
         tone: "error",
       });
@@ -222,7 +222,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
 
     if (!response.ok) {
       toast({
-        title: "Could not delete the group",
+        title: "Group not deleted",
         message: await errorMessage(response, "Unable to delete the group."),
         tone: "error",
       });
@@ -244,7 +244,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
 
     if (!response.ok) {
       toast({
-        title: "Could not change the group",
+        title: "Group not changed",
         message: await errorMessage(response, "Unable to change the cab's group."),
         tone: "error",
       });
@@ -290,7 +290,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
       refreshPage();
     } catch (error) {
       toast({
-        title: "Could not change the cab",
+        title: "Cab not changed",
         message: error instanceof Error ? error.message : "Unable to change the cab.",
         tone: "error",
       });
@@ -332,7 +332,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
       refreshPage();
     } catch (error) {
       toast({
-        title: "Could not change the pause",
+        title: "Pause not changed",
         message: error instanceof Error ? error.message : "Unable to change the pause.",
         tone: "error",
       });
@@ -455,7 +455,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
         ) : (
           <>
             <div className="table-wrap">
-              <table className="data-table">
+              <table className="data-table cab-table">
                 <thead>
                   <tr>
                     <th>Cab</th>
@@ -464,9 +464,7 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                     <th>Loop</th>
                     <th>Update</th>
                     <th>Screen</th>
-                    <th>Last heartbeat</th>
                     <th>Signal / storage</th>
-                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -488,6 +486,24 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                               Paused{device.disabledReason ? `: ${device.disabledReason}` : ""}
                             </span>
                           ) : null}
+                          <span className="muted">Last heartbeat {formatLondonDateTime(device.lastHeartbeatAt)}</span>
+                          <button
+                            className={`cab-pause-button ${device.isDisabled ? "button button-secondary" : "button button-danger"}`}
+                            disabled={busyDeviceId === device.id}
+                            onClick={() => void toggleDeviceDisabled(device)}
+                            type="button"
+                          >
+                            {busyDeviceId === device.id ? (
+                              <span className="button-inline">
+                                <span aria-hidden className="button-spinner" />
+                                Working
+                              </span>
+                            ) : device.isDisabled ? (
+                              "Resume"
+                            ) : (
+                              "Pause"
+                            )}
+                          </button>
                         </div>
                       </td>
                       <td>
@@ -547,7 +563,6 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                           <span className="muted">{triggerLabel(device.playbackTrigger)}</span>
                         </div>
                       </td>
-                      <td>{formatLondonDateTime(device.lastHeartbeatAt)}</td>
                       <td>
                         <div className="cab-cell-lines">
                           <span>
@@ -559,25 +574,6 @@ export function DevicesRegistry({ devices, groups, fleetControl, selectedGroupId
                           </span>
                           <span className="muted">Firmware {device.firmwareVersion ?? "unknown"}</span>
                         </div>
-                      </td>
-                      <td>
-                        <button
-                          className={device.isDisabled ? "button button-secondary" : "button button-danger"}
-                          disabled={busyDeviceId === device.id}
-                          onClick={() => void toggleDeviceDisabled(device)}
-                          type="button"
-                        >
-                          {busyDeviceId === device.id ? (
-                            <span className="button-inline">
-                              <span aria-hidden className="button-spinner" />
-                              Working
-                            </span>
-                          ) : device.isDisabled ? (
-                            "Resume"
-                          ) : (
-                            "Pause"
-                          )}
-                        </button>
                       </td>
                     </tr>
                   ))}

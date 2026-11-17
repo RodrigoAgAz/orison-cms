@@ -49,7 +49,7 @@ export function DirectLoopViewer({ loop, state, deviceGroups }: Props) {
         });
         return;
       }
-      toast({ title: "Target changed", message: "Saved.", tone: "success" });
+      toast({ title: "Where it plays changed", message: "Saved.", tone: "success" });
       router.refresh();
     } catch (error) {
       toast({ title: "Not changed", message: error instanceof Error ? error.message : "", tone: "error" });

@@ -3,6 +3,9 @@ import { apiError, apiResponse } from "@/lib/http";
 import { toApiError } from "@/lib/loop-api";
 import { getLoopStates } from "@/lib/loop-queries";
 
+// Reads the session cookie: never pre-rendered at build time.
+export const dynamic = "force-dynamic";
+
 /** GET /api/loops/state?ids=a,b: live state of several loops (the loops list polls this). */
 export async function GET(request: Request) {
   try {

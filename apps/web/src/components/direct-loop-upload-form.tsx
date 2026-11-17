@@ -100,7 +100,10 @@ export function DirectLoopUploadForm({ deviceGroups }: { deviceGroups: Array<{ i
       title: `Put it on air for ${where}?`,
       message: `As soon as it has been converted, "${name.trim()}" replaces what ${where} play${target === "all" ? "" : "s"} now. Choose "Keep it off air" to check it first.`,
       confirmLabel: "Upload and put on air",
-      onConfirm: () => upload(selectedFile),
+      // Not awaited: the dialog closes at once and the progress card below shows the upload.
+      onConfirm: () => {
+        void upload(selectedFile);
+      },
     });
   }
 

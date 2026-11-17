@@ -1,3 +1,6 @@
+import type { Metadata } from "next";
+
+import { prisma } from "@orison/db";
 import Link from "next/link";
 
 import { DirectLoopViewer } from "@/components/direct-loop-viewer";
@@ -52,6 +55,11 @@ type Props = {
     id: string;
   };
 };
+
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const loop = await prisma.loop.findUnique({ where: { id: params.id }, select: { name: true } }).catch(() => null);
+  return { title: loop?.name ?? "Loop" };
+}
 
 export default async function LoopBuilderPage({ params }: Props) {
   await requireUser();

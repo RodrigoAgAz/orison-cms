@@ -1,189 +1,183 @@
-# Orison Screens CMS
+# Orison CMS
 
-Monorepo for the Orison Screens pilot fleet:
+Orison runs advertising screens in the back of London black cabs. This repository is everything
+that decides what those screens play:
 
-- `apps/web`: Next.js 14 dashboard and `/api/*` surface
-- `apps/worker`: BullMQ worker for async media processing and loop publishing
-- `packages/db`: Prisma schema, client, and seed script
-- `packages/shared`: shared constants, schemas, and manifest helpers
-- `device`: Raspberry Pi sync, playback, and health services
+- **The desktop CMS** (`apps/web`, pages at `/`): for the people who run the screens. Upload adverts
+  and fillers, build loops, publish them, choose which cabs play them, pause cabs, and read what
+  was played.
+- **The phone app** (`apps/web`, pages at `/m`): for non-technical staff on an iPhone. See the
+  cabs on a list and a map, change what a cab or group plays, upload a finished video, pause or
+  resume a cab. Phones that open the site root are sent to `/m`.
+- **The cab software** (`device/`): Python services on the small x86 Linux box in each cab, which
+  download what the CMS assigns, play it with mpv, and report heartbeats and a playback log.
+  Everything about the cab is in [`device/README.md`](device/README.md).
 
-## What This Build Includes
+One Next.js process does all the server work, including the media work (ffmpeg): there is no
+worker and no Redis. Data lives in PostgreSQL; video and image files in S3-compatible object
+storage. Production runs on Railway from the `Dockerfile`.
 
-- Prisma schema for users, assets, loops, slots, devices, heartbeats, playback logs, activity events, and settings
-- CMS pages for dashboard, loop library, loop builder, assets, devices, analytics, and settings
-- API routes for auth, assets, loops, slots, devices, analytics, settings, and local storage serving
-- Media-processing helpers for upload handling, ffmpeg-based normalization, and single-file loop compilation
-- BullMQ worker scaffold for queued asset processing and loop publishing
-- Raspberry Pi services for sync, playback, heartbeat reporting, and playback-log upload
-- Dockerfile and Docker Compose for app, worker, Postgres, and Redis
+## What the product does
 
-## Quick Start
+- A **loop** is what a cab's screen plays. Normally it is ten one-minute **slots** built in the
+  loop builder: each slot is an advert followed by fillers and must add up to exactly 60 s to
+  publish. Publishing compiles the loop into one MP4 (30 fps, H.264, AAC stereo 48 kHz, keyframe
+  every 2 s and at every item start; picture size from Settings > Screen format, default 1280x800)
+  plus a manifest the cab uses to log what it played. A **pre-built loop** is one finished video
+  uploaded as it is (desktop Loops page, or the phone app), converted to the same format.
+- A passenger **journey** (button/door input on cabs that have it) plays the safety message, then
+  the loop. Between journeys the screen shows a still. A cab without passenger inputs (like the
+  pilot cab) plays continuously.
+- **Where a loop plays**: a cab's own choice beats its group's, which beats "all cabs"; within each,
+  the most recent action wins (a desktop publish or an explicit assignment). Changing where a loop
+  that is on air plays is confirmed and logged, a group a loop is on air for cannot be deleted, and
+  Pause says what will play instead.
+- **Publishing runs in the background**. A loop on air stays on air in its previous version until
+  the new one is ready; unchanged content is not recompiled; an interrupted publish is detected and
+  can be retried. Superseded files are deleted 6 hours later; deleting a loop deletes its files.
+- **Assets**: adverts, fillers, stills and the safety message. iPhone HDR / 10-bit / 4:2:2 video is
+  accepted; library copies are kept up to 1920x1080. An asset a loop uses is hidden from the
+  library rather than deleted; the configured safety message cannot be removed.
+- **Cabs** report a heartbeat every few minutes (state of the player, update progress, signal,
+  position from GPS or the mobile mast). A cab is shown offline after 3 missed heartbeats (never
+  less than 10 minutes).
 
-1. Copy `.env.example` to `.env`.
-2. Install dependencies:
+## Running it locally
 
-```bash
-npm install
-```
-
-3. Generate Prisma client and push the schema:
-
-```bash
-npm run db:generate
-npm run db:push
-npm run db:seed
-```
-
-4. Start the web app:
-
-```bash
-npm run dev:web
-```
-
-5. Optional: start the async worker in another shell:
-
-```bash
-npm run dev:worker
-```
-
-Default seeded login:
-
-- Email: `admin@orisonscreens.com`
-- Password: `ChangeMe123!`
-
-Override both with `DEFAULT_ADMIN_EMAIL` and `DEFAULT_ADMIN_PASSWORD`.
-
-## Docker
+Needs Node 22 (the image uses 22.23.4), PostgreSQL, and `ffmpeg`/`ffprobe` on the PATH (Ubuntu
+24.04's ffmpeg 6.1 is what production runs; publishing and media processing need it).
 
 ```bash
-docker compose up --build
+npm ci
+cp .env.example .env            # then set DATABASE_URL (and nothing else, for local use)
+set -a && . ./.env && set +a    # the npm scripts read the environment, not .env
+npm run db:generate             # Prisma client
+npm run db:push                 # apply the schema
+npm run db:seed                 # first admin: DEFAULT_ADMIN_EMAIL / DEFAULT_ADMIN_PASSWORD
+npm run dev                     # http://localhost:3000
 ```
 
-Services:
+Without S3 settings, files are stored under `apps/web/tmp/storage` and served by the app itself.
 
-- `app`: Next.js CMS/API
-- `worker`: BullMQ worker
-- `db`: PostgreSQL 16
-- `redis`: Redis 7
+Optional demo data: `npm run demo:seed` builds a demo fleet (8 cabs `DEMO-CAB-01..08`, 2 groups,
+pre-built loops and a ten-slot loop, a day of heartbeats and playback log) in the local database;
+`npm run demo:heartbeat` keeps the demo cabs online; `python3 scripts/demo/simulate-cab.py` runs the
+real cab software against the local server with a fake modem and player.
 
-## Media Pipeline Notes
+## Testing
 
-- Uploads are processed inline by default when `INLINE_MEDIA_JOBS=true`.
-- Set `INLINE_MEDIA_JOBS=false` and run the worker for queue-based processing.
-- `ffmpeg` and `ffprobe` are required for proper video normalization, thumbnails, and loop compilation.
-- Without `ffmpeg`, the web app can still store uploaded assets, but compiled loop publishing will not work.
+| Command | What it covers | Needs |
+|---|---|---|
+| `npm run typecheck` | TypeScript in `packages/shared`, `packages/db`, `apps/web` | `npm run db:generate` first |
+| `npm test` | Web unit tests (`apps/web/test/*.test.ts`): routing, slot rules, uploads in pieces, the middleware matcher, playback metrics, ... | Nothing else (no database, browser or ffmpeg) |
+| `npm run test:device` | Cab software unit tests (`device/tests`) | Python 3 with `requests` and `psutil` |
+| `npm run test:e2e:desktop` | The desktop as staff use it, in Chromium: asset uploads (HDR iPhone clip included), the loop builder, publish, where it plays, pause, delete; uploads in pieces for both desktop flows, with a piece cut off and a page closed mid-upload | A running server (`BASE_URL`, default `http://localhost:3000`), `DATABASE_URL` and `psql` (to remove its test cab), `ffmpeg`, Playwright's Chromium. Creates everything under a unique `E2E-LOOPS-...` prefix and removes it, also after a failure |
+| `npm run test:e2e:mobile` | The phone app in iPhone emulation, checked against what a cab is actually told | The demo data, `ffmpeg`, Chromium. **Reseeds the demo data and starts extra dev servers**: give it its own database and server (see the top of `apps/web/e2e/mobile.e2e.mjs` and its `E2E_*` options) |
+| `python3 apps/web/e2e/billing.e2e.py` | The billing path end to end: real cab software plays scripted journeys, then plays are recomputed and compared with the stored rows, analytics and the CSV export | A running server, `DATABASE_URL`, `psql`, `ffmpeg`, Python with `requests` and `psutil` |
 
-## Device Provisioning
+CI (`.github/workflows/ci.yml`) runs only typecheck, `npm test` and `npm run test:device`, which
+need no browser, database or server. Run the end-to-end suites by hand before a release.
 
-Device code is under [`device/`](/Users/rodrigoagag/Desktop/CMS/device).
+## Deploying (Railway)
 
-Important files:
+Railway builds the `Dockerfile` from the repository on every push to the deployed branch:
 
-- [`device/sync_agent.py`](/Users/rodrigoagag/Desktop/CMS/device/sync_agent.py)
-- [`device/player_manager.py`](/Users/rodrigoagag/Desktop/CMS/device/player_manager.py)
-- [`device/health_monitor.py`](/Users/rodrigoagag/Desktop/CMS/device/health_monitor.py)
-- [`device/bootstrap.sh`](/Users/rodrigoagag/Desktop/CMS/device/bootstrap.sh)
-- [`device/systemd/orison-sync.service`](/Users/rodrigoagag/Desktop/CMS/device/systemd/orison-sync.service)
+1. **Build** (a few minutes): Ubuntu 24.04 with Ubuntu's ffmpeg 6.1.1 and Node 22.23.4 (official
+   tarball, checked against its published sha256); `npm ci`; `prisma generate`; `next build`; dev
+   dependencies removed.
+2. **Pre-deploy** (configured in Railway, not in this repo): `npx tsx packages/db/prisma/seed.ts`.
+   It runs before the new schema is applied, so it only uses columns that exist in every release,
+   skips cleanly when the tables do not exist yet (first deploy), and only creates the first admin
+   if missing. Keep that path working.
+3. **Start** (the image's `CMD`): `prisma db push` applies the schema (additive changes only), the
+   seed runs again (creates the admin on a brand-new database), then `next start` on port 3000
+   with `apps/web/scripts/server-timeouts.cjs` preloaded.
+4. Railway health-checks `GET /login` and then switches traffic to the new container.
 
-Provisioning flow:
+On start the server also removes leftover upload temp folders and abandoned uploads, fills in the
+latest cab state where needed, and schedules the daily retention job.
 
-1. Install the Raspberry Pi base packages from the spec.
-2. Copy the `device/` directory onto the Pi.
-3. Run:
+Media jobs (asset processing, loop compiles, uploads) run one at a time inside the web process.
+A deploy or restart interrupts any that are running: an interrupted publish shows as interrupted
+and can be published again; an upload being converted is marked "Processing was interrupted" and
+must be uploaded again; upload pieces are kept on the container's disk, so a deploy loses uploads
+that were half sent (the browser or phone starts that file again by itself).
 
-```bash
-./bootstrap.sh ORISON-P1-001 your-device-token
+## Environment variables
+
+[`.env.example`](.env.example) lists every variable the app reads, with a one-line explanation.
+In production the ones that matter are `DATABASE_URL`, `SESSION_SECRET`, `APP_URL`,
+`DEVICE_SHARED_TOKEN`, the storage settings (`S3_BUCKET`, `S3_REGION`, `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT`, `S3_FORCE_PATH_STYLE`), and `DEFAULT_ADMIN_EMAIL` /
+`DEFAULT_ADMIN_PASSWORD` for a brand-new database. Everything else has a sensible default.
+
+## Operating it (the facts you need on a bad day)
+
+**Releases are roll-forward only.** The container applies the schema with `prisma db push` on start;
+a previous image refuses to start against a newer schema. If a release is wrong, fix it and deploy
+again; do not redeploy an older image.
+
+**What needs a loop to be published again** (a cab only gets these with a new publish):
+
+- a change of Settings > Screen format (loops on air keep the size they were compiled at);
+- a changed safety message, for cabs on firmware older than 1.2.0 (1.2.0+ get the current one
+  with every check);
+- loops published before the current loop compiler (exact slot timings, sound handling, smaller
+  files, the shared logo still): they keep playing as they are until republished;
+- any edit in the builder ("Changes not yet published" until then).
+
+Changing where a loop plays, pausing, resuming and check-in intervals (Settings, for firmware
+1.2.0+) need no publish: cabs pick them up at their next heartbeat. Cabs on firmware older than
+1.1.0 only look for a new loop every 30 minutes.
+
+**Uploads.** Files up to 500 MB. Pre-built loops and phone videos: MP4, MOV or M4V, up to 14
+minutes. Assets: MP4, MOV, M4V or WebM video, or a JPG, PNG or WebP image.
+Every upload, desktop and phone, goes up in 4 MB pieces: Railway's proxy cuts off a request body
+that takes more than 5 minutes, so a single-request upload of a large file fails in production
+whatever the app allows. A piece that fails is retried by itself; a page or app closed mid-upload
+carries on when the same file is chosen again (pieces are kept for a day). Once all pieces are
+there, the file is converted in the background and the page shows its progress.
+
+**The phone app is open without sign-in** (owner's decision): anyone who has the address can see the
+cabs and change what plays. Their actions are logged as "Phone app (not signed in)" with the
+request's IP; uploads without sign-in are capped (`PHONE_APP_ANON_UPLOADS_PER_HOUR`, default 20 an
+hour in total). Team management, password changes and the whole desktop site always need sign-in.
+**To require sign-in on the phone app again, set `PHONE_APP_REQUIRE_SIGN_IN=true` in Railway and
+restart**; no code change or rebuild. Search engines are told not to index any of the site.
+
+**Advert plays** (dashboard, analytics, CSV export) count video adverts that played to a passenger
+(a journey) or on a cab playing continuously. Never counted as advert plays: stills (counted
+separately as "still showings"), the safety message, journey markers, and full passes of a
+pre-built loop (counted as "pre-built loop passes": the CMS does not know which adverts are inside
+such a video). Advert completion is only reported for entries firmware 1.2.0+ measured; otherwise
+it says "Not measured". Days and times are London time.
+
+**Retention.** Heartbeats are deleted after `HEARTBEAT_RETENTION_DAYS` (default 90, minimum 30).
+Playback logs, which advertisers are billed from, are kept forever unless
+`PLAYBACK_LOG_RETENTION_DAYS` is set (minimum 30). The job runs daily in the web process.
+
+**Pausing.** "Pause all cabs" (Cabs page) stops every screen at its next heartbeat; a single cab can
+be paused from the Cabs page or the phone app. Pausing a loop takes it off air and the confirmation
+says what each cab will play instead.
+
+**Where to look.** Railway's deploy logs show the seed and `db push`; the service logs show media
+job failures (the CMS shows a short reason and puts the detail in the log). The dashboard lists
+cabs that need attention (offline, failing to update, not on the expected loop).
+
+## Repository layout
+
 ```
-
-4. Place fallback media at `/opt/orison/content/fallback/orison_fallback.mp4`.
-5. Enable and start the systemd services.
-
-## Deploying and rolling back
-
-This release (phone app at `/m`, per-cab content, cab locations, firmware 1.1.0) is **roll-forward only**.
-It adds columns, a table and enum values that the container applies with `prisma db push` on start. The
-previous image's `prisma db push` would refuse to drop them, so that container would not start; forcing it
-(`--accept-data-loss`) would also make the old routing play the newest library upload on every cab. If
-something is wrong after deploying, fix forward.
-
-Deploying does not change what any existing cab is served. On data that predates explicit assignments
-the resolver picks loops exactly as the previous one did, including published loops with no
-`publishedAt` (still treated as newest) and published loops with no `manifestUrl` (their cabs are still
-served nothing and keep what they have). `apps/web/test/routing.test.ts` checks this against the previous
-algorithm. To see whether you have any such loops, which is worth cleaning up either way:
-
-```sql
-SELECT id, name FROM "Loop" WHERE status='PUBLISHED' AND ("publishedAt" IS NULL OR "manifestUrl" IS NULL);
+apps/web/                Next.js 14 app: desktop CMS, phone app (/m), API routes, media work
+  src/app/api/devices/   what the cabs call: heartbeat, manifest, playback log
+  src/app/api/uploads/   desktop uploads in pieces (assets and pre-built loops)
+  src/app/api/m/         the phone app's API (its uploads under /api/m/uploads)
+  src/lib/               routing, loop compiler, publishing, media, storage, uploads in pieces
+  src/middleware.ts      sign-in check for pages and API routes (see the comment on its matcher)
+  e2e/                   end-to-end suites (see Testing)
+  test/                  unit tests (npm test)
+packages/db/             Prisma schema, client and the seed
+packages/shared/         zod schemas and constants shared by the app and the seed
+device/                  the cab software (device/README.md)
+scripts/demo/            demo fleet and simulated cab, for local use only
+Dockerfile               the production image Railway builds
 ```
-
-New environment variables (all optional):
-
-- `REQUEST_TIMEOUT_SECONDS` (default `1800`): how long a request body may take to arrive, for phone
-  uploads over mobile data. Set by `apps/web/scripts/server-timeouts.cjs`, which `npm run start` (the
-  Docker `CMD`) preloads. The proxy in front of the app must allow at least as long, or it cuts the
-  upload off first.
-- `OPENCELLID_API_KEY`, `CELL_LOOKUP_DISABLE_PUBLIC`, `CELL_LOOKUP_BEACONDB_URL`, `CELL_LOOKUP_TIMEOUT_MS`,
-  `CELL_LOOKUP_USER_AGENT`: cell-tower lookup for cabs without a GPS fix (see `.env.example`).
-- `PHONE_APP_REQUIRE_SIGN_IN` (default unset = **open**): see "Phone app access" below. Set it to `true` to
-  require sign-in for the phone app again.
-- `PHONE_APP_ANON_UPLOADS_PER_HOUR` (default `20`): most video uploads the open phone app accepts from
-  people who are not signed in, in any rolling hour, all of them together. Signed-in users are not limited.
-
-### Phone app access (no sign-in)
-
-By the owner's decision the phone app at `/m` (and the Home Screen app) opens straight onto the cabs with
-no sign-in. **The site is on a public address: anyone who finds `/m` can see every cab, its driver name and
-position, and change what plays (all cabs, a group, one cab), upload and remove videos, and pause or resume
-a cab.** Search engines are told not to index it (`/robots.txt` disallows everything, pages carry
-`noindex`, responses carry `X-Robots-Tag`), but that only keeps it out of search results.
-
-- Open without signing in: the `/m` pages, every `/api/m/*` route, `GET /api/auth/me` (answers with the
-  shared identity below), and `POST /api/devices/:id/disable` and `/enable` (the phone's pause/resume).
-- Still signed-in only: team management (`/api/users`, Account > Team), changing a password, the whole
-  desktop site and every other API route (including fleet-wide pause, settings, device registration and
-  edits, the loop builder, assets, analytics, groups, and the desktop's `PUT` pause/resume). The device
-  endpoints (`heartbeat`, `manifest`, `playback-log`) are unchanged.
-- Actions taken without signing in are recorded in the activity log as **"Phone app (not signed in)"**
-  (user id `anonymous:phone-app`, not a database row), with the request's IP (`ip`, and the full
-  `forwardedFor` chain) in the event metadata. Anyone who signs in under Account is recorded by name.
-- Uploads from people who are not signed in are capped (`PHONE_APP_ANON_UPLOADS_PER_HOUR`, counted in
-  memory per server process, so a restart starts a fresh hour).
-- **To turn sign-in back on**, set `PHONE_APP_REQUIRE_SIGN_IN=true` in Railway and redeploy/restart. The
-  phone app then behaves exactly as before (sign-in screen, everyone signs in with their own account).
-  Unset it (or set `false`) to open it again. No code change or rebuild either way.
-
-Behaviour changes to expect:
-
-- The desktop site now shows a cab as offline after 3 missed heartbeats (15 minutes with the default
-  5-minute heartbeat, never less than 10 minutes) instead of after an hour.
-- Cabs on firmware before 1.1.0 (every cab in the field at deploy time) only pick up changes every
-  30 minutes; the phone app says so. After the firmware update they change within one heartbeat.
-- Signing in now lasts 30 days. Changing a password, an admin password reset, a role change or deleting
-  a user signs that person out everywhere (the person changing their own password stays signed in on
-  that device).
-
-Firmware rollout (cab Raspberry Pis, `device/`):
-
-1. Test on one cab first. Package `device/` as a tarball, then on that Pi run
-   `./update.sh <tarball URL>` (stops the services, copies the files including `VERSION`, starts them).
-2. Fit the GNSS antenna to the modem's GNSS port. Without it the cab still works and reports an
-   approximate position from the mobile mast. GPS is on unless `location.gpsEnabled` is `false` in
-   `/opt/orison/config.json`; older config files without that section are fine.
-3. Check that cab in the phone app: software version `1.1.0` under Technical details, a GPS position,
-   and that a change of video reaches it within about 5 minutes. Then update the rest.
-
-Installing the phone app on an iPhone: open the site in **Safari** (phones are sent to `/m`), tap
-**Share**, then **Add to Home Screen**. It then opens full screen like an app, straight onto the cabs (no
-sign-in unless `PHONE_APP_REQUIRE_SIGN_IN` is set). Admins sign in under Account to manage the team.
-
-The app's icons and the windmill in its header are generated from the company logo
-(`apps/web/assets/orison-logo.png`) by `node apps/web/scripts/generate-mobile-icons.mjs`, which writes
-`apps/web/public/m-app/*.png` (committed; nothing runs at build time).
-
-## Operational Notes
-
-- The pilot uses a single compiled loop file for simpler device playback.
-- Manifest metadata is still generated and stored so the device can validate and log proof-of-play against slot boundaries.
-- Local storage is supported for development through `/api/storage/*`; production should use S3-compatible storage plus a CDN.
-- Device auth supports a shared bearer token via `DEVICE_SHARED_TOKEN`, and the schema also allows per-device token hashes.
