@@ -8,7 +8,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { clockTime, ago } from "../lib/format";
 import { cabTone, toneWord, type Tone } from "../lib/status";
 import type { CabSummary } from "../lib/types";
-import { useConnection } from "../lib/store";
+import { oldestVisibleUpdate, useConnection } from "../lib/store";
 import { AlertIcon, BackIcon, CloseIcon, InfoIcon, OfflineIcon, PauseIcon, RefreshIcon, SwitchIcon, VideosIcon } from "./icons";
 import { useNavDepth } from "./nav-depth";
 
@@ -159,10 +159,16 @@ export function Freshness({
 export function ConnectionNotice() {
   const connection = useConnection();
   if (!connection.offline) return null;
+  // The age of what is on screen, not when the connection dropped (which can be much later).
+  const dataAt = oldestVisibleUpdate();
   return (
     <div className="m-offline" role="status" data-testid="offline-notice">
       <OfflineIcon size={16} />
-      <span>No connection. Showing the last update ({ago(connection.since)}); it refreshes when you&rsquo;re back online.</span>
+      <span>
+        {dataAt
+          ? `No connection. Showing what we last heard at ${clockTime(dataAt)}${Date.now() - dataAt >= 60_000 ? ` (${ago(dataAt)})` : ""}; it refreshes when you’re back online.`
+          : "No connection. This refreshes when you’re back online."}
+      </span>
     </div>
   );
 }
