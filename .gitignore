@@ -19,5 +19,8 @@ __pycache__
 packages/db/generated
 *.tsbuildinfo
 
-# written by device/demo.py when run from a checkout
+# a cab's config must never be committed
 device/config.json
+
+# screenshots written by the end-to-end suites
+apps/web/e2e/shots*/
