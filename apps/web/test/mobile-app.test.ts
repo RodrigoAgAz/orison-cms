@@ -5,9 +5,9 @@ import {
   BUILT_IN_LOOP_ID,
   normalizePlayerStatus,
   positionReportingFrom,
-  reportsJourneysFor,
   splitSignal,
 } from "../src/lib/mobile";
+import { reportsJourneys } from "../src/lib/device-status";
 import { api, ApiFailure } from "../src/mobile/lib/api";
 import { londonYesterdayKey, preparingWords, when, whenLong } from "../src/mobile/lib/format";
 import {
@@ -131,11 +131,11 @@ describe("what a cab reports", () => {
     assert.equal(positionReportingFrom({ locationMethod: null }), "none");
   });
   it("journey wording: the trigger decides once known, else evidence", () => {
-    assert.equal(reportsJourneysFor(null, false), false);
-    assert.equal(reportsJourneysFor(null, true), true);
-    assert.equal(reportsJourneysFor("gpio", false), true);
-    assert.equal(reportsJourneysFor("keyboard", false), true);
-    assert.equal(reportsJourneysFor("always", true), false);
+    assert.equal(reportsJourneys(null, false), false);
+    assert.equal(reportsJourneys(null, true), true);
+    assert.equal(reportsJourneys("gpio", false), true);
+    assert.equal(reportsJourneys("keyboard", false), true);
+    assert.equal(reportsJourneys("always", true), false);
   });
   it("player statuses, including the new ones", () => {
     assert.equal(normalizePlayerStatus("playing"), "journey");
@@ -293,6 +293,6 @@ describe("update state and screen activity (firmware 1.2.0 fields)", () => {
   it("always mode plays continuously; the safety message says so", () => {
     assert.equal(passengerLine({ status: "online", playerStatus: "journey", reportsJourneys: false, playbackTrigger: "always" }), "Playing the video continuously");
     assert.equal(passengerLine({ status: "online", playerStatus: "journey", reportsJourneys: true, playerState: "SAFETY" }), "Safety message playing");
-    assert.equal(reportsJourneysFor("always", true), false);
+    assert.equal(reportsJourneys("always", true), false);
   });
 });

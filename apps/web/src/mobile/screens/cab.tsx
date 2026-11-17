@@ -320,7 +320,8 @@ export function CabScreen({ id }: { id: string }) {
             ["Running since restart", data.uptimeSeconds !== null ? duration(data.uptimeSeconds) : "Off"],
             [reporting ? "Mobile signal" : "Mobile signal (last reported)", signalWords(data.signalStrength, data.signalPercent, data.signalDbm)],
             ["Position", positionWords(data)],
-            ["Connection", data.networkType ? data.networkType.toUpperCase() : "Unknown"],
+            // Firmware before 1.2.0 always says "4g", so the server leaves it out (as the desktop does).
+            ["Connection", data.networkType ? data.networkType.toUpperCase() : data.lastSeenAt ? "Not reported" : "Unknown"],
             [reporting ? "Free storage" : "Free storage (last reported)", data.storageFreeMb !== null ? `${(data.storageFreeMb / 1024).toFixed(1)} GB` : "Unknown"],
             [reporting ? "Temperature" : "Temperature (last reported)", data.cpuTemp !== null ? `${Math.round(data.cpuTemp)}°C` : "Unknown"],
             [

@@ -24,7 +24,7 @@
 // mid-upload and which carries on from the server's pieces when the same file is chosen again.
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -601,6 +601,122 @@ async function main() {
     const pauseFirst = await json(await api.post(`${BASE}/api/loops/${loopResult.loopId}/pause`, { data: {} }));
     if (pauseFirst.token) await api.post(`${BASE}/api/loops/${loopResult.loopId}/pause`, { data: { token: pauseFirst.token } });
     check(JSON.stringify(await cabAnswer(cabSerial)) === JSON.stringify(cabBefore), "paused: the cab is back to what it played before the test");
+
+    step("A loop published before this release (old format), as production has eleven of");
+    // Built the way the old publish code left loops: slots in the database, an old-format manifest
+    // (no formatVersion/slotCount/video block, a per-loop placeholder still), an old video, and every
+    // column added in this release null. Needs local storage and DATABASE_URL; skipped otherwise.
+    const storageRoot = path.join(here, "..", "tmp", "storage");
+    if (!process.env.DATABASE_URL || !existsSync(storageRoot)) {
+      console.log("  (skipped: needs DATABASE_URL and local storage under apps/web/tmp/storage)");
+    } else {
+      const legacyId = `${PREFIX.toLowerCase()}-legacy`;
+      created.loops.push(legacyId);
+      const source = await json(await api.get(`${BASE}/api/loops/${copyId}`));
+      const oldVideoKey = `loops/${legacyId}/1794700000000-old.mp4`;
+      const oldStillKey = `loops/${legacyId}/1794700000000-old-static-fallback.jpg`;
+      const oldManifestKey = `manifests/${legacyId}/1794700000000-old.json`;
+      mkdirSync(path.join(storageRoot, "loops", legacyId), { recursive: true });
+      mkdirSync(path.join(storageRoot, "manifests", legacyId), { recursive: true });
+      await run("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=1280x800:r=30", "-f", "lavfi", "-i", "sine=frequency=300", "-t", "4", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", path.join(storageRoot, oldVideoKey)]);
+      await run("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x0a1628:s=1280x800", "-frames:v", "1", path.join(storageRoot, oldStillKey)]);
+      const url = (key) => `${BASE}/api/storage/${key}`;
+      const oldManifest = {
+        version: "1.0",
+        loopId: legacyId,
+        loopName: `${PREFIX} legacy`,
+        targetGroupId: created.groups[1],
+        publishedAt: new Date(Date.now() - 86_400_000).toISOString(),
+        totalDurationMs: 600000,
+        slots: source.slots.map((slot) => ({
+          position: slot.position,
+          staticImageAssetId: slot.staticCreativeId ?? null,
+          staticImageUrl: url(oldStillKey),
+          staticImageChecksum: "sha256:old",
+          advertisementVideoUrl: null,
+          contents: slot.contents.map((content) => ({
+            type: content.contentType,
+            assetId: content.assetId,
+            filename: content.asset.filename,
+            url: url(content.asset.s3Key),
+            checksum: content.asset.checksum ?? "",
+            startTimeMs: content.startTimeMs,
+            durationMs: content.durationMs,
+            fileSizeBytes: content.asset.fileSize,
+          })),
+        })),
+        totalDownloadSizeBytes: 1,
+        compiledVideoUrl: url(oldVideoKey),
+        compiledVideoChecksum: "sha256:old",
+        checksum: "sha256:oldmanifest",
+      };
+      writeFileSync(path.join(storageRoot, oldManifestKey), JSON.stringify(oldManifest, null, 2));
+      const q = (value) => (value === null || value === undefined ? "NULL" : `'${String(value).replace(/'/g, "''")}'`);
+      const statements = [
+        `INSERT INTO "Loop" (id, name, status, version, checksum, "targetGroupId", "publishedAt", "publishedBy", "manifestUrl", "manifestKey", "compiledVideoUrl", "compiledVideoKey", "autoLive", "createdAt", "updatedAt") VALUES (${q(legacyId)}, ${q(`${PREFIX} legacy`)}, 'PUBLISHED', 3, 'sha256:oldmanifest', ${q(created.groups[1])}, now() - interval '1 day', NULL, ${q(url(oldManifestKey))}, ${q(oldManifestKey)}, ${q(url(oldVideoKey))}, ${q(oldVideoKey)}, true, now() - interval '2 days', now() - interval '1 day')`,
+        ...source.slots.flatMap((slot) => [
+          `INSERT INTO "Slot" (id, "loopId", position, "staticCreativeId", "createdAt", "updatedAt") VALUES (${q(`${legacyId}-s${slot.position}`)}, ${q(legacyId)}, ${slot.position}, ${q(slot.staticCreativeId)}, now() - interval '2 days', now() - interval '2 days')`,
+          ...slot.contents.map((content, index) =>
+            `INSERT INTO "SlotContent" (id, "slotId", "assetId", "orderInSlot", "startTimeMs", "durationMs", "contentType", "updatedAt") VALUES (${q(`${legacyId}-c${slot.position}-${index}`)}, ${q(`${legacyId}-s${slot.position}`)}, ${q(content.assetId)}, ${content.orderInSlot}, ${content.startTimeMs}, ${content.durationMs}, '${content.contentType}', now() - interval '2 days')`,
+          ),
+        ]),
+      ];
+      await run("psql", [process.env.DATABASE_URL, "-v", "ON_ERROR_STOP=1", "-q", "-c", `BEGIN; ${statements.join("; ")}; COMMIT;`]).catch((error) => {
+        throw new Error(`could not insert the old-format loop: ${String(error.stderr ?? error.message).split("\n")[0]}`);
+      });
+      await api.put(`${BASE}/api/devices/${cab.id}`, { data: { groupId: created.groups[1] } });
+      const legacyCab = await cabAnswer(cabSerial);
+      check(legacyCab.loopId === legacyId && legacyCab.checksum === "sha256:oldmanifest", "the cab in its group is told to play the old loop");
+
+      await page.goto(`${BASE}/loops/${legacyId}`);
+      await page.waitForSelector(".lb-slot");
+      await page.waitForTimeout(800);
+      await shot("legacy-builder");
+      check((await page.locator(".lx-badge-warn", { hasText: "Changes not yet published" }).count()) === 0, "an old loop nobody edited does not claim unpublished changes");
+      check(await page.locator(".lx-note", { hasText: "Published before this update" }).isVisible(), "it says, calmly, that it plays as it was until published again");
+      check((await page.locator(".lb-slot .media-poster-overlay.is-visible", { hasText: "No advert" }).count()) === 0, "slot tiles never say \"No advert\" for a slot that has one");
+      await page.goto(`${BASE}/loops`);
+      const legacyRow = page.locator("tr", { hasText: `${PREFIX} legacy` }).first();
+      const legacyRowText = await legacyRow.innerText();
+      check(/Published before the update/.test(legacyRowText) && !/Changes not yet published/.test(legacyRowText), "the list says the same, without claiming changes");
+
+      // A real edit to it still shows as unpublished; putting it back clears it again.
+      const slot0 = (await json(await api.get(`${BASE}/api/loops/${legacyId}`))).slots.find((slot) => slot.position === 0);
+      const original = slot0.contents.map(({ assetId, orderInSlot, startTimeMs, durationMs, contentType }) => ({ assetId, orderInSlot, startTimeMs, durationMs, contentType }));
+      const edited = original.map((content, index) => (index === original.length - 1 ? { ...content, startTimeMs: content.startTimeMs - 1000, durationMs: content.durationMs + 1000 } : index === original.length - 2 ? { ...content, durationMs: content.durationMs - 1000 } : content));
+      let saved = await json(await api.put(`${BASE}/api/loops/${legacyId}/slots`, { data: { slots: [{ position: 0, contents: edited, expectedUpdatedAt: slot0.updatedAt }] } }));
+      check(saved.state?.unpublishedChanges === true, "a real edit to the old loop shows \"changes not yet published\"");
+      const stamp = saved.slots.find((slot) => slot.position === 0).updatedAt;
+      saved = await json(await api.put(`${BASE}/api/loops/${legacyId}/slots`, { data: { slots: [{ position: 0, contents: original, expectedUpdatedAt: stamp }] } }));
+      check(saved.state?.unpublishedChanges === false, "undoing the edit by hand clears it");
+
+      // Its first publish under the new code compiles it, keeps the old version on air meanwhile,
+      // then retires the old objects.
+      const answers = [];
+      let polling = true;
+      const poller = (async () => {
+        while (polling) {
+          answers.push((await cabAnswer(cabSerial)).checksum);
+          await page.waitForTimeout(500);
+        }
+      })();
+      await api.post(`${BASE}/api/loops/${legacyId}/publish`);
+      let legacyState = {};
+      for (let wait = 0; wait < 600; wait += 1) {
+        legacyState = (await json(await api.get(`${BASE}/api/loops/${legacyId}/publish`))).state;
+        if (legacyState.publish.kind !== "running") break;
+        await page.waitForTimeout(1000);
+      }
+      polling = false;
+      await poller;
+      answers.push((await cabAnswer(cabSerial)).checksum); // the answer once it has finished
+      const order = answers.filter((value, index) => value !== answers[index - 1]);
+      check(legacyState.status === "PUBLISHED" && !legacyState.publishError && !legacyState.publishedBeforeUpdate, `published again with the new compiler (${legacyState.publishError ?? "ok"})`);
+      check(order[0] === "sha256:oldmanifest" && order.length === 2, `the old version stayed on air until the new one swapped in (${order.length} distinct answers)`);
+      const retired = await run("psql", [process.env.DATABASE_URL, "-At", "-c", `SELECT "retiredObjects" FROM "Loop" WHERE id='${legacyId}'`]);
+      check([oldVideoKey, oldManifestKey, oldStillKey].every((key) => retired.stdout.includes(key)), "its old video, manifest and placeholder still are retired (deleted after the grace period)");
+      await api.put(`${BASE}/api/devices/${cab.id}`, { data: { groupId: created.groups[0] } });
+    }
 
     step("Routing: the demo cabs were never touched");
     check(JSON.stringify(await demoAnswers()) === JSON.stringify(demoBefore), "all eight demo cabs are told exactly what they were told before");

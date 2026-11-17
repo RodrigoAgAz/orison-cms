@@ -28,7 +28,7 @@
 // rolling hour by default), so up to about six runs an hour fit.
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -1160,6 +1160,7 @@ async function openSuite(browser) {
     await page.locator('[data-testid="tech-details"] summary').click();
     const old = await page.getByTestId("tech-details").innerText();
     assert(/1\.0\.0 · acts on a change within about 30 minutes/.test(old) && /Not reported \(older software\)/.test(old), `1.0.0 tech: ${old}`);
+    assert(!/4G/.test(old) && /Connection\s+Not reported/.test(old), `1.0.0 firmware hard-codes 4g, so no network type: ${old}`);
     await shot(page, "demo-cab-1.0.0", { fullPage: true });
     // A video still shown by the failing cab is not "not playing anywhere".
     const springRow = (await anon("/api/m/loops")).body.items.find((loop) => loop.id === spring.id);
@@ -1732,19 +1733,26 @@ async function uploadCeilingSuite(browser, base) {
     const file = await makeBigVideo(path.join(workDir, "ceiling-multi.mov"), 10);
     const first = await uploadInPieces(anonymous, file, { name: `E2E ceiling multi ${RUN_ID}`, fingerprint: `e2e-ceiling-multi-${RUN_ID}` });
     assert(first.completed?.status === 202 && first.pieceCount >= 3, `multi-piece upload: ${JSON.stringify({ status: first.completed?.status, pieces: first.pieceCount })}`);
+    created.loops.add(first.completed.body.loopId);
+    // Let it finish preparing before this server is stopped, so nothing is left half-made.
+    for (let i = 0; i < 90; i += 1) {
+      const state = (await anonymous(`/api/m/loops/${first.completed.body.loopId}`)).body?.processing?.state;
+      if (state && state !== "processing") break;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
     const again = await opening(`E2E ceiling multi ${RUN_ID}`, statSync(file).size, `e2e-ceiling-multi-other-${RUN_ID}`);
     assert(again.status === 201, `second video allowed: ${again.status}`);
     // Carrying on with that same (unfinished) file does not count again.
     const resumed = await opening(`E2E ceiling multi ${RUN_ID}`, statSync(file).size, `e2e-ceiling-multi-other-${RUN_ID}`);
     assert(resumed.status === 200 && resumed.body.resumed === true, `resumed: ${resumed.status}`);
-    const third = await opening("E2E ceiling 3");
+    const third = await opening(`E2E ceiling 3 ${RUN_ID}`);
     assert(third.status === 201, `third video allowed: ${third.status} ${JSON.stringify(third.body)}`);
-    const refused = await opening("E2E ceiling 4");
+    const refused = await opening(`E2E ceiling 4 ${RUN_ID}`);
     assert(refused.status === 429, `4th video ${refused.status}`);
     assert(/3 video uploads in the last hour/.test(refused.body.error) && /Try again in \d+ minutes?/.test(refused.body.error), refused.body.error);
     // Signed-in users are not limited.
     const admin = await adminSession(base);
-    const adminOpen = await admin("/api/m/uploads", { method: "POST", json: { name: "E2E ceiling admin", fileName: "clip.mov", size: 10, fingerprint: `e2e-ceiling-admin-${RUN_ID}` } });
+    const adminOpen = await admin("/api/m/uploads", { method: "POST", json: { name: `E2E ceiling admin ${RUN_ID}`, fileName: "clip.mov", size: 10, fingerprint: `e2e-ceiling-admin-${RUN_ID}` } });
     assert(adminOpen.status === 201, `admin allowed: ${adminOpen.status}`);
     // A file that isn't a video is refused at its first piece, not after all of it.
     const pieceUrl = `/api/m/uploads/${adminOpen.body.uploadId}/pieces/0`;
@@ -1929,16 +1937,42 @@ async function iconContactSheet(browser) {
   }
 }
 
+function removeEmptyDir(dir) {
+  try {
+    if (existsSync(dir) && readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // leave it
+  }
+}
+
 async function cleanup() {
   console.log("- restoring demo data ...");
   try {
     await npm("demo:seed");
-    // Clear the cab override this run may have left and archive the videos it uploaded.
+    // Delete the videos this run uploaded, with their files: take each off the library (archive),
+    // then delete it through the desktop API, which removes its stored objects too.
     const admin = await adminSession();
-    const loops = (await admin("/api/m/loops")).body;
-    for (const loop of loops.items ?? []) {
-      if (loop.name.includes(RUN_ID) || created.loops.has(loop.id)) {
-        await admin(`/api/m/loops/${loop.id}/archive`, { method: "POST" });
+    const mine = await db().loop.findMany({
+      where: { OR: [{ name: { contains: RUN_ID } }, { id: { in: [...created.loops] } }] },
+      select: { id: true, name: true, status: true },
+    });
+    for (const loop of mine) {
+      if (loop.status === "PUBLISHED") await admin(`/api/m/loops/${loop.id}/archive`, { method: "POST" });
+      const deleted = await admin(`/api/loops/${loop.id}`, { method: "DELETE" });
+      if (deleted.status !== 200) console.log(`  could not delete "${loop.name}": ${deleted.status} ${JSON.stringify(deleted.body)}`);
+      // Local storage deletes the files but keeps their (now empty) folders.
+      for (const folder of ["loops", "manifests"]) removeEmptyDir(path.join(webDir, "tmp/storage", folder, loop.id));
+    }
+    // Upload sessions this run opened (pieces or, once finished, just their note).
+    const sessionsRoot = process.env.UPLOAD_SESSIONS_DIR || path.join(os.tmpdir(), "orison-upload-sessions");
+    for (const name of existsSync(sessionsRoot) ? readdirSync(sessionsRoot) : []) {
+      try {
+        const meta = JSON.parse(readFileSync(path.join(sessionsRoot, name, "meta.json"), "utf8"));
+        if ((meta.scope ?? "phone") === "phone" && (String(meta.data?.name ?? "").includes(RUN_ID) || String(meta.fingerprint).includes(RUN_ID))) {
+          rmSync(path.join(sessionsRoot, name), { recursive: true, force: true });
+        }
+      } catch {
+        // not a session, or being written: leave it
       }
     }
     const users = (await admin("/api/users")).body;

@@ -187,7 +187,8 @@ export async function saveSlots(loopId: string, saves: SlotSave[]) {
           `Slot ${save.position + 1} was changed by someone else after you opened this loop. Reload to see their version, then make your change again.`,
         );
       }
-      await tx.slot.update({ where: { id: slot.id }, data: { staticCreativeId: save.staticCreativeId ?? null } });
+      // Leaving staticCreativeId out keeps the slot's still image; null clears it.
+      await tx.slot.update({ where: { id: slot.id }, data: save.staticCreativeId === undefined ? { updatedAt: new Date() } : { staticCreativeId: save.staticCreativeId } });
       await tx.slotContent.deleteMany({ where: { slotId: slot.id } });
       await tx.slotContent.createMany({
         data: save.contents.map((content) => ({
